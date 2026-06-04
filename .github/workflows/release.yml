@@ -35,14 +35,19 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           PKG="$(node -p "require('./packages/server/package.json').version")"
-          echo "tag=$TAG package=$PKG"
+          EXT="$(node -p "require('./packages/extension/manifest.json').version")"
+          echo "tag=$TAG package=$PKG extension=$EXT"
           test "$TAG" = "$PKG" || { echo "::error::Tag v$TAG does not match r-mcp@$PKG"; exit 1; }
+          test "$TAG" = "$EXT" || { echo "::error::Tag v$TAG does not match extension@$EXT"; exit 1; }
 
       - name: Typecheck
         run: pnpm -r --if-present typecheck
 
       - name: Test
         run: pnpm -r --if-present test
+
+      - name: Build
+        run: pnpm -r --if-present build
 
       - name: Publish r-mcp to npm (with provenance)
         working-directory: packages/server
@@ -52,12 +57,10 @@ jobs:
           echo "Publishing r-mcp@$VERSION with dist-tag '$DIST_TAG'"
           pnpm publish --access public --no-git-checks --provenance --tag "$DIST_TAG"
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: true
 
-      - name: Build + zip the extension
+      - name: Zip the extension
         run: |
-          pnpm --filter @r-mcp/extension build
           cd packages/extension/dist
           zip -r "$GITHUB_WORKSPACE/r-mcp-extension-${GITHUB_REF_NAME}.zip" .
 

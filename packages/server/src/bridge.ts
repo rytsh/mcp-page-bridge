@@ -30,12 +30,19 @@ import {
   WS_SUBPROTOCOL,
   namespaceName,
   sanitizeLabel,
-  type ProviderMeta,
 } from "@r-mcp/protocol";
 import { DASHBOARD_HTML, FAVICON_SVG } from "./dashboard.js";
 import { WebSocketServerTransport } from "./ws-transport.js";
 
 const META_LIST_CLIENTS = "rmcp_list_clients";
+
+interface ProviderMeta {
+  url?: string;
+  title?: string;
+  userAgent?: string;
+  tabId?: number;
+  providerId?: string;
+}
 
 /** A connected browser MCP server (one per WebSocket connection). */
 interface Provider {

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { WebSocketClientTransport } from "@modelcontextprotocol/sdk/client/websocket.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createBridge, type Bridge } from "r-mcp/bridge";
+import { createBridge, type Bridge } from "../../server/src/bridge.js";
 import { EmbeddedMcpServer, type MinimalTransport } from "./embedded-server.js";
 
 /**

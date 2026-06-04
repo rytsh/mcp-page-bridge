@@ -14,7 +14,10 @@
     "r-mcp": "./dist/cli.js"
   },
   "exports": {
-    "./bridge": "./src/bridge.ts"
+    "./bridge": {
+      "types": "./dist/bridge.d.ts",
+      "import": "./dist/bridge.js"
+    }
   },
   "files": ["dist"],
   "engines": {
