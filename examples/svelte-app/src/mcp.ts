@@ -1,5 +1,5 @@
 /**
- * Declares this Svelte app's tools for the r-mcp browser extension. This is safe
+ * Declares this Svelte app's tools for the mcp-page-bridge browser extension. This is safe
  * even when the extension is not installed; it is just data on window.mcp.
  */
 import { app, addTodo, increment, setCount, snapshot, toggleTodo } from "./store.svelte";

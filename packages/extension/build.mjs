@@ -49,7 +49,7 @@ if (watch) {
   );
   await Promise.all(ctxs.map((c) => c.watch()));
   await copyStatic();
-  console.log(`[r-mcp/extension] watching → ${outdir}/`);
+  console.log(`[mcp-page-bridge/extension] watching → ${outdir}/`);
 } else {
   await Promise.all(
     Object.entries(entries).map(([name, entry]) =>
@@ -57,5 +57,5 @@ if (watch) {
     ),
   );
   await copyStatic();
-  console.log(`[r-mcp/extension] built → ${outdir}/`);
+  console.log(`[mcp-page-bridge/extension] built → ${outdir}/`);
 }

@@ -1,13 +1,13 @@
 /**
  * MAIN-world transport that tunnels MCP JSON-RPC from a page's MCP server
  * (embedded or full-SDK) out to the service worker via window.postMessage, and
- * from there over a WebSocket to the r-mcp bridge.
+ * from there over a WebSocket to the mcp-page-bridge bridge.
  *
  * Lives in the page (MAIN) world. The content script (ISOLATED) relays these
  * postMessages to/from the SW. `start()` opens the upstream socket lazily (only
  * once the tab is activated), so a page can register tools before connecting.
  */
-import type { ChannelMessage } from "@r-mcp/protocol";
+import type { ChannelMessage } from "@mcp-page-bridge/protocol";
 import type { MinimalTransport } from "./embedded-server.js";
 
 let counter = 0;
@@ -26,8 +26,8 @@ export function allTransports(): TunnelTransport[] {
   return [...registry.values()];
 }
 
-function postUp(message: Omit<ChannelMessage, "__rmcp" | "dir">): void {
-  const full: ChannelMessage = { __rmcp: true, dir: "up", ...message };
+function postUp(message: Omit<ChannelMessage, "__mcpPageBridge" | "dir">): void {
+  const full: ChannelMessage = { __mcpPageBridge: true, dir: "up", ...message };
   window.postMessage(full, "*");
 }
 

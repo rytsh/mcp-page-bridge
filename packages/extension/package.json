@@ -1,9 +1,9 @@
 {
-  "name": "@r-mcp/extension",
+  "name": "@mcp-page-bridge/extension",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "r-mcp browser extension (MV3): exposes a page's MCP server to the agent via the bridge",
+  "description": "mcp-page-bridge browser extension (MV3): exposes a page's MCP server to the agent via the bridge",
   "scripts": {
     "build": "node build.mjs",
     "dev": "node build.mjs --watch",
@@ -14,11 +14,11 @@
     "./embedded-server": "./src/embedded-server.ts"
   },
   "dependencies": {
-    "@r-mcp/protocol": "workspace:*"
+    "@mcp-page-bridge/protocol": "workspace:*"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "r-mcp": "workspace:*",
+    "mcp-page-bridge": "workspace:*",
     "@types/chrome": "^0.0.287",
     "@types/node": "^22.10.2",
     "esbuild": "^0.24.2",

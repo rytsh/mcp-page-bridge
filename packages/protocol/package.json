@@ -1,9 +1,9 @@
 {
-  "name": "@r-mcp/protocol",
+  "name": "@mcp-page-bridge/protocol",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Shared constants/helpers for the r-mcp bridge and browser client",
+  "description": "Shared constants/helpers for the mcp-page-bridge bridge and browser client",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {

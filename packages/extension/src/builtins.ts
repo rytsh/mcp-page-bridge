@@ -288,7 +288,7 @@ export function registerBuiltins(
         type: "object",
         properties: {
           download: { type: "boolean", description: "also save the PNG to Downloads" },
-          filename: { type: "string", description: "download filename (default r-mcp-<ts>.png)" },
+          filename: { type: "string", description: "download filename (default mcp-page-bridge-<ts>.png)" },
         },
       },
     },

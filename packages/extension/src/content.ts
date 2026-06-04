@@ -6,18 +6,18 @@
  * Guarded against double-injection: the manifest content_script and a runtime
  * chrome.scripting injection (for already-open tabs) share this ISOLATED world.
  */
-import type { ChannelMessage } from "@r-mcp/protocol";
+import type { ChannelMessage } from "@mcp-page-bridge/protocol";
 
-const guard = window as unknown as { __rmcpContent?: boolean };
+const guard = window as unknown as { __mcpPageBridgeContent?: boolean };
 
-if (!guard.__rmcpContent) {
-  guard.__rmcpContent = true;
+if (!guard.__mcpPageBridgeContent) {
+  guard.__mcpPageBridgeContent = true;
 
   const isChannelMessage = (value: unknown): value is ChannelMessage =>
-    !!value && typeof value === "object" && (value as { __rmcp?: unknown }).__rmcp === true;
+    !!value && typeof value === "object" && (value as { __mcpPageBridge?: unknown }).__mcpPageBridge === true;
 
   const helloMsg: ChannelMessage = {
-    __rmcp: true,
+    __mcpPageBridge: true,
     dir: "up",
     providerId: "*",
     kind: "control",
@@ -27,7 +27,7 @@ if (!guard.__rmcpContent) {
   let port: chrome.runtime.Port | undefined;
 
   const connect = (): void => {
-    port = chrome.runtime.connect({ name: "rmcp" });
+    port = chrome.runtime.connect({ name: "mcp-page-bridge" });
 
     // SW -> page (MAIN)
     port.onMessage.addListener((data: unknown) => {
@@ -40,7 +40,7 @@ if (!guard.__rmcpContent) {
       // Tell the page to deactivate, then try to reconnect (e.g. SW recycled).
       window.postMessage(
         {
-          __rmcp: true,
+          __mcpPageBridge: true,
           dir: "down",
           providerId: "*",
           kind: "control",

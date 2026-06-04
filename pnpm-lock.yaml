@@ -28,7 +28,7 @@ importers:
 
   packages/extension:
     dependencies:
-      '@r-mcp/protocol':
+      '@mcp-page-bridge/protocol':
         specifier: workspace:*
         version: link:../protocol
     devDependencies:
@@ -44,7 +44,7 @@ importers:
       esbuild:
         specifier: ^0.24.2
         version: 0.24.2
-      r-mcp:
+      mcp-page-bridge:
         specifier: workspace:*
         version: link:../server
       typescript:
@@ -65,7 +65,7 @@ importers:
         specifier: ^8.21.0
         version: 8.21.0
     devDependencies:
-      '@r-mcp/protocol':
+      '@mcp-page-bridge/protocol':
         specifier: workspace:*
         version: link:../protocol
       '@types/node':

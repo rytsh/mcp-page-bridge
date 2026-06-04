@@ -20,7 +20,7 @@ async function setup() {
         const filename = (args as { filename?: string } | undefined)?.filename;
         return {
           dataUrl: "data:image/png;base64,QUJD",
-          savedAs: download ? filename ?? "r-mcp.png" : undefined,
+          savedAs: download ? filename ?? "mcp-page-bridge.png" : undefined,
         };
       }
       return { ok: true };

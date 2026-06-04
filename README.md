@@ -1,14 +1,14 @@
 <p align="center">
-  <img src="assets/favicon.svg" alt="r-mcp" width="96" height="96" />
+  <img src="assets/favicon.svg" alt="mcp-page-bridge" width="96" height="96" />
 </p>
 
-<h1 align="center">r-mcp</h1>
+<h1 align="center">mcp-page-bridge</h1>
 
 <p align="center">
   Bridge a <strong>live browser page's MCP server</strong> to a coding agent (opencode, Claude, …).
 </p>
 
-A page exposes its own tools with `window.mcp` (injected by the r-mcp browser
+A page exposes its own tools with `window.mcp` (injected by the mcp-page-bridge browser
 extension). The extension tunnels them over a WebSocket to a local bridge, and
 the bridge re-exposes everything to the agent as a standard MCP server over
 stdio. The agent can then call the page's tools directly.
@@ -17,7 +17,7 @@ stdio. The agent can then call the page's tools directly.
 flowchart LR
     A["Agent<br/>opencode · Claude · …"]
 
-    subgraph bridge["r-mcp bridge (Node)"]
+    subgraph bridge["mcp-page-bridge (Node)"]
         B["MCP server over stdio<br/>aggregating proxy<br/>1 MCP Client per tab<br/>tools → label__tool"]
         D["Dashboard + JSON API<br/>/ · /api/providers"]
     end
@@ -53,7 +53,7 @@ flowchart LR
 ```
 packages/
   protocol/    shared helpers + the internal channel envelope (dependency-free)
-  server/      the r-mcp bridge: stdio MCP server + WS server + aggregating proxy
+  server/      the mcp-page-bridge bridge: stdio MCP server + WS server + aggregating proxy
   extension/   MV3 extension: inject (window.mcp), content relay, SW, popup
 examples/
   demo-app/    static page exposing tools via window.mcp
@@ -62,8 +62,8 @@ examples/
 
 ## Examples
 
-- `examples/demo-app` — zero-build static page. `pnpm --filter @r-mcp/demo-app serve` → http://localhost:3000
-- `examples/svelte-app` — Svelte 5 + Vite app whose runes `$state` is driven by the agent. `pnpm --filter @r-mcp/example-svelte dev` → http://localhost:5173 (tools: `svelte__increment`, `svelte__addTodo`, `svelte__getState`, …)
+- `examples/demo-app` — zero-build static page. `pnpm --filter @mcp-page-bridge/demo-app serve` → http://localhost:3000
+- `examples/svelte-app` — Svelte 5 + Vite app whose runes `$state` is driven by the agent. `pnpm --filter @mcp-page-bridge/example-svelte dev` → http://localhost:5173 (tools: `svelte__increment`, `svelte__addTodo`, `svelte__getState`, …)
 
 ## Quick start
 
@@ -79,7 +79,7 @@ pnpm -r build                  # builds server (dist/cli.js) + extension (dist/)
    standalone to watch logs):
 
    ```bash
-   pnpm --filter r-mcp start                  # ws://127.0.0.1:8787
+   pnpm --filter mcp-page-bridge start        # ws://127.0.0.1:8787
    # or after build: node packages/server/dist/cli.js --port 8787
    # optional auth:  node packages/server/dist/cli.js --token secret
    ```
@@ -94,27 +94,27 @@ pnpm -r build                  # builds server (dist/cli.js) + extension (dist/)
 3. **Open the demo app**:
 
    ```bash
-   pnpm --filter @r-mcp/demo-app serve        # http://localhost:3000
+   pnpm --filter @mcp-page-bridge/demo-app serve        # http://localhost:3000
    ```
 
-   Open it, click the r-mcp toolbar icon, and **Enable on this tab**.
+   Open it, click the mcp-page-bridge toolbar icon, and **Enable on this tab**.
 
 4. **Point your agent at the bridge** — see [Connecting your agent](#connecting-your-agent).
-   The agent will see `rmcp_list_clients` plus the demo's tools
+   The agent will see `mcp_page_bridge_list_clients` plus the demo's tools
    (`demo__getCount`, `demo__increment`, `demo__setCount`, `demo__getState`).
 
 ## Connecting your agent
 
-`r-mcp` is a **local (stdio)** MCP server: the agent spawns it, and it accepts
+`mcp-page-bridge` is a **local (stdio)** MCP server: the agent spawns it, and it accepts
 the browser's WebSocket and re-exposes the page's tools. Add it to your agent's
 MCP config like any other stdio server.
 
-> **Before it's published to npm**, replace `npx -y r-mcp` everywhere below with
+> **Before it's published to npm**, replace `npx -y mcp-page-bridge` everywhere below with
 > the built binary:
-> `node /ABSOLUTE/PATH/r-mcp/packages/server/dist/cli.js`
-> (run `pnpm --filter r-mcp build` once first). Flags/env are the same.
+> `node /ABSOLUTE/PATH/mcp-page-bridge/packages/server/dist/cli.js`
+> (run `pnpm --filter mcp-page-bridge build` once first). Flags/env are the same.
 
-Flags: `--port <n>` (default 8787), `--token <secret>`. Env: `RMCP_PORT`, `RMCP_TOKEN`.
+Flags: `--port <n>` (default 8787), `--token <secret>`. Env: `MCP_PAGE_BRIDGE_PORT`, `MCP_PAGE_BRIDGE_TOKEN`.
 
 ### Runtime: Node, Bun, or Deno
 
@@ -124,16 +124,16 @@ the MCP SDK is cross-runtime, so the agent's `command` can use any of:
 
 | Runtime | `command` example |
 | --- | --- |
-| Node | `["npx", "-y", "r-mcp", "--port", "8787"]` |
-| Bun | `["bunx", "r-mcp", "--port", "8787"]` |
-| Deno | `["deno", "run", "-A", "npm:r-mcp", "--port", "8787"]` |
+| Node | `["npx", "-y", "mcp-page-bridge", "--port", "8787"]` |
+| Bun | `["bunx", "mcp-page-bridge", "--port", "8787"]` |
+| Deno | `["deno", "run", "-A", "npm:mcp-page-bridge", "--port", "8787"]` |
 
 Bun and Deno can also run the TypeScript source directly (no build step):
 `bun packages/server/src/cli.ts --port 8787`. Bun is fully supported. On Deno,
 the only thing to watch is the `ws` server (it relies on the `node:http`
 `upgrade` event) — it works on recent Deno via npm compat; if you hit issues,
 fall back to Node or Bun. The published `bin` shebang is `#!/usr/bin/env node`,
-so plain `npx r-mcp` always uses Node.
+so plain `npx mcp-page-bridge` always uses Node.
 
 ### opencode
 
@@ -143,26 +143,26 @@ so plain `npx r-mcp` always uses Node.
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "r-mcp": {
+    "mcp-page-bridge": {
       "type": "local",
-      "command": ["npx", "-y", "r-mcp", "--port", "8787"],
+      "command": ["npx", "-y", "mcp-page-bridge", "--port", "8787"],
       "enabled": true
       // optional token: add "--token", "secret" above, or:
-      // "environment": { "RMCP_TOKEN": "secret" }
+      // "environment": { "MCP_PAGE_BRIDGE_TOKEN": "secret" }
     }
   }
 }
 ```
 
 opencode prefixes MCP tools with the server name, so the demo's tools show up as
-`r-mcp_demo__increment`, etc. Prompt with e.g. *"use the r-mcp tools to …"*.
+`mcp-page-bridge_demo__increment`, etc. Prompt with e.g. *"use the mcp-page-bridge tools to …"*.
 
 ### Claude Code (CLI)
 
 ```bash
-claude mcp add r-mcp -- npx -y r-mcp --port 8787
+claude mcp add mcp-page-bridge -- npx -y mcp-page-bridge --port 8787
 # with a token:
-claude mcp add r-mcp --env RMCP_TOKEN=secret -- npx -y r-mcp --port 8787
+claude mcp add mcp-page-bridge --env MCP_PAGE_BRIDGE_TOKEN=secret -- npx -y mcp-page-bridge --port 8787
 ```
 
 ### Claude Desktop
@@ -173,7 +173,7 @@ Windows: `%APPDATA%\Claude\`), then restart the app:
 ```json
 {
   "mcpServers": {
-    "r-mcp": { "command": "npx", "args": ["-y", "r-mcp", "--port", "8787"] }
+    "mcp-page-bridge": { "command": "npx", "args": ["-y", "mcp-page-bridge", "--port", "8787"] }
   }
 }
 ```
@@ -185,10 +185,10 @@ Windows: `%APPDATA%\Claude\`), then restart the app:
 ```json
 {
   "mcpServers": {
-    "r-mcp": {
+    "mcp-page-bridge": {
       "command": "npx",
-      "args": ["-y", "r-mcp", "--port", "8787"],
-      "env": { "RMCP_TOKEN": "" }
+      "args": ["-y", "mcp-page-bridge", "--port", "8787"],
+      "env": { "MCP_PAGE_BRIDGE_TOKEN": "" }
     }
   }
 }
@@ -196,16 +196,16 @@ Windows: `%APPDATA%\Claude\`), then restart the app:
 
 ### Any other MCP client
 
-It's a standard stdio MCP server — run `npx -y r-mcp` (or the `dist/cli.js`
+It's a standard stdio MCP server — run `npx -y mcp-page-bridge` (or the `dist/cli.js`
 path) as the command. `stdout` is the MCP channel; logs go to `stderr`.
 
 ### Putting it together
 
-1. Start a session — your agent spawns `r-mcp` (or run it yourself to watch logs).
-2. Open your page, click the **r-mcp** toolbar icon → **Enable on this tab** (set
+1. Start a session — your agent spawns `mcp-page-bridge` (or run it yourself to watch logs).
+2. Open your page, click the **mcp-page-bridge** toolbar icon → **Enable on this tab** (set
    the same port/token as the bridge).
-3. The agent now sees `rmcp_list_clients` plus your page's tools. A good first
-   prompt: *"call rmcp_list_clients to see which browser tabs are connected."*
+3. The agent now sees `mcp_page_bridge_list_clients` plus your page's tools. A good first
+   prompt: *"call mcp_page_bridge_list_clients to see which browser tabs are connected."*
 
 ## Authoring tools in your own page
 
@@ -285,12 +285,12 @@ agent's permission prompts.
   opens one WebSocket per provider to the bridge; the bridge runs the MCP
   `initialize` handshake and reads the provider's `serverInfo`/tools.
 - Multiple tabs can connect simultaneously; their tools are namespaced by label.
-  `rmcp_list_clients` shows what's connected.
+  `mcp_page_bridge_list_clients` shows what's connected.
 
 ## Security
 
 - The bridge binds to `127.0.0.1` only.
-- Optional shared token: run `r-mcp --token <secret>` (or `RMCP_TOKEN=<secret>`)
+- Optional shared token: run `mcp-page-bridge --token <secret>` (or `MCP_PAGE_BRIDGE_TOKEN=<secret>`)
   and enter the same token in the extension popup. Without it, any local process
   can connect — fine on a trusted machine.
 - Tool calls execute code in your page; the agent gates each call behind its own
@@ -301,18 +301,18 @@ agent's permission prompts.
 ```bash
 pnpm test         # vitest (bridge + embedded server + e2e over a real socket)
 pnpm typecheck    # tsc across all packages
-pnpm --filter @r-mcp/extension dev   # rebuild extension on change
-pnpm --filter r-mcp dev              # run bridge with reload
+pnpm --filter @mcp-page-bridge/extension dev   # rebuild extension on change
+pnpm --filter mcp-page-bridge dev              # run bridge with reload
 ```
 
 ## Status
 
-- [x] Bridge: stdio MCP server, WS server, aggregating proxy, namespacing, `rmcp_list_clients`
+- [x] Bridge: stdio MCP server, WS server, aggregating proxy, namespacing, `mcp_page_bridge_list_clients`
 - [x] Extension: `window.mcp` (lightweight + full SDK), content relay, SW WS manager (auto-reconnect), popup
 - [x] Built-in tools (eval / DOM / console / screenshot / navigate / set_value / click)
 - [x] Prompts + resources aggregation, logging passthrough
-- [x] Optional auth token; `npx r-mcp` bin; runs on Node / Bun / Deno
+- [x] Optional auth token; `npx mcp-page-bridge` bin; runs on Node / Bun / Deno
 - [x] Status dashboard + JSON API on the bridge port (`/`, `/api/providers`)
-- [ ] Publish to npm + Chrome Web Store zip; resource templates; `rmcp_focus`
+- [ ] Publish to npm + Chrome Web Store zip; resource templates; `mcp_page_bridge_focus`
 
 MIT © Eray Ates

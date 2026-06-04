@@ -6,7 +6,7 @@
  * Polls GET /api/providers.
  */
 
-/** The r-mcp mark (hexagon + plug), served at GET /favicon.svg. */
+/** The mcp-page-bridge mark (hexagon + plug), served at GET /favicon.svg. */
 export const FAVICON_SVG =
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><polygon points="22.39,6.00 22.39,18.00 12.00,24.00 1.61,18.00 1.61,6.00 12.00,0.00" fill="#E63946"/><svg x="3" y="3" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22v-5"/><path d="M15 8V2"/><path d="M17 8a1 1 0 0 1 1 1v4a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1z"/><path d="M9 8V2"/></svg></svg>';
 
@@ -16,7 +16,7 @@ export const DASHBOARD_HTML = `<!doctype html>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <title>r-mcp dashboard</title>
+    <title>mcp-page-bridge dashboard</title>
     <style>
       :root {
         color-scheme: dark;
@@ -331,7 +331,7 @@ export const DASHBOARD_HTML = `<!doctype html>
           <img src="/favicon.svg" alt="" />
           <div>
             <div class="eyebrow">browser MCP bridge</div>
-            <h1>r-mcp dashboard</h1>
+            <h1>mcp-page-bridge dashboard</h1>
           </div>
         </div>
         <div class="endpoint">
@@ -545,7 +545,7 @@ export const DASHBOARD_HTML = `<!doctype html>
         if (action === "close" && !confirm("Close tab for provider " + provider + "?")) return;
         const res = await fetch("/api/providers/" + encodeURIComponent(provider) + "/" + action, {
           method: "POST",
-          headers: { "x-rmcp-dashboard": "1" },
+          headers: { "x-mcp-page-bridge-dashboard": "1" },
         });
         const body = await res.json().catch(() => ({}));
         if (!res.ok || body.ok === false) throw new Error(body.error || "action failed");
@@ -557,7 +557,7 @@ export const DASHBOARD_HTML = `<!doctype html>
         const list = $("list");
         if (!data.providers.length) {
           list.innerHTML =
-            '<div class="card"><div class="empty">No browsers connected yet.<br/>Enable the r-mcp extension on a tab.</div></div>';
+            '<div class="card"><div class="empty">No browsers connected yet.<br/>Enable the mcp-page-bridge extension on a tab.</div></div>';
           return;
         }
         list.innerHTML = data.providers.map(renderProvider).join("");

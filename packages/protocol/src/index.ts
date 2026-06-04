@@ -1,10 +1,10 @@
 /**
- * Shared constants and helpers used by both the r-mcp bridge (Node) and the
+ * Shared constants and helpers used by both the mcp-page-bridge bridge (Node) and the
  * browser-side client (extension). Keep this dependency-free so it can be
  * bundled into a service worker / content script as well as Node.
  */
 
-export const RMCP_VERSION = "0.1.0";
+export const MCP_PAGE_BRIDGE_VERSION = "0.1.0";
 
 /** WebSocket subprotocol negotiated between the browser client and the bridge. */
 export const WS_SUBPROTOCOL = "mcp";
@@ -51,8 +51,8 @@ export interface ProviderMeta {
 }
 
 /** Bridge -> extension private JSON-RPC methods used by the local dashboard. */
-export const RMCP_DASHBOARD_ACTIVATE_TAB = "rmcp/activateTab" as const;
-export const RMCP_DASHBOARD_CLOSE_TAB = "rmcp/closeTab" as const;
+export const MCP_PAGE_BRIDGE_DASHBOARD_ACTIVATE_TAB = "mcpPageBridge/activateTab" as const;
+export const MCP_PAGE_BRIDGE_DASHBOARD_CLOSE_TAB = "mcpPageBridge/closeTab" as const;
 
 /** Direction of an internal channel message relative to the bridge. */
 export type ChannelDir = "up" | "down";
@@ -72,7 +72,7 @@ export type ChannelDir = "up" | "down";
  */
 export interface ChannelMessage {
   /** Magic marker so we can ignore unrelated postMessage traffic. */
-  __rmcp: true;
+  __mcpPageBridge: true;
   dir: ChannelDir;
   providerId: string;
   kind: "rpc" | "open" | "close" | "control" | "ext";
@@ -107,4 +107,4 @@ export interface ControlPayload {
   title?: string;
 }
 
-export const RMCP_MARK = "__rmcp" as const;
+export const MCP_PAGE_BRIDGE_MARK = "__mcpPageBridge" as const;

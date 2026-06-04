@@ -24,17 +24,17 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   DEFAULT_PORT,
-  RMCP_DASHBOARD_ACTIVATE_TAB,
-  RMCP_DASHBOARD_CLOSE_TAB,
-  RMCP_VERSION,
+  MCP_PAGE_BRIDGE_DASHBOARD_ACTIVATE_TAB,
+  MCP_PAGE_BRIDGE_DASHBOARD_CLOSE_TAB,
+  MCP_PAGE_BRIDGE_VERSION,
   WS_SUBPROTOCOL,
   namespaceName,
   sanitizeLabel,
-} from "@r-mcp/protocol";
+} from "@mcp-page-bridge/protocol";
 import { DASHBOARD_HTML, FAVICON_SVG } from "./dashboard.js";
 import { WebSocketServerTransport } from "./ws-transport.js";
 
-const META_LIST_CLIENTS = "rmcp_list_clients";
+const META_LIST_CLIENTS = "mcp_page_bridge_list_clients";
 
 interface ProviderMeta {
   url?: string;
@@ -94,7 +94,7 @@ export async function createBridge(opts: BridgeOptions = {}): Promise<Bridge> {
   const resourceRoutes = new Map<string, string>(); // uri -> providerId (first wins)
 
   const server = new Server(
-    { name: "r-mcp", version: RMCP_VERSION },
+    { name: "mcp-page-bridge", version: MCP_PAGE_BRIDGE_VERSION },
     {
       capabilities: {
         tools: { listChanged: true },
@@ -112,7 +112,7 @@ export async function createBridge(opts: BridgeOptions = {}): Promise<Bridge> {
       {
         name: META_LIST_CLIENTS,
         description:
-          "List browser MCP providers connected to r-mcp (label, source page, tool/prompt/resource counts).",
+          "List browser MCP providers connected to mcp-page-bridge (label, source page, tool/prompt/resource counts).",
         inputSchema: { type: "object", properties: {}, additionalProperties: false },
       },
     ];
@@ -319,7 +319,7 @@ export async function createBridge(opts: BridgeOptions = {}): Promise<Bridge> {
     label: string,
     action: "activate" | "close",
   ): Promise<void> {
-    if (req.headers["x-rmcp-dashboard"] !== "1") {
+    if (req.headers["x-mcp-page-bridge-dashboard"] !== "1") {
       res.writeHead(403, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: false, error: "missing dashboard header" }));
       return;
@@ -337,7 +337,7 @@ export async function createBridge(opts: BridgeOptions = {}): Promise<Bridge> {
       return;
     }
 
-    const method = action === "activate" ? RMCP_DASHBOARD_ACTIVATE_TAB : RMCP_DASHBOARD_CLOSE_TAB;
+    const method = action === "activate" ? MCP_PAGE_BRIDGE_DASHBOARD_ACTIVATE_TAB : MCP_PAGE_BRIDGE_DASHBOARD_CLOSE_TAB;
     try {
       await provider.client.request({ method }, EmptyResultSchema);
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
@@ -385,7 +385,7 @@ export async function createBridge(opts: BridgeOptions = {}): Promise<Bridge> {
         "cache-control": "no-store",
         "access-control-allow-origin": "*",
       });
-      res.end(JSON.stringify({ version: RMCP_VERSION, port, providers: providerSummary() }));
+      res.end(JSON.stringify({ version: MCP_PAGE_BRIDGE_VERSION, port, providers: providerSummary() }));
       return;
     }
     res.writeHead(404, { "content-type": "text/plain" });
@@ -418,7 +418,7 @@ export async function createBridge(opts: BridgeOptions = {}): Promise<Bridge> {
 
   wss.on("connection", async (ws: WebSocket, req) => {
     const transport = new WebSocketServerTransport(ws);
-    const client = new Client({ name: "r-mcp-bridge", version: RMCP_VERSION }, { capabilities: {} });
+    const client = new Client({ name: "mcp-page-bridge", version: MCP_PAGE_BRIDGE_VERSION }, { capabilities: {} });
     const id = randomUUID();
 
     try {

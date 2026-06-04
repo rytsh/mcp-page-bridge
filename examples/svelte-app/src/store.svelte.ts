@@ -1,6 +1,6 @@
 /**
  * Shared app state using Svelte 5 runes. Lives in a `.svelte.ts` module so
- * `$state` is available outside components. The r-mcp tools (see rmcp.ts) read
+ * `$state` is available outside components. The mcp-page-bridge tools (see mcp.ts) read
  * and mutate this same reactive state, so agent-driven changes update the UI.
  */
 export interface Todo {

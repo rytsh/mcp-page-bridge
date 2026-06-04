@@ -14,10 +14,10 @@
 </script>
 
 <main>
-  <h1>r-mcp × Svelte 5</h1>
+  <h1>mcp-page-bridge × Svelte 5</h1>
   <p class="muted">
     This app exposes its runes state via <code>window.mcp</code>. Run
-    <code>npx r-mcp</code>, enable the extension on this tab, then have your agent
+    <code>npx mcp-page-bridge</code>, enable the extension on this tab, then have your agent
     call <code>svelte__increment</code>, <code>svelte__addTodo</code>, etc.
   </p>
 

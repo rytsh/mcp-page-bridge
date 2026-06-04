@@ -21,7 +21,7 @@ import {
   type ChannelMessage,
   type ControlPayload,
   type ExtResultPayload,
-} from "@r-mcp/protocol";
+} from "@mcp-page-bridge/protocol";
 import {
   EmbeddedMcpServer,
   type ToolDefinition,
@@ -45,10 +45,10 @@ let reconnectingEmbedded = false;
 // Capture console output from the very start so console_logs has history.
 // Reuse the buffer across (re-)injections so we don't double-hook console.
 const consoleWin = window as unknown as {
-  __rmcpConsole?: ReturnType<typeof installConsoleCapture>;
+  __mcpPageBridgeConsole?: ReturnType<typeof installConsoleCapture>;
 };
 const consoleBuffer =
-  consoleWin.__rmcpConsole ?? (consoleWin.__rmcpConsole = installConsoleCapture());
+  consoleWin.__mcpPageBridgeConsole ?? (consoleWin.__mcpPageBridgeConsole = installConsoleCapture());
 
 // ---- extension RPC (page -> SW for screenshot/navigate/reload) ---------------
 
@@ -60,7 +60,7 @@ const extCall: ExtCall = (action, args) =>
     const id = ++extSeq;
     pendingExt.set(id, { resolve, reject });
     const msg: ChannelMessage = {
-      __rmcp: true,
+      __mcpPageBridge: true,
       dir: "up",
       providerId: "*",
       kind: "ext",
@@ -306,7 +306,7 @@ if (!globalWin.__mcpReady) {
   window.addEventListener("message", (event: MessageEvent) => {
     if (event.source !== window) return;
     const data = event.data as ChannelMessage | undefined;
-    if (!data || data.__rmcp !== true || data.dir !== "down") return;
+    if (!data || data.__mcpPageBridge !== true || data.dir !== "down") return;
 
     switch (data.kind) {
       case "rpc":

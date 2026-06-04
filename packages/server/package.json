@@ -1,5 +1,5 @@
 {
-  "name": "r-mcp",
+  "name": "mcp-page-bridge",
   "version": "0.1.0",
   "type": "module",
   "description": "MCP bridge that aggregates live browser-page MCP servers and exposes them to a coding agent over stdio",
@@ -11,7 +11,7 @@
   },
   "keywords": ["mcp", "model-context-protocol", "browser", "websocket", "agent", "opencode"],
   "bin": {
-    "r-mcp": "./dist/cli.js"
+    "mcp-page-bridge": "./dist/cli.js"
   },
   "exports": {
     "./bridge": {
@@ -40,7 +40,7 @@
     "ws": "^8.21.0"
   },
   "devDependencies": {
-    "@r-mcp/protocol": "workspace:*",
+    "@mcp-page-bridge/protocol": "workspace:*",
     "@types/node": "^22.10.2",
     "@types/ws": "^8.5.13",
     "tsup": "^8.3.5",

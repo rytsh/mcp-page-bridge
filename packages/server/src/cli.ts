@@ -1,5 +1,5 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { DEFAULT_PORT, RMCP_VERSION } from "@r-mcp/protocol";
+import { DEFAULT_PORT, MCP_PAGE_BRIDGE_VERSION } from "@mcp-page-bridge/protocol";
 import { createBridge } from "./bridge.js";
 
 function parseFlag(argv: string[], flag: string): string | undefined {
@@ -9,7 +9,7 @@ function parseFlag(argv: string[], flag: string): string | undefined {
 }
 
 function parsePort(argv: string[]): number {
-  const fromFlag = parseFlag(argv, "--port") ?? process.env.RMCP_PORT;
+  const fromFlag = parseFlag(argv, "--port") ?? process.env.MCP_PAGE_BRIDGE_PORT;
   const n = Number(fromFlag);
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_PORT;
 }
@@ -17,19 +17,19 @@ function parsePort(argv: string[]): number {
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const port = parsePort(argv);
-  const token = parseFlag(argv, "--token") ?? process.env.RMCP_TOKEN;
+  const token = parseFlag(argv, "--token") ?? process.env.MCP_PAGE_BRIDGE_TOKEN;
   const bridge = await createBridge({ port, token });
 
   // IMPORTANT: stdout is the MCP channel; all logs go to stderr.
   console.error(
-    `[r-mcp] v${RMCP_VERSION} — ws://127.0.0.1:${bridge.port}` +
+    `[mcp-page-bridge] v${MCP_PAGE_BRIDGE_VERSION} — ws://127.0.0.1:${bridge.port}` +
       ` · dashboard http://127.0.0.1:${bridge.port}/` +
       (token ? " (token required)" : ""),
   );
 
   const transport = new StdioServerTransport();
   await bridge.server.connect(transport);
-  console.error("[r-mcp] MCP stdio server ready (waiting for agent + browser connections)");
+  console.error("[mcp-page-bridge] MCP stdio server ready (waiting for agent + browser connections)");
 
   const shutdown = async (): Promise<void> => {
     await bridge.close();
@@ -40,6 +40,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  console.error("[r-mcp] fatal:", error);
+  console.error("[mcp-page-bridge] fatal:", error);
   process.exit(1);
 });

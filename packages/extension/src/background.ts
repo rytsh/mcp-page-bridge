@@ -1,5 +1,5 @@
 /**
- * MV3 service worker. Owns the WebSocket connections to the r-mcp bridge (the
+ * MV3 service worker. Owns the WebSocket connections to the mcp-page-bridge bridge (the
  * page itself cannot reach ws://127.0.0.1 from an https origin due to
  * mixed-content/CSP — the SW is not subject to page CSP).
  *
@@ -9,13 +9,13 @@
  */
 import {
   DEFAULT_PORT,
-  RMCP_DASHBOARD_ACTIVATE_TAB,
-  RMCP_DASHBOARD_CLOSE_TAB,
+  MCP_PAGE_BRIDGE_DASHBOARD_ACTIVATE_TAB,
+  MCP_PAGE_BRIDGE_DASHBOARD_CLOSE_TAB,
   type ChannelMessage,
   type ControlAction,
   type ControlPayload,
   type ExtCallPayload,
-} from "@r-mcp/protocol";
+} from "@mcp-page-bridge/protocol";
 import { BrowserProvider } from "./browser-provider.js";
 
 interface SocketEntry {
@@ -81,18 +81,18 @@ async function setEnabled(tabId: number, on: boolean): Promise<void> {
 // ---- downstream helpers (SW -> content -> page) ------------------------------
 
 function downRpc(state: TabState, providerId: string, payload: unknown): void {
-  const msg: ChannelMessage = { __rmcp: true, dir: "down", providerId, kind: "rpc", payload };
+  const msg: ChannelMessage = { __mcpPageBridge: true, dir: "down", providerId, kind: "rpc", payload };
   safePost(state, msg);
 }
 
 function downClose(state: TabState, providerId: string): void {
-  const msg: ChannelMessage = { __rmcp: true, dir: "down", providerId, kind: "close" };
+  const msg: ChannelMessage = { __mcpPageBridge: true, dir: "down", providerId, kind: "close" };
   safePost(state, msg);
 }
 
 function sendControl(state: TabState, action: ControlAction): void {
   const msg: ChannelMessage = {
-    __rmcp: true,
+    __mcpPageBridge: true,
     dir: "down",
     providerId: "*",
     kind: "control",
@@ -199,7 +199,7 @@ interface DashboardRpcRequest {
 function isDashboardRpc(value: unknown): value is DashboardRpcRequest {
   if (!value || typeof value !== "object") return false;
   const method = (value as { method?: unknown }).method;
-  return method === RMCP_DASHBOARD_ACTIVATE_TAB || method === RMCP_DASHBOARD_CLOSE_TAB;
+  return method === MCP_PAGE_BRIDGE_DASHBOARD_ACTIVATE_TAB || method === MCP_PAGE_BRIDGE_DASHBOARD_CLOSE_TAB;
 }
 
 function sendDashboardResult(ws: WebSocket, id: string | number | null | undefined): void {
@@ -215,14 +215,14 @@ function sendDashboardError(ws: WebSocket, id: string | number | null | undefine
 
 async function handleDashboardRpc(state: TabState, ws: WebSocket, req: DashboardRpcRequest): Promise<void> {
   try {
-    if (req.method === RMCP_DASHBOARD_ACTIVATE_TAB) {
+    if (req.method === MCP_PAGE_BRIDGE_DASHBOARD_ACTIVATE_TAB) {
       const tab = await chrome.tabs.update(state.tabId, { active: true });
       if (tab?.windowId != null) await chrome.windows.update(tab.windowId, { focused: true });
       sendDashboardResult(ws, req.id);
       return;
     }
 
-    if (req.method === RMCP_DASHBOARD_CLOSE_TAB) {
+    if (req.method === MCP_PAGE_BRIDGE_DASHBOARD_CLOSE_TAB) {
       sendDashboardResult(ws, req.id);
       setTimeout(() => {
         void chrome.tabs.remove(state.tabId).catch(() => {
@@ -267,7 +267,7 @@ async function injectIntoTab(tabId: number): Promise<void> {
     await chrome.scripting.executeScript({ target: { tabId }, world: "MAIN", files: ["inject.js"] });
     await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
   } catch (error) {
-    console.warn("[r-mcp] could not inject into tab", tabId, error);
+    console.warn("[mcp-page-bridge] could not inject into tab", tabId, error);
   }
 }
 
@@ -320,7 +320,7 @@ async function updateActionIcon(tabId: number, enabled: boolean): Promise<void> 
   try {
     await chrome.action.setTitle({
       tabId,
-      title: enabled ? "r-mcp — ⚡ enabled on this tab" : "r-mcp",
+      title: enabled ? "mcp-page-bridge — ⚡ enabled on this tab" : "mcp-page-bridge",
     });
   } catch {
     // ignore
@@ -330,7 +330,7 @@ async function updateActionIcon(tabId: number, enabled: boolean): Promise<void> 
 // ---- per-tab Port wiring -----------------------------------------------------
 
 chrome.runtime.onConnect.addListener((port) => {
-  if (port.name !== "rmcp") return;
+  if (port.name !== "mcp-page-bridge") return;
   const tabId = port.sender?.tab?.id;
   if (tabId === undefined) return;
 
@@ -351,7 +351,7 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 async function handleUp(state: TabState, msg: ChannelMessage): Promise<void> {
-  if (!msg || msg.__rmcp !== true || msg.dir !== "up") return;
+  if (!msg || msg.__mcpPageBridge !== true || msg.dir !== "up") return;
 
   if (msg.kind === "control") {
     const action = (msg.payload as ControlPayload | undefined)?.action;
@@ -386,7 +386,7 @@ async function handleUp(state: TabState, msg: ChannelMessage): Promise<void> {
 
 async function handleExt(state: TabState, req: ExtCallPayload): Promise<void> {
   const reply = (payload: { id: number; result?: unknown; error?: string }): void => {
-    const msg: ChannelMessage = { __rmcp: true, dir: "down", providerId: "*", kind: "ext", payload };
+    const msg: ChannelMessage = { __mcpPageBridge: true, dir: "down", providerId: "*", kind: "ext", payload };
     safePost(state, msg);
   };
   try {
@@ -407,7 +407,7 @@ async function runExt(
       const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
       let savedAs: string | undefined;
       if (args.download) {
-        const filename = (args.filename as string) || `r-mcp-${Date.now()}.png`;
+        const filename = (args.filename as string) || `mcp-page-bridge-${Date.now()}.png`;
         await chrome.downloads.download({ url: dataUrl, filename, saveAs: false });
         savedAs = filename;
       }
@@ -496,7 +496,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 // A WebSocket keeps the SW alive while messages flow (Chrome 116+); the alarm
 // nudges the SW awake periodically in case it went idle between bursts.
-chrome.alarms.create("rmcp-keepalive", { periodInMinutes: 0.4 });
+chrome.alarms.create("mcp-page-bridge-keepalive", { periodInMinutes: 0.4 });
 chrome.alarms.onAlarm.addListener(() => {
   // no-op: waking the SW is the point.
 });

@@ -68,12 +68,12 @@ async function connectBrowser(
   return server;
 }
 
-describe("r-mcp bridge", () => {
-  it("always exposes the rmcp_list_clients meta tool", async () => {
+describe("mcp-page-bridge bridge", () => {
+  it("always exposes the mcp_page_bridge_list_clients meta tool", async () => {
     bridge = await createBridge({ port: 0 });
     const agent = await connectAgent(bridge);
     const { tools } = await agent.listTools();
-    expect(tools.map((t) => t.name)).toContain("rmcp_list_clients");
+    expect(tools.map((t) => t.name)).toContain("mcp_page_bridge_list_clients");
   });
 
   it("registers a browser tool (namespaced) and routes calls to it", async () => {
@@ -103,7 +103,7 @@ describe("r-mcp bridge", () => {
     expect(textOf(result)).toBe("echo:hi");
   });
 
-  it("reports providers via rmcp_list_clients", async () => {
+  it("reports providers via mcp_page_bridge_list_clients", async () => {
     bridge = await createBridge({ port: 0 });
     const agent = await connectAgent(bridge);
     await connectBrowser(bridge.port, "dashboard", (s) => {
@@ -113,7 +113,7 @@ describe("r-mcp bridge", () => {
     });
     await waitFor(() => bridge!.listProviders().length, (n) => n === 1);
 
-    const result = await agent.callTool({ name: "rmcp_list_clients", arguments: {} });
+    const result = await agent.callTool({ name: "mcp_page_bridge_list_clients", arguments: {} });
     const parsed = JSON.parse(textOf(result)) as Array<{
       label: string;
       tools: Array<{ name: string }>;

@@ -1,5 +1,5 @@
 {
-  "name": "@r-mcp/example-svelte",
+  "name": "@mcp-page-bridge/example-svelte",
   "version": "0.1.0",
   "private": true,
   "type": "module",

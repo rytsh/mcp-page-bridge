@@ -1,4 +1,4 @@
-/** Popup UI: enable/disable r-mcp for the active tab and show provider status. */
+/** Popup UI: enable/disable mcp-page-bridge for the active tab and show provider status. */
 
 interface ProviderStatus {
   id: string;

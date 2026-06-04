@@ -4,7 +4,7 @@
  * It powers the *lightweight* authoring path (`window.mcp.tool(...)`) so that
  * pages can expose tools to the agent without bundling the full MCP SDK. It
  * speaks the exact same MCP JSON-RPC wire format the SDK does, which means the
- * r-mcp bridge can run a standard MCP `Client` against it just like it does
+ * mcp-page-bridge can run a standard MCP `Client` against it just like it does
  * against a real SDK-based page server.
  *
  * This module has NO browser dependencies and is unit-tested in Node against

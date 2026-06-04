@@ -31,13 +31,13 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      - name: Verify tag matches r-mcp version
+      - name: Verify tag matches mcp-page-bridge version
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           PKG="$(node -p "require('./packages/server/package.json').version")"
           EXT="$(node -p "require('./packages/extension/manifest.json').version")"
           echo "tag=$TAG package=$PKG extension=$EXT"
-          test "$TAG" = "$PKG" || { echo "::error::Tag v$TAG does not match r-mcp@$PKG"; exit 1; }
+          test "$TAG" = "$PKG" || { echo "::error::Tag v$TAG does not match mcp-page-bridge@$PKG"; exit 1; }
           test "$TAG" = "$EXT" || { echo "::error::Tag v$TAG does not match extension@$EXT"; exit 1; }
 
       - name: Typecheck
@@ -49,12 +49,24 @@ jobs:
       - name: Build
         run: pnpm -r --if-present build
 
-      - name: Publish r-mcp to npm (with provenance)
+      - name: Check whether npm version already exists
+        id: npm_version
+        run: |
+          VERSION="$(node -p "require('./packages/server/package.json').version")"
+          if npm view "mcp-page-bridge@$VERSION" version >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "mcp-page-bridge@$VERSION already exists on npm; publish will be skipped"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish mcp-page-bridge to npm (with provenance)
+        if: steps.npm_version.outputs.exists != 'true'
         working-directory: packages/server
         run: |
           VERSION="$(node -p "require('./package.json').version")"
           if [[ "$VERSION" == *-* ]]; then DIST_TAG=next; else DIST_TAG=latest; fi
-          echo "Publishing r-mcp@$VERSION with dist-tag '$DIST_TAG'"
+          echo "Publishing mcp-page-bridge@$VERSION with dist-tag '$DIST_TAG'"
           pnpm publish --access public --no-git-checks --provenance --tag "$DIST_TAG"
         env:
           NPM_CONFIG_PROVENANCE: true
@@ -62,7 +74,7 @@ jobs:
       - name: Zip the extension
         run: |
           cd packages/extension/dist
-          zip -r "$GITHUB_WORKSPACE/r-mcp-extension-${GITHUB_REF_NAME}.zip" .
+          zip -r "$GITHUB_WORKSPACE/mcp-page-bridge-extension-${GITHUB_REF_NAME}.zip" .
 
       - name: Create GitHub Release
         env:
@@ -70,7 +82,7 @@ jobs:
         run: |
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then PRERELEASE="--prerelease"; else PRERELEASE=""; fi
           gh release create "$GITHUB_REF_NAME" \
-            "r-mcp-extension-${GITHUB_REF_NAME}.zip" \
+            "mcp-page-bridge-extension-${GITHUB_REF_NAME}.zip" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
             $PRERELEASE

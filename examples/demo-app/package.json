@@ -1,5 +1,5 @@
 {
-  "name": "@r-mcp/demo-app",
+  "name": "@mcp-page-bridge/demo-app",
   "version": "0.1.0",
   "private": true,
   "type": "module",
