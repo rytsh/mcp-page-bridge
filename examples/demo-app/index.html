@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <title>r-mcp demo app</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; }
+      h1 { font-size: 20px; }
+      .card { border: 1px solid #ccc4; border-radius: 12px; padding: 16px; margin: 16px 0; }
+      button { font: inherit; padding: 6px 12px; border-radius: 8px; cursor: pointer; }
+      code { background: #8881; padding: 1px 5px; border-radius: 4px; }
+      #count { font-size: 32px; font-weight: 700; }
+      .muted { opacity: 0.7; font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <h1>r-mcp demo app</h1>
+    <p class="muted">
+      This page registers MCP tools via <code>window.mcp</code>. Run
+      <code>npx r-mcp</code>, load the extension, enable it on this tab, then ask
+      your agent to call <code>&lt;label&gt;__increment</code>, etc.
+    </p>
+
+    <div class="card">
+      <div id="count">0</div>
+      <button id="inc">+1</button>
+      <button id="dec">-1</button>
+    </div>
+
+    <div class="card">
+      <strong>Registered tools:</strong>
+      <ul>
+        <li><code>getCount</code> — returns the current counter value</li>
+        <li><code>setCount</code> — sets the counter (<code>{ value: number }</code>)</li>
+        <li><code>increment</code> — adds <code>{ by?: number }</code> (default 1)</li>
+        <li><code>getState</code> — returns the whole app state object</li>
+      </ul>
+      <div id="mcp-status" class="muted">window.mcp manifest declared.</div>
+    </div>
+
+    <script>
+      // --- a tiny "app" with some state the agent might want to inspect/drive ---
+      const state = { count: 0, startedAt: new Date().toISOString() };
+      const countEl = document.getElementById("count");
+      function setCount(value) {
+        state.count = Number(value) || 0;
+        countEl.textContent = String(state.count);
+        return state.count;
+      }
+      document.getElementById("inc").onclick = () => setCount(state.count + 1);
+      document.getElementById("dec").onclick = () => setCount(state.count - 1);
+
+      // --- expose tools to the agent via a plain window.mcp manifest ---
+      const mcp = window.mcp && typeof window.mcp === "object" ? window.mcp : {};
+      window.mcp = Object.assign(mcp, {
+        label: "demo",
+        tools: {
+          getCount: { description: "Get the current counter value", handler: () => state.count },
+          setCount: {
+            description: "Set the counter to a specific value",
+            inputSchema: {
+              type: "object",
+              properties: { value: { type: "number" } },
+              required: ["value"],
+            },
+            handler: (args) => `count is now ${setCount(args.value)}`,
+          },
+          increment: {
+            description: "Increment the counter",
+            inputSchema: {
+              type: "object",
+              properties: { by: { type: "number", description: "amount (default 1)" } },
+            },
+            handler: (args) => `count is now ${setCount(state.count + (args.by ?? 1))}`,
+          },
+          getState: { description: "Return the full app state", handler: () => state },
+        },
+      });
+    </script>
+  </body>
+</html>

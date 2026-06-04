@@ -1,0 +1,49 @@
+{
+  "name": "r-mcp",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "MCP bridge that aggregates live browser-page MCP servers and exposes them to a coding agent over stdio",
+  "license": "MIT",
+  "author": "Eray Ates",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rytsh/r-mcp.git"
+  },
+  "keywords": ["mcp", "model-context-protocol", "browser", "websocket", "agent", "opencode"],
+  "bin": {
+    "r-mcp": "./dist/cli.js"
+  },
+  "exports": {
+    "./bridge": "./src/bridge.ts"
+  },
+  "files": ["dist"],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "start": "tsx src/cli.ts",
+    "dev": "tsx watch src/cli.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json",
+    "build": "tsup",
+    "prepublishOnly": "pnpm build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@r-mcp/protocol": "workspace:*",
+    "@types/node": "^22.10.2",
+    "@types/ws": "^8.5.13",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8",
+    "zod": "^3.25.0"
+  }
+}

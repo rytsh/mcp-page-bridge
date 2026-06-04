@@ -1,0 +1,11 @@
+import { defineConfig } from "tsup";
+
+export default defineConfig({
+  entry: { cli: "src/cli.ts" },
+  format: ["esm"],
+  target: "node18",
+  clean: true,
+  // Bundle the workspace protocol package; keep heavy runtime deps external.
+  noExternal: ["@r-mcp/protocol"],
+  banner: { js: "#!/usr/bin/env node" },
+});

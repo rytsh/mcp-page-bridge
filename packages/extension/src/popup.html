@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>r-mcp</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      }
+      body {
+        width: 320px;
+        margin: 0;
+        padding: 12px 14px;
+        font-size: 13px;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 10px;
+      }
+      h1 {
+        font-size: 14px;
+        margin: 0;
+        letter-spacing: 0.5px;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 8px 0;
+      }
+      .pill {
+        font-size: 11px;
+        padding: 2px 7px;
+        border-radius: 999px;
+        background: #8883;
+      }
+      .pill.on {
+        background: #2e7d32;
+        color: #fff;
+      }
+      button {
+        font: inherit;
+        padding: 6px 10px;
+        border-radius: 8px;
+        border: 1px solid #8886;
+        background: #8881;
+        cursor: pointer;
+      }
+      button.primary {
+        background: #1565c0;
+        color: #fff;
+        border-color: transparent;
+      }
+      input {
+        font: inherit;
+        padding: 5px 8px;
+        border-radius: 6px;
+        border: 1px solid #8886;
+        background: transparent;
+        color: inherit;
+      }
+      .settings {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin: 10px 0;
+      }
+      .field {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .field label {
+        width: 46px;
+        opacity: 0.8;
+      }
+      .field input {
+        flex: 1;
+        min-width: 0;
+      }
+      button.full {
+        width: 100%;
+      }
+      ul {
+        margin: 8px 0 0;
+        padding-left: 0;
+        list-style: none;
+      }
+      li {
+        padding: 5px 8px;
+        border: 1px solid #8883;
+        border-radius: 8px;
+        margin-bottom: 5px;
+      }
+      .muted {
+        opacity: 0.6;
+        font-size: 11px;
+      }
+      .title {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1><img src="icons/icon.svg" width="16" height="16" alt="" style="vertical-align:-2px" /> r-mcp</h1>
+      <span id="conn" class="pill">…</span>
+    </header>
+
+    <div class="row">
+      <button id="toggle" class="primary">Enable on this tab</button>
+      <button id="openDashboard">Dashboard ↗</button>
+    </div>
+
+    <div class="settings">
+      <div class="field">
+        <label for="port">Port</label>
+        <input id="port" type="number" min="1" max="65535" />
+      </div>
+      <div class="field">
+        <label for="token">Token</label>
+        <input id="token" type="text" placeholder="(optional)" />
+      </div>
+      <button id="saveSettings" class="full">Save settings</button>
+    </div>
+
+    <div class="row">
+      <label><input id="browserControl" type="checkbox" /> Browser control (all tabs)</label>
+    </div>
+
+    <div id="providers"></div>
+
+    <p class="muted">
+      Run the bridge: <code>npx r-mcp</code>. Pages expose tools via
+      <code>window.mcp</code>.
+    </p>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

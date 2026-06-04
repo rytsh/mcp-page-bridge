@@ -1,0 +1,10 @@
+{
+  "name": "@r-mcp/demo-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Static demo page that exposes tools via window.mcp",
+  "scripts": {
+    "serve": "node serve.mjs"
+  }
+}
