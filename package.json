@@ -1,13 +1,13 @@
 {
   "name": "mcp-page-bridge-monorepo",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "description": "Bridge a live browser app's MCP server to a coding agent over WebSocket",
   "license": "MIT",
   "author": "Eray Ates",
   "scripts": {
-    "test": "pnpm -r --if-present test",
+    "test": "pnpm --filter @mcp-page-bridge/protocol build && pnpm -r --if-present test",
     "build": "pnpm -r --if-present build",
     "typecheck": "pnpm -r --if-present typecheck",
     "check": "pnpm typecheck && pnpm test && pnpm build",
