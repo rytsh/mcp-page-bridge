@@ -28,7 +28,7 @@ importers:
 
   packages/extension:
     dependencies:
-      '@mcp-page-bridge/protocol':
+      mcp-page-bridge-protocol:
         specifier: workspace:*
         version: link:../protocol
     devDependencies:
@@ -65,15 +65,15 @@ importers:
         specifier: ^8.21.0
         version: 8.21.0
     devDependencies:
-      '@mcp-page-bridge/protocol':
-        specifier: workspace:*
-        version: link:../protocol
       '@types/node':
         specifier: ^22.10.2
         version: 22.19.19
       '@types/ws':
         specifier: ^8.5.13
         version: 8.18.1
+      mcp-page-bridge-protocol:
+        specifier: workspace:*
+        version: link:../protocol
       tsup:
         specifier: ^8.3.5
         version: 8.5.1(postcss@8.5.15)(tsx@4.22.4)(typescript@5.9.3)

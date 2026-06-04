@@ -6,7 +6,7 @@
  * Guarded against double-injection: the manifest content_script and a runtime
  * chrome.scripting injection (for already-open tabs) share this ISOLATED world.
  */
-import type { ChannelMessage } from "@mcp-page-bridge/protocol";
+import type { ChannelMessage } from "mcp-page-bridge-protocol";
 
 const guard = window as unknown as { __mcpPageBridgeContent?: boolean };
 

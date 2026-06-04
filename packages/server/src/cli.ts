@@ -1,5 +1,5 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { DEFAULT_PORT, MCP_PAGE_BRIDGE_VERSION } from "@mcp-page-bridge/protocol";
+import { DEFAULT_PORT, MCP_PAGE_BRIDGE_VERSION } from "mcp-page-bridge-protocol";
 import { createBridge } from "./bridge.js";
 
 function parseFlag(argv: string[], flag: string): string | undefined {

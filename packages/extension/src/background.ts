@@ -15,7 +15,7 @@ import {
   type ControlAction,
   type ControlPayload,
   type ExtCallPayload,
-} from "@mcp-page-bridge/protocol";
+} from "mcp-page-bridge-protocol";
 import { BrowserProvider } from "./browser-provider.js";
 
 interface SocketEntry {

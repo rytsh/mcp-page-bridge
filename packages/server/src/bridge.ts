@@ -30,7 +30,7 @@ import {
   WS_SUBPROTOCOL,
   namespaceName,
   sanitizeLabel,
-} from "@mcp-page-bridge/protocol";
+} from "mcp-page-bridge-protocol";
 import { DASHBOARD_HTML, FAVICON_SVG } from "./dashboard.js";
 import { WebSocketServerTransport } from "./ws-transport.js";
 

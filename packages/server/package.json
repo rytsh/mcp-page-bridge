@@ -40,7 +40,7 @@
     "ws": "^8.21.0"
   },
   "devDependencies": {
-    "@mcp-page-bridge/protocol": "workspace:*",
+    "mcp-page-bridge-protocol": "workspace:*",
     "@types/node": "^22.10.2",
     "@types/ws": "^8.5.13",
     "tsup": "^8.3.5",

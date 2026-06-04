@@ -14,7 +14,7 @@
     "./embedded-server": "./src/embedded-server.ts"
   },
   "dependencies": {
-    "@mcp-page-bridge/protocol": "workspace:*"
+    "mcp-page-bridge-protocol": "workspace:*"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

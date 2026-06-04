@@ -7,6 +7,6 @@ export default defineConfig({
   dts: true,
   clean: true,
   // Bundle the workspace protocol package; keep heavy runtime deps external.
-  noExternal: ["@mcp-page-bridge/protocol"],
+  noExternal: ["mcp-page-bridge-protocol"],
   banner: { js: "#!/usr/bin/env node" },
 });

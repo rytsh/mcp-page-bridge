@@ -21,7 +21,7 @@ import {
   type ChannelMessage,
   type ControlPayload,
   type ExtResultPayload,
-} from "@mcp-page-bridge/protocol";
+} from "mcp-page-bridge-protocol";
 import {
   EmbeddedMcpServer,
   type ToolDefinition,

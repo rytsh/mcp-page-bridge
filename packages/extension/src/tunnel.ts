@@ -7,7 +7,7 @@
  * postMessages to/from the SW. `start()` opens the upstream socket lazily (only
  * once the tab is activated), so a page can register tools before connecting.
  */
-import type { ChannelMessage } from "@mcp-page-bridge/protocol";
+import type { ChannelMessage } from "mcp-page-bridge-protocol";
 import type { MinimalTransport } from "./embedded-server.js";
 
 let counter = 0;
