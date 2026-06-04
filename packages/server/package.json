@@ -1,13 +1,13 @@
 {
   "name": "mcp-page-bridge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "MCP bridge that aggregates live browser-page MCP servers and exposes them to a coding agent over stdio",
   "license": "MIT",
   "author": "Eray Ates",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/rytsh/r-mcp.git"
+    "url": "git+https://github.com/rytsh/mcp-page-bridge.git"
   },
   "keywords": ["mcp", "model-context-protocol", "browser", "websocket", "agent", "opencode"],
   "bin": {

@@ -1,6 +1,6 @@
 {
   "name": "mcp-page-bridge-monorepo",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "Bridge a live browser app's MCP server to a coding agent over WebSocket",
@@ -12,6 +12,11 @@
     "typecheck": "pnpm -r --if-present typecheck",
     "check": "pnpm typecheck && pnpm test && pnpm build",
     "server": "pnpm --filter mcp-page-bridge start",
+    "pack:extension": "node scripts/pack-extension.mjs",
+    "publish:extension": "pnpm pack:extension",
+    "pack:protocol": "pnpm --filter @mcp-page-bridge/protocol pack --dry-run",
+    "publish:protocol:dry": "pnpm --filter @mcp-page-bridge/protocol publish --dry-run --access public --no-git-checks",
+    "publish:protocol": "pnpm --filter @mcp-page-bridge/protocol publish --access public --no-git-checks",
     "pack:npm": "pnpm --filter mcp-page-bridge pack --dry-run",
     "publish:npm:dry": "pnpm --filter mcp-page-bridge publish --dry-run --access public --no-git-checks",
     "publish:npm": "pnpm --filter mcp-page-bridge publish --access public --no-git-checks"

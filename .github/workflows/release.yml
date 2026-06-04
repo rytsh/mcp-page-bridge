@@ -35,9 +35,11 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           PKG="$(node -p "require('./packages/server/package.json').version")"
+          PROTOCOL="$(node -p "require('./packages/protocol/package.json').version")"
           EXT="$(node -p "require('./packages/extension/manifest.json').version")"
-          echo "tag=$TAG package=$PKG extension=$EXT"
+          echo "tag=$TAG package=$PKG protocol=$PROTOCOL extension=$EXT"
           test "$TAG" = "$PKG" || { echo "::error::Tag v$TAG does not match mcp-page-bridge@$PKG"; exit 1; }
+          test "$TAG" = "$PROTOCOL" || { echo "::error::Tag v$TAG does not match @mcp-page-bridge/protocol@$PROTOCOL"; exit 1; }
           test "$TAG" = "$EXT" || { echo "::error::Tag v$TAG does not match extension@$EXT"; exit 1; }
 
       - name: Typecheck
@@ -59,6 +61,28 @@ jobs:
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Check whether protocol npm version already exists
+        id: protocol_npm_version
+        run: |
+          VERSION="$(node -p "require('./packages/protocol/package.json').version")"
+          if npm view "@mcp-page-bridge/protocol@$VERSION" version >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "@mcp-page-bridge/protocol@$VERSION already exists on npm; publish will be skipped"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish @mcp-page-bridge/protocol to npm (with provenance)
+        if: steps.protocol_npm_version.outputs.exists != 'true'
+        working-directory: packages/protocol
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          if [[ "$VERSION" == *-* ]]; then DIST_TAG=next; else DIST_TAG=latest; fi
+          echo "Publishing @mcp-page-bridge/protocol@$VERSION with dist-tag '$DIST_TAG'"
+          pnpm publish --access public --no-git-checks --provenance --tag "$DIST_TAG"
+        env:
+          NPM_CONFIG_PROVENANCE: true
 
       - name: Publish mcp-page-bridge to npm (with provenance)
         if: steps.npm_version.outputs.exists != 'true'

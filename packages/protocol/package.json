@@ -1,15 +1,30 @@
 {
   "name": "@mcp-page-bridge/protocol",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.1.1",
   "type": "module",
   "description": "Shared constants/helpers for the mcp-page-bridge bridge and browser client",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "license": "MIT",
+  "author": "Eray Ates",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rytsh/mcp-page-bridge.git"
+  },
+  "keywords": ["mcp", "model-context-protocol", "browser", "websocket", "protocol"],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "pnpm build"
   }
 }
