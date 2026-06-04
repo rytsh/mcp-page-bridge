@@ -65,7 +65,7 @@ export class BrowserProvider {
 
     const server = new EmbeddedMcpServer({
       name: "browser",
-      version: "0.1.2",
+      version: "0.1.3",
       title: "Browser control",
     });
     registerBrowserTools(server);
