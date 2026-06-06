@@ -13,6 +13,35 @@ interface Status {
   port: number;
   token: string;
   browserControl: boolean;
+  selectedElements?: SelectedElementStatus[];
+  selectionMarkersVisible?: boolean;
+  cssPatches?: CssPatchStatus[];
+}
+
+interface SelectedElementStatus {
+  selectionId?: string;
+  index?: number;
+  primary?: boolean;
+  selector?: string;
+  tag?: string;
+  text?: string;
+  name?: string;
+  group?: string;
+  marker?: { visible?: boolean };
+}
+
+interface CssPatchStatus {
+  id: string;
+  selector?: string;
+  css?: string;
+  renderedCss?: string;
+  reason?: string;
+  createdAt?: string;
+}
+
+interface RuntimeResponse {
+  ok?: boolean;
+  error?: string;
 }
 
 function el<T extends HTMLElement>(id: string): T {
@@ -40,6 +69,8 @@ function render(status: Status): void {
   el<HTMLInputElement>("port").value = String(status.port);
   el<HTMLInputElement>("token").value = status.token ?? "";
   el<HTMLInputElement>("browserControl").checked = !!status.browserControl;
+  el<HTMLDivElement>("settings").style.display = status.enabled ? "none" : "flex";
+  el<HTMLInputElement>("viewSelection").checked = status.selectionMarkersVisible !== false;
 
   const list = status.providers
     .map(
@@ -55,6 +86,50 @@ function render(status: Status): void {
       ? `<ul>${list}</ul>`
       : `<p class="muted">No MCP providers on this page yet. The page can declare <code>window.mcp = { label, tools }</code> or connect an MCP server.</p>`
     : "";
+
+  const selected = status.selectedElements ?? [];
+  el<HTMLDivElement>("selectedElements").innerHTML = selected.length
+    ? `<ul>${selected.map(renderSelection).join("")}</ul>`
+    : `<p class="muted">No selected elements.</p>`;
+
+  const patches = status.cssPatches ?? [];
+  el<HTMLButtonElement>("clearCssPatches").disabled = patches.length === 0;
+  el<HTMLDivElement>("cssPatches").innerHTML = patches.length
+    ? `<ul>${patches.map(renderCssPatch).join("")}</ul>`
+    : `<p class="muted">No temporary CSS patches.</p>`;
+}
+
+function renderSelection(item: SelectedElementStatus): string {
+  const id = item.selectionId ?? "";
+  const label = item.name ? `${item.name} · ${item.tag ?? "element"}` : item.tag ?? "element";
+  const title = `${item.index ?? "?"}. ${label}${item.primary ? " (primary)" : ""}`;
+  const detail = item.text || item.selector || id;
+  return `<li class="selection-item">
+    <div class="selection-meta">
+      <div class="title">${escapeHtml(title)}</div>
+      <div class="muted">${escapeHtml(item.group ? `${item.group} · ${detail}` : detail)}</div>
+    </div>
+    <button data-remove-selection="${escapeHtml(id)}" title="Unselect">×</button>
+    <div class="selection-edit">
+      <input data-selection-name="${escapeHtml(id)}" type="text" placeholder="Name" value="${escapeHtml(item.name ?? "")}" />
+      <input data-selection-group="${escapeHtml(id)}" type="text" placeholder="Group" value="${escapeHtml(item.group ?? "")}" />
+      <button data-save-selection="${escapeHtml(id)}">Save</button>
+    </div>
+  </li>`;
+}
+
+function renderCssPatch(patch: CssPatchStatus): string {
+  const title = patch.reason || patch.selector || patch.id;
+  const detail = patch.selector ? `${patch.id} · ${patch.selector}` : patch.id;
+  const css = patch.renderedCss || patch.css || "";
+  return `<li class="patch-item">
+    <div class="patch-meta">
+      <div class="title">${escapeHtml(title)}</div>
+      <div class="muted">${escapeHtml(detail)}</div>
+      <pre>${escapeHtml(css.slice(0, 260))}</pre>
+    </div>
+    <button data-remove-css-patch="${escapeHtml(patch.id)}" title="Undo CSS patch">Undo</button>
+  </li>`;
 }
 
 function escapeHtml(s: string): string {
@@ -90,13 +165,85 @@ async function main(): Promise<void> {
   el<HTMLButtonElement>("saveSettings").addEventListener("click", saveSettings);
   el<HTMLInputElement>("browserControl").addEventListener("change", saveSettings);
 
+  el<HTMLInputElement>("viewSelection").addEventListener("change", async () => {
+    const visible = el<HTMLInputElement>("viewSelection").checked;
+    await chrome.runtime.sendMessage({ type: "setSelectionMarkersVisible", tabId, visible });
+    await refresh();
+  });
+
   el<HTMLButtonElement>("openDashboard").addEventListener("click", async () => {
     const port = Number(el<HTMLInputElement>("port").value) || 8787;
     await chrome.tabs.create({ url: `http://127.0.0.1:${port}/` });
   });
 
+  async function startPicker(append: boolean): Promise<void> {
+    const hint = el<HTMLParagraphElement>("pickerHint");
+    hint.textContent = append ? "Starting add-another picker..." : "Starting picker...";
+    const res = (await chrome.runtime.sendMessage({ type: "startElementPicker", tabId, append })) as RuntimeResponse;
+    if (res?.ok) {
+      window.close();
+      return;
+    }
+    hint.textContent = res?.error ?? "Could not start picker on this tab.";
+  }
+
+  el<HTMLButtonElement>("pickElement").addEventListener("click", () => {
+    void startPicker(false);
+  });
+
+  el<HTMLButtonElement>("addElement").addEventListener("click", () => {
+    void startPicker(true);
+  });
+
+  el<HTMLButtonElement>("clearSelection").addEventListener("click", async () => {
+    const hint = el<HTMLParagraphElement>("pickerHint");
+    hint.textContent = "Clearing selected elements...";
+    const res = (await chrome.runtime.sendMessage({ type: "clearSelectedElements", tabId })) as RuntimeResponse;
+    hint.textContent = res?.ok ? "Selection cleared." : res?.error ?? "Could not clear selection.";
+    await refresh();
+  });
+
+  el<HTMLDivElement>("selectedElements").addEventListener("click", async (event) => {
+    const target = event.target as HTMLElement | null;
+    const removeButton = target?.closest<HTMLButtonElement>("[data-remove-selection]");
+    if (removeButton) {
+      const selectionId = removeButton.dataset.removeSelection;
+      if (!selectionId) return;
+      await chrome.runtime.sendMessage({ type: "removeSelectedElement", tabId, selectionId });
+      await refresh();
+      return;
+    }
+    const saveButton = target?.closest<HTMLButtonElement>("[data-save-selection]");
+    if (!saveButton) return;
+    const selectionId = saveButton.dataset.saveSelection;
+    if (!selectionId) return;
+    const name = document.querySelector<HTMLInputElement>(`[data-selection-name="${cssEscape(selectionId)}"]`)?.value ?? "";
+    const group = document.querySelector<HTMLInputElement>(`[data-selection-group="${cssEscape(selectionId)}"]`)?.value ?? "";
+    await chrome.runtime.sendMessage({ type: "setSelectedElementMeta", tabId, selectionId, name, group });
+    await refresh();
+  });
+
+  el<HTMLDivElement>("cssPatches").addEventListener("click", async (event) => {
+    const button = (event.target as HTMLElement | null)?.closest<HTMLButtonElement>("[data-remove-css-patch]");
+    if (!button) return;
+    const patchId = button.dataset.removeCssPatch;
+    if (!patchId) return;
+    await chrome.runtime.sendMessage({ type: "removeCssPatch", tabId, patchId });
+    await refresh();
+  });
+
+  el<HTMLButtonElement>("clearCssPatches").addEventListener("click", async () => {
+    await chrome.runtime.sendMessage({ type: "clearCssPatches", tabId });
+    await refresh();
+  });
+
   await refresh();
   setInterval(refresh, 1500);
+}
+
+function cssEscape(value: string): string {
+  const css = (globalThis as { CSS?: { escape?: (v: string) => string } }).CSS;
+  return css?.escape ? css.escape(value) : value.replace(/[^a-zA-Z0-9_-]/g, (ch) => `\\${ch}`);
 }
 
 void main();

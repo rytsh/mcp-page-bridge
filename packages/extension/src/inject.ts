@@ -28,7 +28,22 @@ import {
   type ToolHandler,
 } from "./embedded-server.js";
 import { TunnelTransport, allTransports, getTransport } from "./tunnel.js";
-import { installConsoleCapture, registerBuiltins, type ExtCall } from "./builtins.js";
+import {
+  clearCssPatches,
+  clearSelectedElements,
+  exportCssPatches,
+  getCssPatches,
+  getSelectedElementSnapshots,
+  getSelectedMarkersVisible,
+  installConsoleCapture,
+  removeCssPatch,
+  removeSelectedElement,
+  registerBuiltins,
+  setSelectedElement,
+  setSelectedElementMeta,
+  setSelectedMarkersVisible,
+  type ExtCall,
+} from "./builtins.js";
 import { normalizeDeclarativeTools } from "./declarative.js";
 
 interface SdkLikeServer {
@@ -296,10 +311,170 @@ function installWindowMcp(initialValue: unknown): void {
   }
 }
 
+// ---- element picker ----------------------------------------------------------
+
+let stopElementPicker: (() => void) | undefined;
+
+function showPickerToast(message: string, timeoutMs = 1800): void {
+  const toast = document.createElement("div");
+  toast.textContent = message;
+  Object.assign(toast.style, {
+    position: "fixed",
+    left: "50%",
+    bottom: "20px",
+    transform: "translateX(-50%)",
+    zIndex: "2147483647",
+    padding: "10px 12px",
+    borderRadius: "999px",
+    background: "rgba(15, 23, 42, 0.94)",
+    color: "#fff",
+    font: "12px system-ui, -apple-system, Segoe UI, sans-serif",
+    boxShadow: "0 12px 32px rgba(15, 23, 42, 0.35)",
+    pointerEvents: "none",
+  });
+  document.documentElement.append(toast);
+  setTimeout(() => toast.remove(), timeoutMs);
+}
+
+function startElementPicker(opts: { append?: boolean } = {}): void {
+  stopElementPicker?.();
+
+  const overlay = document.createElement("div");
+  const label = document.createElement("div");
+  Object.assign(overlay.style, {
+    position: "fixed",
+    zIndex: "2147483647",
+    pointerEvents: "none",
+    border: "2px solid #2563eb",
+    borderRadius: "8px",
+    background: "rgba(37, 99, 235, 0.12)",
+    boxShadow: "0 0 0 9999px rgba(15, 23, 42, 0.12)",
+    display: "none",
+  });
+  Object.assign(label.style, {
+    position: "fixed",
+    zIndex: "2147483647",
+    pointerEvents: "none",
+    padding: "7px 9px",
+    borderRadius: "8px",
+    background: "#2563eb",
+    color: "#fff",
+    font: "12px system-ui, -apple-system, Segoe UI, sans-serif",
+    boxShadow: "0 8px 24px rgba(37, 99, 235, 0.35)",
+  });
+  label.textContent = opts.append
+    ? "Click another element to add it. Esc cancels."
+    : "Click an element to select it. Esc cancels.";
+  document.documentElement.append(overlay, label);
+
+  const elementFromEvent = (event: Event): Element | undefined => {
+    for (const node of event.composedPath()) {
+      if (node instanceof Element && node !== overlay && node !== label) return node;
+    }
+    return undefined;
+  };
+
+  const update = (element: Element): void => {
+    const rect = element.getBoundingClientRect();
+    overlay.style.display = "block";
+    overlay.style.left = `${rect.left}px`;
+    overlay.style.top = `${rect.top}px`;
+    overlay.style.width = `${rect.width}px`;
+    overlay.style.height = `${rect.height}px`;
+    label.style.left = `${Math.min(Math.max(8, rect.left), Math.max(8, innerWidth - 290))}px`;
+    label.style.top = `${Math.max(8, rect.top - 38)}px`;
+  };
+
+  const blockPostPickClick = (event: Event): void => {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    window.removeEventListener("click", blockPostPickClick, true);
+  };
+
+  const cleanup = (): void => {
+    window.removeEventListener("pointermove", onPointerMove, true);
+    window.removeEventListener("pointerdown", onPointerDown, true);
+    window.removeEventListener("keydown", onKeyDown, true);
+    overlay.remove();
+    label.remove();
+    if (stopElementPicker === cleanup) stopElementPicker = undefined;
+  };
+
+  function finish(element: Element): void {
+    window.addEventListener("click", blockPostPickClick, true);
+    setTimeout(() => window.removeEventListener("click", blockPostPickClick, true), 500);
+    const snapshot = setSelectedElement(element, { append: opts.append });
+    cleanup();
+    if (snapshot) {
+      showPickerToast(`${opts.append ? "Added" : "Selected"} ${snapshot.selector}`, 2200);
+      window.dispatchEvent(new CustomEvent("mcp:element-picked", { detail: snapshot }));
+    }
+  }
+
+  function onPointerMove(event: PointerEvent): void {
+    const element = elementFromEvent(event);
+    if (element) update(element);
+  }
+
+  function onPointerDown(event: PointerEvent): void {
+    const element = elementFromEvent(event);
+    if (!element) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    finish(element);
+  }
+
+  function onKeyDown(event: KeyboardEvent): void {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    cleanup();
+    showPickerToast("Element pick cancelled");
+  }
+
+  stopElementPicker = cleanup;
+  window.addEventListener("pointermove", onPointerMove, true);
+  window.addEventListener("pointerdown", onPointerDown, true);
+  window.addEventListener("keydown", onKeyDown, true);
+  showPickerToast(opts.append ? "Add another element. Click a page element." : "Element picker active. Click a page element.");
+}
+
+interface McpPageBridgeWindow {
+  mcp?: unknown;
+  __mcpReady?: boolean;
+  __mcpPageBridgeReadyV2?: boolean;
+  __mcpPageBridgeStartElementPicker?: (opts?: { append?: boolean }) => void;
+  __mcpPageBridgeCancelElementPicker?: () => void;
+  __mcpPageBridgeClearSelectedElements?: () => void;
+  __mcpPageBridgeGetSelectedElements?: () => unknown[];
+  __mcpPageBridgeRemoveSelectedElement?: (id: string) => boolean;
+  __mcpPageBridgeSetSelectedElementMeta?: (id: string, meta: { name?: string; group?: string }) => boolean;
+  __mcpPageBridgeSetSelectedMarkersVisible?: (visible: boolean) => void;
+  __mcpPageBridgeGetSelectedMarkersVisible?: () => boolean;
+  __mcpPageBridgeGetCssPatches?: () => unknown[];
+  __mcpPageBridgeRemoveCssPatch?: (id: string) => boolean;
+  __mcpPageBridgeClearCssPatches?: () => number;
+  __mcpPageBridgeExportCssPatches?: () => string;
+}
+
 // Guard against double-injection (manifest content_script + runtime
 // chrome.scripting injection into an already-open tab share this MAIN world).
-const globalWin = window as unknown as { mcp?: unknown; __mcpReady?: boolean };
-if (!globalWin.__mcpReady) {
+const globalWin = window as unknown as McpPageBridgeWindow;
+globalWin.__mcpPageBridgeStartElementPicker = startElementPicker;
+globalWin.__mcpPageBridgeCancelElementPicker = () => stopElementPicker?.();
+globalWin.__mcpPageBridgeClearSelectedElements = clearSelectedElements;
+globalWin.__mcpPageBridgeGetSelectedElements = getSelectedElementSnapshots;
+globalWin.__mcpPageBridgeRemoveSelectedElement = removeSelectedElement;
+globalWin.__mcpPageBridgeSetSelectedElementMeta = setSelectedElementMeta;
+globalWin.__mcpPageBridgeSetSelectedMarkersVisible = setSelectedMarkersVisible;
+globalWin.__mcpPageBridgeGetSelectedMarkersVisible = getSelectedMarkersVisible;
+globalWin.__mcpPageBridgeGetCssPatches = getCssPatches;
+globalWin.__mcpPageBridgeRemoveCssPatch = removeCssPatch;
+globalWin.__mcpPageBridgeClearCssPatches = clearCssPatches;
+globalWin.__mcpPageBridgeExportCssPatches = exportCssPatches;
+
+if (!globalWin.__mcpPageBridgeReadyV2) {
+  globalWin.__mcpPageBridgeReadyV2 = true;
   globalWin.__mcpReady = true;
   installWindowMcp(globalWin.mcp);
 
@@ -326,9 +501,22 @@ if (!globalWin.__mcpReady) {
         break;
       }
       case "control": {
-        const action = (data.payload as ControlPayload | undefined)?.action;
+        const payload = data.payload as
+          | (ControlPayload & { append?: boolean; selectionId?: string; visible?: boolean; name?: string; group?: string })
+          | undefined;
+        const action = payload?.action;
         if (action === "activate") activateAll();
-        else if (action === "deactivate") deactivateAll();
+        else if (action === "deactivate") {
+          stopElementPicker?.();
+          deactivateAll();
+        } else if (action === "startElementPicker") startElementPicker({ append: !!payload?.append });
+        else if (action === "cancelElementPicker") stopElementPicker?.();
+        else if (action === "clearSelectedElements") clearSelectedElements();
+        else if (action === "removeSelectedElement") removeSelectedElement(String(payload?.selectionId ?? ""));
+        else if (action === "setSelectedElementMeta") {
+          setSelectedElementMeta(String(payload?.selectionId ?? ""), { name: payload?.name, group: payload?.group });
+        }
+        else if (action === "setSelectedMarkersVisible") setSelectedMarkersVisible(payload?.visible !== false);
         break;
       }
     }

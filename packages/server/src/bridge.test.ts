@@ -55,6 +55,14 @@ async function connectAgent(b: Bridge): Promise<Client> {
   return agent;
 }
 
+async function connectAgentOverBridgeWebSocket(port: number): Promise<Client> {
+  const transport = new WebSocketClientTransport(new URL(`ws://127.0.0.1:${port}/agent`));
+  const agent = new Client({ name: "test-agent-ws", version: "0.0.0" }, { capabilities: {} });
+  await agent.connect(transport);
+  cleanups.push(() => agent.close());
+  return agent;
+}
+
 async function connectBrowser(
   port: number,
   name: string,
@@ -101,6 +109,26 @@ describe("mcp-page-bridge bridge", () => {
       arguments: { msg: "hi" },
     });
     expect(textOf(result)).toBe("echo:hi");
+  });
+
+  it("accepts multiple agent connections via the /agent websocket", async () => {
+    bridge = await createBridge({ port: 0 });
+    const localAgent = await connectAgent(bridge);
+    const wsAgent = await connectAgentOverBridgeWebSocket(bridge.port);
+
+    await connectBrowser(bridge.port, "shared-app", (s) => {
+      s.registerTool(
+        "echo",
+        { description: "Echo a message", inputSchema: { msg: z.string() } },
+        async ({ msg }) => ({ content: [{ type: "text", text: `shared:${msg}` }] }),
+      );
+    });
+
+    await waitFor(() => localAgent.listTools(), (r) => r.tools.some((t) => t.name === "shared-app__echo"));
+    await waitFor(() => wsAgent.listTools(), (r) => r.tools.some((t) => t.name === "shared-app__echo"));
+
+    const result = await wsAgent.callTool({ name: "shared-app__echo", arguments: { msg: "hi" } });
+    expect(textOf(result)).toBe("shared:hi");
   });
 
   it("reports providers via mcp_page_bridge_list_clients", async () => {

@@ -90,13 +90,13 @@ function downClose(state: TabState, providerId: string): void {
   safePost(state, msg);
 }
 
-function sendControl(state: TabState, action: ControlAction): void {
+function sendControl(state: TabState, action: ControlAction, extra: Partial<ControlPayload> = {}): void {
   const msg: ChannelMessage = {
     __mcpPageBridge: true,
     dir: "down",
     providerId: "*",
     kind: "control",
-    payload: { action } satisfies ControlPayload,
+    payload: { ...extra, action } satisfies ControlPayload,
   };
   safePost(state, msg);
 }
@@ -327,6 +327,155 @@ async function updateActionIcon(tabId: number, enabled: boolean): Promise<void> 
   }
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function ensureEnabledTab(tabId: number): Promise<TabState | undefined> {
+  await setEnabled(tabId, true);
+  void updateActionIcon(tabId, true);
+
+  let state = tabs.get(tabId);
+  if (!state) await injectIntoTab(tabId);
+
+  for (let i = 0; i < 6; i += 1) {
+    state = tabs.get(tabId);
+    if (state) {
+      sendControl(state, "activate");
+      return state;
+    }
+    await sleep(80);
+  }
+
+  return undefined;
+}
+
+async function runElementPickerScript(
+  tabId: number,
+  action:
+    | "start"
+    | "cancel"
+    | "clear"
+    | "get"
+    | "remove"
+    | "setMeta"
+    | "setVisible"
+    | "getCssPatches"
+    | "removeCssPatch"
+    | "clearCssPatches",
+  opts: { append?: boolean; selectionId?: string; visible?: boolean; name?: string; group?: string; patchId?: string } = {},
+): Promise<unknown> {
+  try {
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      args: [action, opts],
+      func: (
+        pickerAction:
+          | "start"
+          | "cancel"
+          | "clear"
+          | "get"
+          | "remove"
+          | "setMeta"
+          | "setVisible"
+          | "getCssPatches"
+          | "removeCssPatch"
+          | "clearCssPatches",
+        pickerOpts: { append?: boolean; selectionId?: string; visible?: boolean; name?: string; group?: string; patchId?: string },
+      ) => {
+        const win = window as unknown as {
+          __mcpPageBridgeStartElementPicker?: (opts?: { append?: boolean }) => void;
+          __mcpPageBridgeCancelElementPicker?: () => void;
+          __mcpPageBridgeClearSelectedElements?: () => void;
+          __mcpPageBridgeGetSelectedElements?: () => unknown[];
+          __mcpPageBridgeRemoveSelectedElement?: (id: string) => boolean;
+          __mcpPageBridgeSetSelectedElementMeta?: (id: string, meta: { name?: string; group?: string }) => boolean;
+          __mcpPageBridgeSetSelectedMarkersVisible?: (visible: boolean) => void;
+          __mcpPageBridgeGetSelectedMarkersVisible?: () => boolean;
+          __mcpPageBridgeGetCssPatches?: () => unknown[];
+          __mcpPageBridgeRemoveCssPatch?: (id: string) => boolean;
+          __mcpPageBridgeClearCssPatches?: () => number;
+        };
+        if (pickerAction === "get") {
+          return {
+            items: win.__mcpPageBridgeGetSelectedElements?.() ?? [],
+            markersVisible: win.__mcpPageBridgeGetSelectedMarkersVisible?.() !== false,
+          };
+        }
+        if (pickerAction === "remove") return win.__mcpPageBridgeRemoveSelectedElement?.(String(pickerOpts.selectionId ?? "")) === true;
+        if (pickerAction === "setMeta") {
+          return win.__mcpPageBridgeSetSelectedElementMeta?.(String(pickerOpts.selectionId ?? ""), {
+            name: pickerOpts.name,
+            group: pickerOpts.group,
+          }) === true;
+        }
+        if (pickerAction === "setVisible") {
+          win.__mcpPageBridgeSetSelectedMarkersVisible?.(pickerOpts.visible !== false);
+          return true;
+        }
+        if (pickerAction === "getCssPatches") return win.__mcpPageBridgeGetCssPatches?.() ?? [];
+        if (pickerAction === "removeCssPatch") return win.__mcpPageBridgeRemoveCssPatch?.(String(pickerOpts.patchId ?? "")) === true;
+        if (pickerAction === "clearCssPatches") return win.__mcpPageBridgeClearCssPatches?.() ?? 0;
+        const fn =
+          pickerAction === "start"
+            ? win.__mcpPageBridgeStartElementPicker
+            : pickerAction === "cancel"
+              ? win.__mcpPageBridgeCancelElementPicker
+              : win.__mcpPageBridgeClearSelectedElements;
+        if (!fn) return false;
+        if (pickerAction === "start") win.__mcpPageBridgeStartElementPicker?.(pickerOpts);
+        else fn();
+        return true;
+      },
+    });
+    return result?.result;
+  } catch {
+    return undefined;
+  }
+}
+
+interface SelectionState {
+  items: unknown[];
+  markersVisible: boolean;
+}
+
+interface PageDesignState {
+  selection: SelectionState;
+  cssPatches: unknown[];
+}
+
+function normalizeSelectionState(value: unknown): SelectionState {
+  if (Array.isArray(value)) return { items: value, markersVisible: true };
+  if (value && typeof value === "object") {
+    const data = value as { items?: unknown; markersVisible?: unknown };
+    return {
+      items: Array.isArray(data.items) ? data.items : [],
+      markersVisible: data.markersVisible !== false,
+    };
+  }
+  return { items: [], markersVisible: true };
+}
+
+async function readSelectionState(tabId: number): Promise<SelectionState> {
+  const current = await runElementPickerScript(tabId, "get");
+  if (current !== undefined) return normalizeSelectionState(current);
+  await injectIntoTab(tabId);
+  await sleep(50);
+  return normalizeSelectionState(await runElementPickerScript(tabId, "get"));
+}
+
+async function readPageDesignState(tabId: number): Promise<PageDesignState> {
+  const selection = await readSelectionState(tabId);
+  let cssPatches = await runElementPickerScript(tabId, "getCssPatches");
+  if (cssPatches === undefined) {
+    await injectIntoTab(tabId);
+    await sleep(50);
+    cssPatches = await runElementPickerScript(tabId, "getCssPatches");
+  }
+  return { selection, cssPatches: Array.isArray(cssPatches) ? cssPatches : [] };
+}
+
 // ---- per-tab Port wiring -----------------------------------------------------
 
 chrome.runtime.onConnect.addListener((port) => {
@@ -431,6 +580,7 @@ chrome.runtime.onMessage.addListener((req, _sender, sendResponse) => {
     if (req?.type === "getStatus") {
       const tabId = req.tabId as number;
       const state = tabs.get(tabId);
+      const design = await readPageDesignState(tabId);
       const providers = state
         ? [...state.sockets.entries()].map(([id, e]) => ({
             id,
@@ -446,6 +596,9 @@ chrome.runtime.onMessage.addListener((req, _sender, sendResponse) => {
         port: bridgePort,
         token: bridgeToken,
         browserControl,
+        selectedElements: design.selection.items,
+        selectionMarkersVisible: design.selection.markersVisible,
+        cssPatches: design.cssPatches,
       });
       return;
     }
@@ -464,6 +617,145 @@ chrome.runtime.onMessage.addListener((req, _sender, sendResponse) => {
         closeAllSockets(state);
       }
       sendResponse({ ok: true });
+      return;
+    }
+
+    if (req?.type === "startElementPicker") {
+      const tabId = req.tabId as number;
+      const append = !!req.append;
+      const state = await ensureEnabledTab(tabId);
+      if (await runElementPickerScript(tabId, "start", { append })) {
+        sendResponse({ ok: true });
+        return;
+      }
+      await injectIntoTab(tabId);
+      await sleep(100);
+      if (await runElementPickerScript(tabId, "start", { append })) {
+        sendResponse({ ok: true });
+        return;
+      }
+      const connectedState = state ?? tabs.get(tabId);
+      if (connectedState) {
+        sendControl(connectedState, "startElementPicker", { append });
+        sendResponse({ ok: true });
+        return;
+      }
+      sendResponse({ ok: false, error: "could not start picker on this tab" });
+      return;
+    }
+
+    if (req?.type === "cancelElementPicker") {
+      const tabId = req.tabId as number;
+      if (await runElementPickerScript(tabId, "cancel")) {
+        sendResponse({ ok: true });
+        return;
+      }
+      const state = tabs.get(tabId);
+      if (state) sendControl(state, "cancelElementPicker");
+      sendResponse({ ok: true });
+      return;
+    }
+
+    if (req?.type === "clearSelectedElements") {
+      const tabId = req.tabId as number;
+      if (await runElementPickerScript(tabId, "clear")) {
+        sendResponse({ ok: true });
+        return;
+      }
+      await injectIntoTab(tabId);
+      await sleep(100);
+      if (await runElementPickerScript(tabId, "clear")) {
+        sendResponse({ ok: true });
+        return;
+      }
+      const state = tabs.get(tabId);
+      if (state) sendControl(state, "clearSelectedElements");
+      sendResponse({ ok: true });
+      return;
+    }
+
+    if (req?.type === "removeSelectedElement") {
+      const tabId = req.tabId as number;
+      const selectionId = String(req.selectionId ?? "");
+      if ((await runElementPickerScript(tabId, "remove", { selectionId })) === true) {
+        sendResponse({ ok: true });
+        return;
+      }
+      await injectIntoTab(tabId);
+      await sleep(100);
+      if ((await runElementPickerScript(tabId, "remove", { selectionId })) === true) {
+        sendResponse({ ok: true });
+        return;
+      }
+      const state = tabs.get(tabId);
+      if (state) sendControl(state, "removeSelectedElement", { selectionId });
+      sendResponse({ ok: true });
+      return;
+    }
+
+    if (req?.type === "setSelectedElementMeta") {
+      const tabId = req.tabId as number;
+      const selectionId = String(req.selectionId ?? "");
+      const name = typeof req.name === "string" ? req.name : undefined;
+      const group = typeof req.group === "string" ? req.group : undefined;
+      if ((await runElementPickerScript(tabId, "setMeta", { selectionId, name, group })) === true) {
+        sendResponse({ ok: true });
+        return;
+      }
+      await injectIntoTab(tabId);
+      await sleep(100);
+      if ((await runElementPickerScript(tabId, "setMeta", { selectionId, name, group })) === true) {
+        sendResponse({ ok: true });
+        return;
+      }
+      const state = tabs.get(tabId);
+      if (state) sendControl(state, "setSelectedElementMeta", { selectionId, name, group });
+      sendResponse({ ok: true });
+      return;
+    }
+
+    if (req?.type === "setSelectionMarkersVisible") {
+      const tabId = req.tabId as number;
+      const visible = req.visible !== false;
+      if ((await runElementPickerScript(tabId, "setVisible", { visible })) === true) {
+        sendResponse({ ok: true });
+        return;
+      }
+      await injectIntoTab(tabId);
+      await sleep(100);
+      if ((await runElementPickerScript(tabId, "setVisible", { visible })) === true) {
+        sendResponse({ ok: true });
+        return;
+      }
+      const state = tabs.get(tabId);
+      if (state) sendControl(state, "setSelectedMarkersVisible", { visible });
+      sendResponse({ ok: true });
+      return;
+    }
+
+    if (req?.type === "removeCssPatch") {
+      const tabId = req.tabId as number;
+      const patchId = String(req.patchId ?? "");
+      if ((await runElementPickerScript(tabId, "removeCssPatch", { patchId })) === true) {
+        sendResponse({ ok: true });
+        return;
+      }
+      await injectIntoTab(tabId);
+      await sleep(100);
+      sendResponse({ ok: (await runElementPickerScript(tabId, "removeCssPatch", { patchId })) === true });
+      return;
+    }
+
+    if (req?.type === "clearCssPatches") {
+      const tabId = req.tabId as number;
+      const removed = await runElementPickerScript(tabId, "clearCssPatches");
+      if (removed !== undefined) {
+        sendResponse({ ok: true, removed });
+        return;
+      }
+      await injectIntoTab(tabId);
+      await sleep(100);
+      sendResponse({ ok: true, removed: await runElementPickerScript(tabId, "clearCssPatches") });
       return;
     }
 

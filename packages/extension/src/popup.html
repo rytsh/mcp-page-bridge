@@ -69,6 +69,13 @@
         gap: 8px;
         margin: 10px 0;
       }
+      .panel {
+        border: 1px solid #8883;
+        border-radius: 10px;
+        padding: 9px;
+        margin: 10px 0;
+        background: #8881;
+      }
       .field {
         display: flex;
         align-items: center;
@@ -84,6 +91,73 @@
       }
       button.full {
         width: 100%;
+      }
+      .picker-actions {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px;
+      }
+      .picker-actions .wide {
+        grid-column: 1 / -1;
+      }
+      .switch-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-top: 8px;
+      }
+      .selection-list {
+        margin-top: 8px;
+      }
+      .selection-item {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 8px;
+        align-items: center;
+      }
+      .selection-item button {
+        padding: 2px 7px;
+        border-radius: 4px;
+        min-width: 24px;
+      }
+      .selection-item button[data-remove-selection]:hover {
+        background: #d32f2f;
+        border-color: #d32f2f;
+        color: #fff;
+      }
+      .selection-meta {
+        min-width: 0;
+      }
+      .selection-edit {
+        grid-column: 1 / -1;
+        display: grid;
+        grid-template-columns: 1fr 1fr auto;
+        gap: 6px;
+      }
+      .selection-edit input {
+        min-width: 0;
+      }
+      .patch-item {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 8px;
+        align-items: start;
+      }
+      .patch-meta {
+        min-width: 0;
+      }
+      .patch-item pre {
+        max-height: 72px;
+        overflow: auto;
+        margin: 5px 0 0;
+        white-space: pre-wrap;
+        font-size: 10px;
+        opacity: 0.72;
+      }
+      button:disabled {
+        opacity: 0.45;
+        cursor: default;
       }
       ul {
         margin: 8px 0 0;
@@ -118,7 +192,31 @@
       <button id="openDashboard">Dashboard ↗</button>
     </div>
 
-    <div class="settings">
+    <div class="panel">
+      <div class="picker-actions">
+        <button id="pickElement">Pick element</button>
+        <button id="addElement">Add another</button>
+        <button id="clearSelection" class="wide">Clear selection</button>
+      </div>
+      <label class="switch-row">
+        <span>View selection</span>
+        <input id="viewSelection" type="checkbox" checked />
+      </label>
+      <div id="selectedElements" class="selection-list"></div>
+      <p id="pickerHint" class="muted">
+        Pick replaces current selection. Add another keeps existing yellow markers.
+      </p>
+    </div>
+
+    <div class="panel">
+      <div class="row" style="justify-content: space-between; margin-top: 0">
+        <strong>CSS patches</strong>
+        <button id="clearCssPatches">Clear all</button>
+      </div>
+      <div id="cssPatches" class="selection-list"></div>
+    </div>
+
+    <div id="settings" class="settings">
       <div class="field">
         <label for="port">Port</label>
         <input id="port" type="number" min="1" max="65535" />

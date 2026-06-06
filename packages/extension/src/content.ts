@@ -3,15 +3,18 @@
  * `window.mcp` tunnel and the service worker's per-tab Port. It parses nothing
  * — it just shuttles ChannelMessages in both directions.
  *
- * Guarded against double-injection: the manifest content_script and a runtime
- * chrome.scripting injection (for already-open tabs) share this ISOLATED world.
+ * Guarded against double-injection for the current script generation: the
+ * manifest content_script and a runtime chrome.scripting injection (for
+ * already-open tabs) share this ISOLATED world. The versioned key lets a freshly
+ * reloaded extension recover from stale content scripts left in an open tab.
  */
 import type { ChannelMessage } from "mcp-page-bridge-protocol";
 
-const guard = window as unknown as { __mcpPageBridgeContent?: boolean };
+const CONTENT_GUARD_KEY = "__mcpPageBridgeContentV2";
+const guard = window as unknown as Record<string, unknown>;
 
-if (!guard.__mcpPageBridgeContent) {
-  guard.__mcpPageBridgeContent = true;
+if (!guard[CONTENT_GUARD_KEY]) {
+  guard[CONTENT_GUARD_KEY] = true;
 
   const isChannelMessage = (value: unknown): value is ChannelMessage =>
     !!value && typeof value === "object" && (value as { __mcpPageBridge?: unknown }).__mcpPageBridge === true;

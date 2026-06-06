@@ -79,7 +79,7 @@ export interface ChannelMessage {
   /**
    * - kind "rpc":     a JSON-RPC message object
    * - kind "open":    `{ url, title }` source metadata (for the popup)
-   * - kind "control": `{ action: "hello" | "activate" | "deactivate", ... }`
+   * - kind "control": `{ action: ControlAction, ... }`
    * - kind "ext":     up = `ExtCallPayload`, down = `ExtResultPayload`
    */
   payload?: unknown;
@@ -99,12 +99,26 @@ export interface ExtResultPayload {
   error?: string;
 }
 
-export type ControlAction = "hello" | "activate" | "deactivate";
+export type ControlAction =
+  | "hello"
+  | "activate"
+  | "deactivate"
+  | "startElementPicker"
+  | "cancelElementPicker"
+  | "clearSelectedElements"
+  | "removeSelectedElement"
+  | "setSelectedElementMeta"
+  | "setSelectedMarkersVisible";
 
 export interface ControlPayload {
   action: ControlAction;
   url?: string;
   title?: string;
+  append?: boolean;
+  selectionId?: string;
+  name?: string;
+  group?: string;
+  visible?: boolean;
 }
 
 export const MCP_PAGE_BRIDGE_MARK = "__mcpPageBridge" as const;

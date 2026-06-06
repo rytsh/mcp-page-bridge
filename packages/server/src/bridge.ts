@@ -93,17 +93,7 @@ export async function createBridge(opts: BridgeOptions = {}): Promise<Bridge> {
   const promptRoutes = new Map<string, NameRoute>();
   const resourceRoutes = new Map<string, string>(); // uri -> providerId (first wins)
 
-  const server = new Server(
-    { name: "mcp-page-bridge", version: MCP_PAGE_BRIDGE_VERSION },
-    {
-      capabilities: {
-        tools: { listChanged: true },
-        prompts: { listChanged: true },
-        resources: { listChanged: true },
-        logging: {},
-      },
-    },
-  );
+  const agentServers = new Set<Server>();
 
   // ---- catalogs exposed to the agent ----------------------------------------
 
@@ -201,13 +191,17 @@ export async function createBridge(opts: BridgeOptions = {}): Promise<Bridge> {
     rebuildRoutes();
     const send =
       kind === "tools"
-        ? () => server.sendToolListChanged()
+        ? (s: Server) => s.sendToolListChanged()
         : kind === "prompts"
-          ? () => server.sendPromptListChanged()
-          : () => server.sendResourceListChanged();
-    void Promise.resolve().then(send).catch(() => {
-      /* no agent connected yet/anymore */
-    });
+          ? (s: Server) => s.sendPromptListChanged()
+          : (s: Server) => s.sendResourceListChanged();
+    for (const agentServer of agentServers) {
+      void Promise.resolve()
+        .then(() => send(agentServer))
+        .catch(() => {
+          /* no agent connected yet/anymore */
+        });
+    }
   }
 
   function uniqueLabel(base: string): string {
@@ -220,56 +214,75 @@ export async function createBridge(opts: BridgeOptions = {}): Promise<Bridge> {
 
   // ---- agent-facing request handlers ----------------------------------------
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: exposedTools() }));
+  function createAgentServer(): Server {
+    const agentServer = new Server(
+      { name: "mcp-page-bridge", version: MCP_PAGE_BRIDGE_VERSION },
+      {
+        capabilities: {
+          tools: { listChanged: true },
+          prompts: { listChanged: true },
+          resources: { listChanged: true },
+          logging: {},
+        },
+      },
+    );
 
-  server.setRequestHandler(CallToolRequestSchema, async (req): Promise<CallToolResult> => {
-    const name = req.params.name;
+    agentServer.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: exposedTools() }));
 
-    if (name === META_LIST_CLIENTS) {
-      return { content: [{ type: "text", text: JSON.stringify(providerSummary(), null, 2) }] };
-    }
+    agentServer.setRequestHandler(CallToolRequestSchema, async (req): Promise<CallToolResult> => {
+      const name = req.params.name;
 
-    const route = toolRoutes.get(name);
-    const provider = route && providers.get(route.providerId);
-    if (!route || !provider) {
-      return { content: [{ type: "text", text: `Unknown or disconnected tool: ${name}` }], isError: true };
-    }
-    try {
-      const result = await provider.client.callTool({
-        name: route.originalName,
-        arguments: req.params.arguments ?? {},
-      });
-      return result as CallToolResult;
-    } catch (error) {
-      return {
-        content: [{ type: "text", text: `Tool call failed: ${(error as Error).message}` }],
-        isError: true,
-      };
-    }
-  });
+      if (name === META_LIST_CLIENTS) {
+        return { content: [{ type: "text", text: JSON.stringify(providerSummary(), null, 2) }] };
+      }
 
-  server.setRequestHandler(ListPromptsRequestSchema, async () => ({ prompts: exposedPrompts() }));
-
-  server.setRequestHandler(GetPromptRequestSchema, async (req): Promise<GetPromptResult> => {
-    const route = promptRoutes.get(req.params.name);
-    const provider = route && providers.get(route.providerId);
-    if (!route || !provider) throw new Error(`Unknown or disconnected prompt: ${req.params.name}`);
-    return provider.client.getPrompt({
-      name: route.originalName,
-      arguments: req.params.arguments as Record<string, string> | undefined,
+      const route = toolRoutes.get(name);
+      const provider = route && providers.get(route.providerId);
+      if (!route || !provider) {
+        return { content: [{ type: "text", text: `Unknown or disconnected tool: ${name}` }], isError: true };
+      }
+      try {
+        const result = await provider.client.callTool({
+          name: route.originalName,
+          arguments: req.params.arguments ?? {},
+        });
+        return result as CallToolResult;
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `Tool call failed: ${(error as Error).message}` }],
+          isError: true,
+        };
+      }
     });
-  });
 
-  server.setRequestHandler(ListResourcesRequestSchema, async () => ({
-    resources: exposedResources(),
-  }));
+    agentServer.setRequestHandler(ListPromptsRequestSchema, async () => ({ prompts: exposedPrompts() }));
 
-  server.setRequestHandler(ReadResourceRequestSchema, async (req): Promise<ReadResourceResult> => {
-    const providerId = resourceRoutes.get(req.params.uri);
-    const provider = providerId ? providers.get(providerId) : undefined;
-    if (!provider) throw new Error(`Unknown or disconnected resource: ${req.params.uri}`);
-    return provider.client.readResource({ uri: req.params.uri });
-  });
+    agentServer.setRequestHandler(GetPromptRequestSchema, async (req): Promise<GetPromptResult> => {
+      const route = promptRoutes.get(req.params.name);
+      const provider = route && providers.get(route.providerId);
+      if (!route || !provider) throw new Error(`Unknown or disconnected prompt: ${req.params.name}`);
+      return provider.client.getPrompt({
+        name: route.originalName,
+        arguments: req.params.arguments as Record<string, string> | undefined,
+      });
+    });
+
+    agentServer.setRequestHandler(ListResourcesRequestSchema, async () => ({
+      resources: exposedResources(),
+    }));
+
+    agentServer.setRequestHandler(ReadResourceRequestSchema, async (req): Promise<ReadResourceResult> => {
+      const providerId = resourceRoutes.get(req.params.uri);
+      const provider = providerId ? providers.get(providerId) : undefined;
+      if (!provider) throw new Error(`Unknown or disconnected resource: ${req.params.uri}`);
+      return provider.client.readResource({ uri: req.params.uri });
+    });
+
+    agentServers.add(agentServer);
+    return agentServer;
+  }
+
+  const server = createAgentServer();
 
   function providerSummary() {
     return [...providers.values()].map((p) => ({
@@ -417,6 +430,37 @@ export async function createBridge(opts: BridgeOptions = {}): Promise<Bridge> {
   const port = typeof address === "object" && address ? address.port : (opts.port ?? DEFAULT_PORT);
 
   wss.on("connection", async (ws: WebSocket, req) => {
+    const path = (() => {
+      try {
+        return new URL(req.url ?? "/", "ws://localhost").pathname;
+      } catch {
+        return "/";
+      }
+    })();
+
+    if (path === "/agent") {
+      const agentServer = createAgentServer();
+      const transport = new WebSocketServerTransport(ws);
+      const cleanupAgent = (): void => {
+        if (!agentServers.delete(agentServer)) return;
+        void agentServer.close().catch(() => {
+          // ignore
+        });
+      };
+      ws.on("close", cleanupAgent);
+      try {
+        await agentServer.connect(transport);
+      } catch {
+        cleanupAgent();
+        try {
+          ws.close();
+        } catch {
+          // ignore
+        }
+      }
+      return;
+    }
+
     const transport = new WebSocketServerTransport(ws);
     const client = new Client({ name: "mcp-page-bridge", version: MCP_PAGE_BRIDGE_VERSION }, { capabilities: {} });
     const id = randomUUID();
@@ -495,16 +539,18 @@ export async function createBridge(opts: BridgeOptions = {}): Promise<Bridge> {
     }
     if (caps?.logging) {
       client.setNotificationHandler(LoggingMessageNotificationSchema, (note) => {
-        void Promise.resolve()
-          .then(() =>
-            server.sendLoggingMessage({
-              ...note.params,
-              logger: `${provider.label}/${note.params.logger ?? "page"}`,
-            }),
-          )
-          .catch(() => {
-            /* agent not listening */
-          });
+        for (const agentServer of agentServers) {
+          void Promise.resolve()
+            .then(() =>
+              agentServer.sendLoggingMessage({
+                ...note.params,
+                logger: `${provider.label}/${note.params.logger ?? "page"}`,
+              }),
+            )
+            .catch(() => {
+              /* agent not listening */
+            });
+        }
       });
     }
 
@@ -539,10 +585,13 @@ export async function createBridge(opts: BridgeOptions = {}): Promise<Bridge> {
       }
       await new Promise<void>((resolve) => wss.close(() => resolve()));
       await new Promise<void>((resolve) => httpServer.close(() => resolve()));
-      try {
-        await server.close();
-      } catch {
-        // ignore
+      for (const agentServer of [...agentServers]) {
+        agentServers.delete(agentServer);
+        try {
+          await agentServer.close();
+        } catch {
+          // ignore
+        }
       }
     },
   };
