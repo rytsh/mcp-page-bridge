@@ -197,7 +197,7 @@
       <button id="openDashboard">Dashboard ↗</button>
     </div>
 
-    <div class="panel">
+    <div class="panel" id="designPanel">
       <div class="picker-actions">
         <button id="pickElement">Pick element</button>
         <button id="addElement">Add another</button>
@@ -213,7 +213,7 @@
       </p>
     </div>
 
-    <div class="panel">
+    <div class="panel" id="cssPanel">
       <div class="row" style="justify-content: space-between; margin-top: 0">
         <strong>CSS patches</strong>
         <button id="clearCssPatches">Clear all</button>
@@ -231,6 +231,10 @@
         <input id="token" type="text" placeholder="(optional)" />
       </div>
       <button id="saveSettings" class="full">Save settings</button>
+    </div>
+
+    <div class="row">
+      <label><input id="designTools" type="checkbox" /> Design tools (selection, CSS, audits)</label>
     </div>
 
     <div class="row">

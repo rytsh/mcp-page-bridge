@@ -772,7 +772,7 @@ function collectMediaQueries(maxRules: unknown): string[] {
 
 export function registerBuiltins(
   server: EmbeddedMcpServer,
-  opts: { extCall: ExtCall; console: ConsoleBuffer; includeEval?: boolean },
+  opts: { extCall: ExtCall; console: ConsoleBuffer; includeEval?: boolean; designTools?: boolean },
 ): void {
   const captureScreenshot = async (): Promise<{ dataUrl: string; base64: string }> => {
     const res = (await opts.extCall("screenshot", { download: false })) as { dataUrl: string };
@@ -788,10 +788,10 @@ export function registerBuiltins(
     {
       name: "eval",
       description:
-        "Evaluate JavaScript in the page (MAIN world) and return the result. Accepts an expression or statements. Async/await supported. Some pages (for example GitHub) block arbitrary eval/inline script via CSP; on those pages prefer the dedicated DOM/CSS tools instead of eval.",
+        "Run JS in the page and return the result (expression or statements; async/await ok). Strict page CSP (e.g. GitHub) blocks this — use the DOM/CSS tools there instead.",
       inputSchema: {
         type: "object",
-        properties: { code: { type: "string", description: "JS expression or statements" } },
+        properties: { code: { type: "string", description: "JS to run" } },
         required: ["code"],
       },
     },
@@ -813,12 +813,12 @@ export function registerBuiltins(
   server.registerTool(
     {
       name: "dom_query",
-      description: "Query the DOM with a CSS selector; returns matched elements' tag/id/classes/text/attributes.",
+      description: "Query the DOM by CSS selector; returns tag/id/classes/text/attributes of matches.",
       inputSchema: {
         type: "object",
         properties: {
           selector: { type: "string" },
-          limit: { type: "number", description: "max elements (default 20)" },
+          limit: { type: "number", description: "max (default 20)" },
           includeHtml: { type: "boolean", description: "include truncated outerHTML" },
         },
         required: ["selector"],
@@ -843,7 +843,7 @@ export function registerBuiltins(
   server.registerTool(
     {
       name: "get_page_info",
-      description: "Return current page url, title, readyState, viewport size, and user agent.",
+      description: "Page url, title, readyState, viewport, and user agent.",
       inputSchema: { type: "object", properties: {} },
     },
     () =>
@@ -875,7 +875,7 @@ export function registerBuiltins(
   server.registerTool(
     {
       name: "set_value",
-      description: "Set an input/textarea/select value and dispatch input+change events.",
+      description: "Set an input/textarea/select value and fire input+change events.",
       inputSchema: {
         type: "object",
         properties: { selector: { type: "string" }, value: { type: "string" } },
@@ -894,7 +894,7 @@ export function registerBuiltins(
   server.registerTool(
     {
       name: "scroll",
-      description: "Scroll to an element (selector) or to x/y coordinates.",
+      description: "Scroll to a selector or to x/y.",
       inputSchema: {
         type: "object",
         properties: {
@@ -917,7 +917,7 @@ export function registerBuiltins(
   server.registerTool(
     {
       name: "wait_for",
-      description: "Wait until an element matching the selector appears (or time out).",
+      description: "Wait until a selector appears (or time out).",
       inputSchema: {
         type: "object",
         properties: {
@@ -947,12 +947,12 @@ export function registerBuiltins(
   server.registerTool(
     {
       name: "get_html",
-      description: "Return outerHTML of a selector (or the whole document), truncated.",
+      description: "outerHTML of a selector (or whole document), truncated.",
       inputSchema: {
         type: "object",
         properties: {
           selector: { type: "string" },
-          max: { type: "number", description: "max characters (default 5000)" },
+          max: { type: "number", description: "max chars (default 5000)" },
         },
       },
     },
@@ -965,11 +965,16 @@ export function registerBuiltins(
     },
   );
 
+  // ---- design / selection toolset (opt-in) ----
+  // Off by default to keep the built-in catalog small (fewer tokens in the
+  // agent's tool list). Enabled via the popup "Design tools" switch, which the
+  // service worker forwards on the activate control message.
+  if (opts.designTools) {
   server.registerTool(
     {
       name: "get_selected_element",
       description:
-        "Return the most recently picked element from the extension popup and marked with the yellow transparent overlay. Use this when the user says 'the yellow/selected place'.",
+        "The element picked in the popup — the 'yellow/selected place'. Returns its selector and geometry.",
       inputSchema: { type: "object", properties: {} },
     },
     () =>
@@ -984,8 +989,7 @@ export function registerBuiltins(
   server.registerTool(
     {
       name: "get_selected_elements",
-      description:
-        "Return all elements picked from the extension popup and marked with yellow transparent overlays. The last item is primary.",
+      description: "All elements picked in the popup (last item is primary).",
       inputSchema: { type: "object", properties: {} },
     },
     () => json(getSelectedElementSnapshots()),
@@ -994,16 +998,15 @@ export function registerBuiltins(
   server.registerTool(
     {
       name: "get_computed_style",
-      description:
-        "Return computed CSS for a selector, or for the element last picked from the extension popup if selector is omitted.",
+      description: "Computed CSS for a selector, or the picked element if omitted.",
       inputSchema: {
         type: "object",
         properties: {
-          selector: { type: "string", description: "CSS selector. Omit to use the picked element." },
+          selector: { type: "string", description: "Omit to use the picked element." },
           properties: {
             type: "array",
             items: { type: "string" },
-            description: "CSS properties to return. Defaults to common design properties.",
+            description: "Props to return (default common design props).",
           },
         },
       },
@@ -1017,13 +1020,12 @@ export function registerBuiltins(
   server.registerTool(
     {
       name: "highlight_element",
-      description:
-        "Briefly highlight a selector, or the element last picked from the extension popup if selector is omitted.",
+      description: "Briefly highlight a selector, or the picked element if omitted.",
       inputSchema: {
         type: "object",
         properties: {
-          selector: { type: "string", description: "CSS selector. Omit to use the picked element." },
-          durationMs: { type: "number", description: "Highlight duration in ms (default 2000)." },
+          selector: { type: "string", description: "Omit to use the picked element." },
+          durationMs: { type: "number", description: "ms (default 2000)" },
         },
       },
     },
@@ -1037,12 +1039,11 @@ export function registerBuiltins(
   server.registerTool(
     {
       name: "show_selected_marker",
-      description:
-        "Show the persistent yellow transparent marker on the picked element, or on selector if provided.",
+      description: "Show the persistent marker on the picked element, or on a selector.",
       inputSchema: {
         type: "object",
         properties: {
-          selector: { type: "string", description: "CSS selector. Omit to use the picked element." },
+          selector: { type: "string", description: "Omit to use the picked element." },
         },
       },
     },
@@ -1056,7 +1057,7 @@ export function registerBuiltins(
   server.registerTool(
     {
       name: "hide_selected_marker",
-      description: "Hide persistent yellow selected-element markers. The selected elements remain remembered.",
+      description: "Hide selection markers (selections stay remembered).",
       inputSchema: { type: "object", properties: {} },
     },
     () => {
@@ -1068,7 +1069,7 @@ export function registerBuiltins(
   server.registerTool(
     {
       name: "clear_selected_elements",
-      description: "Forget all picked elements and remove their yellow transparent markers.",
+      description: "Forget all picked elements and their markers.",
       inputSchema: { type: "object", properties: {} },
     },
     () => {
@@ -1081,7 +1082,7 @@ export function registerBuiltins(
   server.registerTool(
     {
       name: "remove_selected_element",
-      description: "Forget one picked element by selectionId and remove its yellow transparent marker.",
+      description: "Forget one picked element by selectionId.",
       inputSchema: {
         type: "object",
         properties: { selectionId: { type: "string" } },
@@ -1097,13 +1098,13 @@ export function registerBuiltins(
   server.registerTool(
     {
       name: "update_selected_element",
-      description: "Set a name and/or group for a picked element. Omit selectionId to update the primary selection.",
+      description: "Set name/group for a picked element.",
       inputSchema: {
         type: "object",
         properties: {
-          selectionId: { type: "string", description: "Selected element id. Omit to update the primary/latest selection." },
-          name: { type: "string", description: "Human-readable selection name. Empty clears it." },
-          group: { type: "string", description: "Optional group name. Empty clears it." },
+          selectionId: { type: "string", description: "Omit for the latest selection." },
+          name: { type: "string", description: "Name (empty clears)." },
+          group: { type: "string", description: "Group (empty clears)." },
         },
       },
     },
@@ -1122,21 +1123,16 @@ export function registerBuiltins(
     {
       name: "apply_css",
       description:
-        "Apply a temporary CSS patch. If the user refers to the picked/selected/yellow element, omit selector and pass declaration CSS only; the patch is scoped to that one picked element. Complete CSS rules are page-wide and should only be used for intentional global/page changes. Returns a patch id for rollback.",
+        "Apply a temporary, reversible CSS patch (returns a patch id). For the picked/selected element, omit selector and pass declarations only (e.g. color:red); it is scoped to that element. Full rules like `.x{...}` are page-wide and rejected when a selector or picked element is targeted.",
       inputSchema: {
         type: "object",
         properties: {
-          selector: {
-            type: "string",
-            description:
-              "CSS selector. Omit to use the picked element. When selector or a picked element is targeted, css must be declarations only, not complete CSS rules.",
-          },
+          selector: { type: "string", description: "Omit to target the picked element." },
           css: {
             type: "string",
-            description:
-              "CSS declarations for a selector/picked element (e.g. color:red;). Complete CSS rules (e.g. .hero { color:red; }) are page-wide and rejected when a selector or picked element is targeted.",
+            description: "Declarations (color:red;) for a selector/picked element, or full rules for page-wide changes.",
           },
-          reason: { type: "string", description: "Short note explaining why this patch was applied." },
+          reason: { type: "string", description: "Why (optional)." },
         },
         required: ["css"],
       },
@@ -1152,7 +1148,7 @@ export function registerBuiltins(
   server.registerTool(
     {
       name: "list_css_patches",
-      description: "List temporary CSS patches applied by mcp-page-bridge on this page.",
+      description: "List active temporary CSS patches.",
       inputSchema: { type: "object", properties: {} },
     },
     () => json([...cssPatches.values()]),
@@ -1177,7 +1173,7 @@ export function registerBuiltins(
   server.registerTool(
     {
       name: "clear_css_patches",
-      description: "Remove all temporary CSS patches applied by mcp-page-bridge on this page.",
+      description: "Remove all temporary CSS patches.",
       inputSchema: { type: "object", properties: {} },
     },
     () => text(`removed ${clearCssPatches()} CSS patch(es)`),
@@ -1186,7 +1182,7 @@ export function registerBuiltins(
   server.registerTool(
     {
       name: "export_css_patches",
-      description: "Return all temporary mcp-page-bridge CSS patches as source-ready CSS text.",
+      description: "Return active CSS patches as source-ready CSS.",
       inputSchema: { type: "object", properties: {} },
     },
     () => text(exportCssPatches()),
@@ -1195,7 +1191,7 @@ export function registerBuiltins(
   server.registerTool(
     {
       name: "export_design_changes",
-      description: "Return selected elements and temporary CSS patches as a migration bundle for applying changes in source code.",
+      description: "Return picked elements + CSS patches as a migration bundle for source code.",
       inputSchema: { type: "object", properties: {} },
     },
     () =>
@@ -1212,12 +1208,12 @@ export function registerBuiltins(
   server.registerTool(
     {
       name: "accessibility_audit",
-      description: "Run a lightweight accessibility audit for the page or a selector.",
+      description: "Lightweight a11y audit for the page or a selector.",
       inputSchema: {
         type: "object",
         properties: {
-          selector: { type: "string", description: "Root selector to audit. Defaults to document.body." },
-          maxElements: { type: "number", description: "Maximum DOM elements to inspect (default 250, max 1000)." },
+          selector: { type: "string", description: "Root (default body)." },
+          maxElements: { type: "number", description: "max elements (default 250, max 1000)" },
         },
       },
     },
@@ -1227,11 +1223,11 @@ export function registerBuiltins(
   server.registerTool(
     {
       name: "responsive_summary",
-      description: "Summarize current viewport, selected element geometry, and CSS media queries found on the page.",
+      description: "Viewport, picked-element geometry, and page media queries.",
       inputSchema: {
         type: "object",
         properties: {
-          maxRules: { type: "number", description: "Maximum media-query rules to collect (default 120)." },
+          maxRules: { type: "number", description: "max media rules (default 120)" },
         },
       },
     },
@@ -1252,11 +1248,11 @@ export function registerBuiltins(
   server.registerTool(
     {
       name: "debug_summary",
-      description: "Return a compact debugging summary: page state, console errors/warnings, selected elements, and CSS patch count.",
+      description: "Compact debug: page state, console errors/warnings, selections, patch count.",
       inputSchema: {
         type: "object",
         properties: {
-          limit: { type: "number", description: "Recent console entries to include (default 20)." },
+          limit: { type: "number", description: "recent console entries (default 20)" },
         },
       },
     },
@@ -1286,11 +1282,12 @@ export function registerBuiltins(
       });
     },
   );
+  } // end design/selection toolset
 
   server.registerTool(
     {
       name: "console_logs",
-      description: "Return recently captured console output and page errors.",
+      description: "Recent console output and page errors.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1307,16 +1304,16 @@ export function registerBuiltins(
     },
   );
 
-  // ---- extension-backed tools (delegated to the service worker) ----
-
+  // ---- design baseline tools (opt-in, delegated to the service worker) ----
+  if (opts.designTools) {
   server.registerTool(
     {
       name: "capture_design_baseline",
-      description: "Capture and remember a baseline screenshot of the visible tab for later before/after comparison.",
+      description: "Capture a baseline screenshot for later before/after compare.",
       inputSchema: {
         type: "object",
         properties: {
-          label: { type: "string", description: "Optional baseline label (default baseline)." },
+          label: { type: "string", description: "label (default baseline)" },
         },
       },
     },
@@ -1343,7 +1340,7 @@ export function registerBuiltins(
   server.registerTool(
     {
       name: "compare_design_baseline",
-      description: "Capture the current visible tab and return a before/after screenshot comparison against the remembered baseline.",
+      description: "Screenshot now and compare to the saved baseline (before/after).",
       inputSchema: { type: "object", properties: {} },
     },
     async () => {
@@ -1383,7 +1380,7 @@ export function registerBuiltins(
   server.registerTool(
     {
       name: "clear_design_baseline",
-      description: "Forget the stored before/after screenshot baseline.",
+      description: "Forget the saved screenshot baseline.",
       inputSchema: { type: "object", properties: {} },
     },
     () => {
@@ -1392,17 +1389,19 @@ export function registerBuiltins(
       return text(hadBaseline ? "design baseline cleared" : "no design baseline was stored");
     },
   );
+  } // end design baseline tools
+
+  // ---- core extension-backed tools (delegated to the service worker) ----
 
   server.registerTool(
     {
       name: "screenshot",
-      description:
-        "Capture a PNG screenshot of the visible tab. Set download:true to also save it to the browser's Downloads folder.",
+      description: "PNG screenshot of the visible tab; download:true also saves it to Downloads.",
       inputSchema: {
         type: "object",
         properties: {
-          download: { type: "boolean", description: "also save the PNG to Downloads" },
-          filename: { type: "string", description: "download filename (default mcp-page-bridge-<ts>.png)" },
+          download: { type: "boolean", description: "also save to Downloads" },
+          filename: { type: "string", description: "download filename" },
         },
       },
     },

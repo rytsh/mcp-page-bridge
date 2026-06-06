@@ -13,6 +13,7 @@ interface Status {
   port: number;
   token: string;
   browserControl: boolean;
+  designTools: boolean;
   selectedElements?: SelectedElementStatus[];
   selectionMarkersVisible?: boolean;
   cssPatches?: CssPatchStatus[];
@@ -69,6 +70,11 @@ function render(status: Status): void {
   el<HTMLInputElement>("port").value = String(status.port);
   el<HTMLInputElement>("token").value = status.token ?? "";
   el<HTMLInputElement>("browserControl").checked = !!status.browserControl;
+  el<HTMLInputElement>("designTools").checked = !!status.designTools;
+  // The picker + CSS-patch panels only matter when the design/selection tools
+  // are enabled (otherwise the agent can't act on a selection), so hide them.
+  el<HTMLDivElement>("designPanel").style.display = status.designTools ? "" : "none";
+  el<HTMLDivElement>("cssPanel").style.display = status.designTools ? "" : "none";
   el<HTMLDivElement>("settings").style.display = status.enabled ? "none" : "flex";
   el<HTMLInputElement>("viewSelection").checked = status.selectionMarkersVisible !== false;
 
@@ -166,12 +172,14 @@ async function main(): Promise<void> {
     const port = Number(el<HTMLInputElement>("port").value) || 8787;
     const token = el<HTMLInputElement>("token").value.trim();
     const browserControl = el<HTMLInputElement>("browserControl").checked;
-    await chrome.runtime.sendMessage({ type: "setSettings", port, token, browserControl });
+    const designTools = el<HTMLInputElement>("designTools").checked;
+    await chrome.runtime.sendMessage({ type: "setSettings", port, token, browserControl, designTools });
     await refresh();
   }
 
   el<HTMLButtonElement>("saveSettings").addEventListener("click", saveSettings);
   el<HTMLInputElement>("browserControl").addEventListener("change", saveSettings);
+  el<HTMLInputElement>("designTools").addEventListener("change", saveSettings);
 
   el<HTMLInputElement>("viewSelection").addEventListener("change", async () => {
     const visible = el<HTMLInputElement>("viewSelection").checked;

@@ -10,7 +10,7 @@ import { registerBuiltins } from "./builtins.js";
  * (reads the buffer), and the SW-delegated tools (screenshot/navigate/reload)
  * via a mock extCall. DOM tools require a browser and are exercised manually.
  */
-async function setup(opts: { includeEval?: boolean } = {}) {
+async function setup(opts: { includeEval?: boolean; designTools?: boolean } = {}) {
   const calls: Array<[string, unknown]> = [];
   const server = new EmbeddedMcpServer({ name: "builtins", version: "1.0.0" });
   registerBuiltins(server, {
@@ -28,6 +28,9 @@ async function setup(opts: { includeEval?: boolean } = {}) {
     },
     console: { entries: [{ level: "warn", text: "careful", time: "2026" }] },
     includeEval: opts.includeEval,
+    // Default the design/selection toolset ON in tests unless a case overrides
+    // it, so the existing full-catalog assertions keep covering those tools.
+    designTools: opts.designTools !== false,
   });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   await server.connect(st as unknown as MinimalTransport);
@@ -87,10 +90,36 @@ describe("built-in tools", () => {
   it("BUILTIN_TOOL_NAMES stays in sync with the registered built-ins", async () => {
     // The dashboard classifies tools using BUILTIN_TOOL_NAMES. If a built-in is
     // added here but not to the protocol list, it leaks into the "Page tools"
-    // group. This guard keeps the single source of truth honest.
-    const { client } = await setup();
+    // group. This guard keeps the single source of truth honest. The full set
+    // (core + opt-in design tools) must match the protocol list.
+    const { client } = await setup({ designTools: true });
     const registered = (await client.listTools()).tools.map((t) => t.name).sort();
     expect(registered).toEqual([...BUILTIN_TOOL_NAMES].sort());
+  });
+
+  it("registers only the lean core toolset when design tools are off", async () => {
+    const { client } = await setup({ designTools: false });
+    const names = (await client.listTools()).tools.map((t) => t.name).sort();
+    expect(names).toEqual(
+      [
+        "click",
+        "console_logs",
+        "dom_query",
+        "eval",
+        "get_html",
+        "get_page_info",
+        "navigate",
+        "reload",
+        "screenshot",
+        "scroll",
+        "set_value",
+        "wait_for",
+      ].sort(),
+    );
+    // Design/selection extras are gated off.
+    expect(names).not.toContain("apply_css");
+    expect(names).not.toContain("get_selected_element");
+    expect(names).not.toContain("capture_design_baseline");
   });
 
   it("eval returns the evaluated expression", async () => {

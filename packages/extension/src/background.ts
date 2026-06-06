@@ -40,6 +40,10 @@ const tabs = new Map<number, TabState>();
 let bridgePort = DEFAULT_PORT;
 let bridgeToken = "";
 let browserControl = false;
+// Opt-in design/selection built-in tools. Off by default to keep the per-tab
+// built-in catalog (and the agent's token cost) small. Forwarded to the page on
+// the activate control message.
+let designTools = false;
 
 function wsUrl(meta: Record<string, string | number | undefined> = {}): string {
   const url = new URL(`ws://127.0.0.1:${bridgePort}`);
@@ -53,10 +57,11 @@ function wsUrl(meta: Record<string, string | number | undefined> = {}): string {
 // Optional, opt-in "browser" provider (controls all tabs, not just one page).
 const browserProvider = new BrowserProvider(() => wsUrl());
 
-void chrome.storage.local.get(["port", "token", "browserControl"]).then((v) => {
+void chrome.storage.local.get(["port", "token", "browserControl", "designTools"]).then((v) => {
   if (v.port) bridgePort = Number(v.port) || DEFAULT_PORT;
   if (typeof v.token === "string") bridgeToken = v.token;
   browserControl = !!v.browserControl;
+  designTools = !!v.designTools;
   if (browserControl) browserProvider.start();
 });
 
@@ -347,7 +352,7 @@ async function ensureEnabledTab(tabId: number): Promise<TabState | undefined> {
   for (let i = 0; i < 6; i += 1) {
     state = tabs.get(tabId);
     if (state) {
-      sendControl(state, "activate");
+      sendControl(state, "activate", { designTools });
       return state;
     }
     await sleep(80);
@@ -513,7 +518,7 @@ async function handleUp(state: TabState, msg: ChannelMessage): Promise<void> {
     if (action === "hello") {
       const on = await isEnabled(state.tabId);
       void updateActionIcon(state.tabId, on);
-      if (on) sendControl(state, "activate");
+      if (on) sendControl(state, "activate", { designTools });
     }
     return;
   }
@@ -596,7 +601,11 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
     if (req?.type === "getStatus") {
       const tabId = req.tabId as number;
       const state = tabs.get(tabId);
-      const design = await readPageDesignState(tabId);
+      // Only probe page selection/CSS-patch state when design tools are on; with
+      // them off the popup hides those panels, so skip the per-poll injection.
+      const design = designTools
+        ? await readPageDesignState(tabId)
+        : { selection: { items: [], markersVisible: true }, cssPatches: [] };
       const providers = state
         ? [...state.sockets.entries()].map(([id, e]) => ({
             id,
@@ -612,6 +621,7 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
         port: bridgePort,
         token: bridgeToken,
         browserControl,
+        designTools,
         selectedElements: design.selection.items,
         selectionMarkersVisible: design.selection.markersVisible,
         cssPatches: design.cssPatches,
@@ -626,7 +636,7 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
         if (state) {
           await setEnabled(tabId, true);
           void updateActionIcon(tabId, true);
-          sendControl(state, "activate");
+          sendControl(state, "activate", { designTools });
           sendResponse({ ok: true });
           return;
         }
@@ -803,10 +813,19 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
       bridgePort = Number(req.port) || DEFAULT_PORT;
       bridgeToken = typeof req.token === "string" ? req.token : "";
       browserControl = !!req.browserControl;
-      await chrome.storage.local.set({ port: bridgePort, token: bridgeToken, browserControl });
+      const prevDesignTools = designTools;
+      designTools = !!req.designTools;
+      await chrome.storage.local.set({ port: bridgePort, token: bridgeToken, browserControl, designTools });
       if (browserControl) browserProvider.restart();
       else browserProvider.stop();
-      sendResponse({ ok: true, port: bridgePort, hasToken: !!bridgeToken, browserControl });
+      // Re-apply the design-tools setting to already-enabled tabs so the
+      // built-in catalog updates live (the page rebuilds its embedded server).
+      if (designTools !== prevDesignTools) {
+        for (const state of tabs.values()) {
+          if (await isEnabled(state.tabId)) sendControl(state, "activate", { designTools });
+        }
+      }
+      sendResponse({ ok: true, port: bridgePort, hasToken: !!bridgeToken, browserControl, designTools });
       return;
     }
 

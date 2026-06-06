@@ -184,6 +184,12 @@ export interface ControlPayload {
   name?: string;
   group?: string;
   visible?: boolean;
+  /**
+   * On "activate": whether the opt-in design/selection built-in toolset should
+   * be registered. Off by default to keep the built-in tool catalog (and the
+   * agent's token cost) small.
+   */
+  designTools?: boolean;
 }
 
 export const MCP_PAGE_BRIDGE_MARK = "__mcpPageBridge" as const;

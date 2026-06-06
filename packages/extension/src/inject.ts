@@ -54,6 +54,9 @@ interface SdkLikeServer {
 let activated = false;
 let builtinsEnabled = true;
 let evalEnabled = true;
+// Opt-in design/selection built-ins (popup "Design tools"). Off by default to
+// keep the built-in tool catalog small. Set from the activate control message.
+let designToolsEnabled = false;
 let label = sanitizeLabel(location.host || document.title || "browser");
 
 let embedded: EmbeddedMcpServer | undefined;
@@ -113,7 +116,12 @@ function embeddedServer(): EmbeddedMcpServer {
       websiteUrl: location.href,
     });
     if (builtinsEnabled) {
-      registerBuiltins(embedded, { extCall, console: consoleBuffer, includeEval: evalEnabled });
+      registerBuiltins(embedded, {
+        extCall,
+        console: consoleBuffer,
+        includeEval: evalEnabled,
+        designTools: designToolsEnabled,
+      });
     }
   }
   if (activated && !embedded.connected && !reconnectingEmbedded) void embedded.connect(newTransport());
@@ -192,6 +200,26 @@ function syncGlobalLabel(): boolean {
   label = next;
   embedded?.setServerInfo({ name: label });
   return true;
+}
+
+/**
+ * Toggle the opt-in design/selection built-ins. Rebuilds the embedded server so
+ * its registered tool set matches, and re-registers any page-declared tools.
+ */
+function rebuildEmbeddedForDesignTools(): void {
+  const server = embedded;
+  if (!server) {
+    if (activated) embeddedServer();
+    return;
+  }
+  globalTools.clear(); // force page-declared tools to re-register on the fresh server
+  void server.close().then(() => {
+    if (embedded === server) embedded = undefined;
+    if (activated) {
+      embeddedServer(); // recreate with built-ins per the new flag (+ reconnect)
+      syncGlobalTools(); // re-register page-declared tools
+    }
+  });
 }
 
 function reconnectEmbedded(): void {
@@ -515,8 +543,13 @@ if (!globalWin.__mcpPageBridgeReadyV2) {
           | (ControlPayload & { append?: boolean; selectionId?: string; visible?: boolean; name?: string; group?: string })
           | undefined;
         const action = payload?.action;
-        if (action === "activate") activateAll();
-        else if (action === "deactivate") {
+        if (action === "activate") {
+          const wantDesign = payload?.designTools === true;
+          const changed = wantDesign !== designToolsEnabled;
+          designToolsEnabled = wantDesign;
+          if (activated && changed) rebuildEmbeddedForDesignTools();
+          else activateAll();
+        } else if (action === "deactivate") {
           stopElementPicker?.();
           deactivateAll();
         } else if (action === "startElementPicker") startElementPicker({ append: !!payload?.append });

@@ -302,15 +302,22 @@ reconnects the provider so the dashboard and agent see the new namespace.
 
 ## Built-in tools
 
-When a tab is enabled, the extension also exposes a built-in toolset on the same
-provider (so any page is reachable even without calling `window.mcp`):
+When a tab is enabled, the extension exposes a lean **core** built-in toolset on
+the same provider (so any page is reachable even without calling `window.mcp`):
 
 `eval` (run JS in the page), `dom_query`, `get_html`, `get_page_info`, `click`,
 `set_value`, `scroll`, `wait_for`, `console_logs` (captured from
 `document_start`), `screenshot` (pass `download:true` to also save the PNG to
 the browser's Downloads folder), `navigate`, `reload`.
 
-Design tools are included too: click **Pick element** in the popup, select a page
+This core set is kept small on purpose: every tool's name + schema sits in the
+agent's tool list and costs tokens for the whole session, so the heavier
+**design/selection toolset** below is **opt-in**. Turn it on with the **Design
+tools** switch in the popup (off by default); the change applies to enabled tabs
+immediately. With design tools off the catalog is ~12 tools; on, it adds the 21
+selection/CSS/audit tools listed below.
+
+Design tools: click **Pick element** in the popup, select a page
 element, then tell your agent something like "make the place I picked look
 better". **Pick element** replaces the current selection, **Add another** keeps
 existing yellow markers and adds one more, **Clear selection** forgets them, and
@@ -318,7 +325,8 @@ the **View selection** switch hides/shows the markers without forgetting them.
 The popup lists picked elements; each row can be named/grouped inline and has an
 **×** button to unselect only that element. The popup also lists live CSS patches
 with **Undo** and **Clear all** actions.
-The agent can call `get_selected_element`, `get_selected_elements`,
+With the **Design tools** switch on, the agent can call `get_selected_element`,
+`get_selected_elements`,
 `get_computed_style`, `highlight_element`, `show_selected_marker`,
 `hide_selected_marker`, `clear_selected_elements`, `remove_selected_element`,
 `update_selected_element`, `apply_css`, `list_css_patches`, `remove_css_patch`,
