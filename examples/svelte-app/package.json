@@ -1,6 +1,6 @@
 {
   "name": "@mcp-page-bridge/example-svelte",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": true,
   "type": "module",
   "description": "Svelte 5 example that exposes its runes state to the agent via window.mcp",

@@ -1,6 +1,6 @@
 {
   "name": "@mcp-page-bridge/extension",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": true,
   "type": "module",
   "description": "mcp-page-bridge browser extension (MV3): exposes a page's MCP server to the agent via the bridge",
