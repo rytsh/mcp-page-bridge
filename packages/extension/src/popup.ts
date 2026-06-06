@@ -136,10 +136,18 @@ function escapeHtml(s: string): string {
   return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
 }
 
-async function refresh(): Promise<void> {
+function selectionEditFocused(): boolean {
+  const active = document.activeElement as HTMLElement | null;
+  return !!active?.closest("#selectedElements .selection-edit");
+}
+
+async function refresh(opts: { skipSelectionEdit?: boolean } = {}): Promise<void> {
+  if (opts.skipSelectionEdit && selectionEditFocused()) return;
   const tabId = await activeTabId();
   if (tabId === undefined) return;
-  render(await getStatus(tabId));
+  const status = await getStatus(tabId);
+  if (opts.skipSelectionEdit && selectionEditFocused()) return;
+  render(status);
 }
 
 async function main(): Promise<void> {
@@ -238,7 +246,7 @@ async function main(): Promise<void> {
   });
 
   await refresh();
-  setInterval(refresh, 1500);
+  setInterval(() => void refresh({ skipSelectionEdit: true }), 1500);
 }
 
 function cssEscape(value: string): string {

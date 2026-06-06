@@ -114,7 +114,7 @@
         display: grid;
         grid-template-columns: 1fr auto;
         gap: 8px;
-        align-items: center;
+        align-items: start;
       }
       .selection-item button {
         padding: 2px 7px;
@@ -125,6 +125,11 @@
         background: #d32f2f;
         border-color: #d32f2f;
         color: #fff;
+      }
+      .selection-item button[data-remove-selection] {
+        align-self: start;
+        justify-self: end;
+        line-height: 1;
       }
       .selection-meta {
         min-width: 0;

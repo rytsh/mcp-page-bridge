@@ -20,11 +20,11 @@ function rawToString(data: RawData, isBinary: boolean): string {
 export class WebSocketServerTransport implements Transport {
   onclose?: () => void;
   onerror?: (error: Error) => void;
-  onmessage?: (message: JSONRPCMessage) => void;
   sessionId?: string;
 
   private started = false;
   private buffer: JSONRPCMessage[] = [];
+  private _onmessage?: (message: JSONRPCMessage) => void;
 
   constructor(private readonly socket: WebSocket) {
     this.socket.on("message", (data: RawData, isBinary: boolean) => {
@@ -35,29 +35,63 @@ export class WebSocketServerTransport implements Transport {
         this.onerror?.(error as Error);
         return;
       }
-      if (!this.started || !this.onmessage) {
+      if (!this.started || !this._onmessage) {
         this.buffer.push(message);
         return;
       }
-      this.onmessage(message);
+      this._onmessage(message);
     });
 
     this.socket.on("close", () => this.onclose?.());
     this.socket.on("error", (error: Error) => this.onerror?.(error));
   }
 
+  /** Flush any buffered messages as soon as both started and a consumer exist. */
+  get onmessage(): ((message: JSONRPCMessage) => void) | undefined {
+    return this._onmessage;
+  }
+
+  set onmessage(handler: ((message: JSONRPCMessage) => void) | undefined) {
+    this._onmessage = handler;
+    if (handler && this.started) this.flush();
+  }
+
   async start(): Promise<void> {
     this.started = true;
+    this.flush();
+  }
+
+  private flush(): void {
+    // Don't drain until a consumer is attached, otherwise buffered messages
+    // would be silently dropped.
+    if (!this._onmessage) return;
     const pending = this.buffer;
     this.buffer = [];
-    for (const message of pending) this.onmessage?.(message);
+    for (const message of pending) this._onmessage(message);
   }
 
   async send(message: JSONRPCMessage): Promise<void> {
-    this.socket.send(JSON.stringify(message));
+    if (this.socket.readyState !== this.socket.OPEN) {
+      throw new Error("cannot send on a non-open WebSocket");
+    }
+    await new Promise<void>((resolve, reject) => {
+      this.socket.send(JSON.stringify(message), (error) => (error ? reject(error) : resolve()));
+    });
   }
 
   async close(): Promise<void> {
-    this.socket.close();
+    try {
+      this.socket.close();
+    } catch {
+      // fall through to terminate
+    }
+    // If the close handshake hangs, force the socket down so we don't leak it.
+    setTimeout(() => {
+      try {
+        this.socket.terminate();
+      } catch {
+        // already gone
+      }
+    }, 1000).unref?.();
   }
 }

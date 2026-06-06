@@ -99,6 +99,7 @@ Then configure your agent with the built local CLI:
 5. Ask your agent to call `mcp_page_bridge_list_clients` to confirm the tab is connected.
 
 Optional dashboard: open `http://127.0.0.1:8787/` while the bridge is running.
+Use **Shutdown bridge** there when you want to stop the background daemon.
 
 ## Local Extension Build
 

@@ -67,13 +67,26 @@ async function connectBrowser(
   port: number,
   name: string,
   build: (server: McpServer) => void,
+  meta: { tabId?: number; providerId?: string } = {},
 ): Promise<McpServer> {
   const server = new McpServer({ name, version: "1.0.0" });
   build(server);
-  const transport = new WebSocketClientTransport(new URL(`ws://127.0.0.1:${port}`));
+  const url = new URL(`ws://127.0.0.1:${port}`);
+  if (meta.tabId !== undefined) url.searchParams.set("tabId", String(meta.tabId));
+  if (meta.providerId) url.searchParams.set("providerId", meta.providerId);
+  const transport = new WebSocketClientTransport(url);
   await server.connect(transport);
   cleanups.push(() => server.close());
   return server;
+}
+
+async function bridgeReachable(port: number): Promise<boolean> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/api/providers`);
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 describe("mcp-page-bridge bridge", () => {
@@ -129,6 +142,112 @@ describe("mcp-page-bridge bridge", () => {
 
     const result = await wsAgent.callTool({ name: "shared-app__echo", arguments: { msg: "hi" } });
     expect(textOf(result)).toBe("shared:hi");
+  });
+
+  it("rejects cleanly when the requested port is already in use", async () => {
+    bridge = await createBridge({ port: 0 });
+
+    await expect(createBridge({ port: bridge.port })).rejects.toMatchObject({ code: "EADDRINUSE" });
+  });
+
+  it("lets the dashboard shut down the bridge", async () => {
+    bridge = await createBridge({ port: 0 });
+
+    const forbidden = await fetch(`http://127.0.0.1:${bridge.port}/api/shutdown`, { method: "POST" });
+    expect(forbidden.status).toBe(403);
+    expect(await bridgeReachable(bridge.port)).toBe(true);
+
+    const res = await fetch(`http://127.0.0.1:${bridge.port}/api/shutdown`, {
+      method: "POST",
+      headers: { "x-mcp-page-bridge-dashboard": "1" },
+    });
+    expect(res.ok).toBe(true);
+    expect(await res.json()).toEqual({ ok: true });
+    await waitFor(() => bridgeReachable(bridge!.port), (reachable) => !reachable);
+  });
+
+  it("rejects HTTP requests from a foreign Origin", async () => {
+    bridge = await createBridge({ port: 0 });
+
+    const read = await fetch(`http://127.0.0.1:${bridge.port}/api/providers`, {
+      headers: { origin: "http://evil.example" },
+    });
+    expect(read.status).toBe(403);
+
+    const shutdown = await fetch(`http://127.0.0.1:${bridge.port}/api/shutdown`, {
+      method: "POST",
+      headers: { origin: "http://evil.example", "x-mcp-page-bridge-dashboard": "1" },
+    });
+    expect(shutdown.status).toBe(403);
+    expect(await bridgeReachable(bridge.port)).toBe(true);
+  });
+
+  it("does not advertise permissive CORS on the JSON API", async () => {
+    bridge = await createBridge({ port: 0 });
+    const res = await fetch(`http://127.0.0.1:${bridge.port}/api/providers`);
+    expect(res.ok).toBe(true);
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
+  it("serves dashboard HTML without browser caching", async () => {
+    bridge = await createBridge({ port: 0 });
+    const res = await fetch(`http://127.0.0.1:${bridge.port}/`);
+    expect(res.ok).toBe(true);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("exposes an identity health endpoint without a token", async () => {
+    bridge = await createBridge({ port: 0, token: "secret" });
+    const res = await fetch(`http://127.0.0.1:${bridge.port}/api/health`);
+    expect(res.ok).toBe(true);
+    const body = (await res.json()) as { service: string; requiresToken: boolean };
+    expect(body.service).toBe("mcp-page-bridge");
+    expect(body.requiresToken).toBe(true);
+  });
+
+  it("requires the token on the HTTP API when configured", async () => {
+    bridge = await createBridge({ port: 0, token: "secret" });
+
+    const noToken = await fetch(`http://127.0.0.1:${bridge.port}/api/providers`);
+    expect(noToken.status).toBe(401);
+
+    const badShutdown = await fetch(`http://127.0.0.1:${bridge.port}/api/shutdown`, {
+      method: "POST",
+      headers: { "x-mcp-page-bridge-dashboard": "1" },
+    });
+    expect(badShutdown.status).toBe(401);
+
+    const withToken = await fetch(`http://127.0.0.1:${bridge.port}/api/providers`, {
+      headers: { "x-mcp-page-bridge-token": "secret" },
+    });
+    expect(withToken.ok).toBe(true);
+  });
+
+  it("shuts down with a valid token (header + dashboard header)", async () => {
+    bridge = await createBridge({ port: 0, token: "secret" });
+    const res = await fetch(`http://127.0.0.1:${bridge.port}/api/shutdown`, {
+      method: "POST",
+      headers: { "x-mcp-page-bridge-dashboard": "1", "x-mcp-page-bridge-token": "secret" },
+    });
+    expect(res.ok).toBe(true);
+    await waitFor(
+      async () => {
+        try {
+          await fetch(`http://127.0.0.1:${bridge!.port}/api/health`);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      (reachable) => !reachable,
+    );
+  });
+
+  it("triggers idle auto-shutdown when no agents or providers connect", async () => {
+    let idleClosed = false;
+    bridge = await createBridge({ port: 0, idleTimeoutMs: 150, onIdleShutdown: () => (idleClosed = true) });
+    await waitFor(() => idleClosed, (v) => v, 3000);
+    expect(idleClosed).toBe(true);
   });
 
   it("reports providers via mcp_page_bridge_list_clients", async () => {
@@ -191,6 +310,67 @@ describe("mcp-page-bridge bridge", () => {
     const names = listed.tools.map((t) => t.name);
     expect(names).toContain("dup__a");
     expect(names).toContain("dup-2__b");
+  });
+
+  it("keeps duplicate provider labels stable across reconnect order changes", async () => {
+    bridge = await createBridge({ port: 0 });
+    const agent = await connectAgent(bridge);
+
+    const first = await connectBrowser(
+      bridge.port,
+      "dup",
+      (s) =>
+        s.registerTool("first", { description: "first" }, async () => ({
+          content: [{ type: "text", text: "first" }],
+        })),
+      { tabId: 101, providerId: "provider-a" },
+    );
+    const second = await connectBrowser(
+      bridge.port,
+      "dup",
+      (s) =>
+        s.registerTool("second", { description: "second" }, async () => ({
+          content: [{ type: "text", text: "second" }],
+        })),
+      { tabId: 102, providerId: "provider-b" },
+    );
+
+    await waitFor(
+      () => agent.listTools(),
+      (r) => r.tools.some((t) => t.name === "dup__first") && r.tools.some((t) => t.name === "dup-2__second"),
+    );
+
+    await first.close();
+    await second.close();
+    await waitFor(() => bridge!.listProviders().length, (n) => n === 0);
+
+    await connectBrowser(
+      bridge.port,
+      "dup",
+      (s) =>
+        s.registerTool("secondAgain", { description: "second again" }, async () => ({
+          content: [{ type: "text", text: "second again" }],
+        })),
+      { tabId: 102, providerId: "provider-b" },
+    );
+    await waitFor(() => agent.listTools(), (r) => r.tools.some((t) => t.name === "dup-2__secondAgain"));
+
+    await connectBrowser(
+      bridge.port,
+      "dup",
+      (s) =>
+        s.registerTool("firstAgain", { description: "first again" }, async () => ({
+          content: [{ type: "text", text: "first again" }],
+        })),
+      { tabId: 101, providerId: "provider-a" },
+    );
+    const listed = await waitFor(
+      () => agent.listTools(),
+      (r) => r.tools.some((t) => t.name === "dup__firstAgain") && r.tools.some((t) => t.name === "dup-2__secondAgain"),
+    );
+    const names = listed.tools.map((t) => t.name);
+    expect(names).toContain("dup__firstAgain");
+    expect(names).toContain("dup-2__secondAgain");
   });
 
   it("aggregates prompts (namespaced) and routes prompts/get", async () => {

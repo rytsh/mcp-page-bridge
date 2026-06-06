@@ -120,11 +120,47 @@ MCP config like any other stdio server.
 
 Flags: `--port <n>` (default 8787), `--token <secret>`. Env: `MCP_PAGE_BRIDGE_PORT`, `MCP_PAGE_BRIDGE_TOKEN`.
 
-Multiple agents can use the same port. The first `mcp-page-bridge` process owns
-the browser WebSocket/dashboard port; later processes that hit `EADDRINUSE`
-automatically attach their stdio MCP connection to the existing bridge over a
-local `/agent` WebSocket. If you use `--token`, every agent process must use the
+Multiple agents can use the same port. On first use, `mcp-page-bridge` starts a
+detached local bridge daemon that owns the browser WebSocket/dashboard port.
+Every agent process, including the first one, attaches its stdio MCP connection
+to that daemon over a local `/agent` WebSocket. Closing the first agent session
+only closes that session's proxy; the bridge daemon keeps running for later
+agents and browser tabs. If you use `--token`, every agent process must use the
 same token.
+
+When browser providers connect or disconnect, the daemon sends MCP
+`tools/listChanged`, `prompts/listChanged`, and `resources/listChanged`
+notifications to all attached agents so they can invalidate cached catalogs and
+list again. Tool identity is the namespaced tool name (`label__tool`), never its
+position in a list. Duplicate provider labels are reserved by browser
+tab/provider identity inside the daemon, so the same provider keeps its namespace
+across reconnects even if other providers reconnect in a different order.
+
+To stop the daemon, either:
+
+- run `mcp-page-bridge stop --port <n>` (add `--token <secret>` if the daemon
+  uses one), or
+- open the dashboard at `http://127.0.0.1:<port>/` and click **Shutdown bridge**.
+
+Both call `POST /api/shutdown`; the bridge closes its browser and agent sockets,
+stops the HTTP/WebSocket listener, removes its PID file, and the detached daemon
+process exits once no handles remain. The daemon writes its PID to
+`<os-tmp>/mcp-page-bridge-<port>.pid` so `stop` can fall back to a signal if the
+HTTP request fails.
+
+Pass `--idle-timeout <seconds>` to have a freshly spawned daemon shut itself down
+after that many seconds with no attached agents and no connected browser
+providers (off by default). The agent that first spawns the daemon forwards this
+flag.
+
+### Local HTTP security
+
+The bridge binds to `127.0.0.1` and validates the `Host`/`Origin` of every HTTP
+request, so other web pages (and DNS-rebinding attempts) cannot reach the JSON
+API or the shutdown/tab-control endpoints. State-changing requests additionally
+require an internal dashboard header. When a `--token` is configured it is
+required on the HTTP API too — open the dashboard as
+`http://127.0.0.1:<port>/?token=<secret>` so its requests carry the token.
 
 ### Runtime: Node, Bun, or Deno
 
@@ -290,6 +326,11 @@ The agent can call `get_selected_element`, `get_selected_elements`,
 `capture_design_baseline`, `compare_design_baseline`, `clear_design_baseline`,
 `accessibility_audit`, `responsive_summary`, and `debug_summary`. CSS patches
 are temporary style tags in the live page and can be rolled back by patch id.
+When the user asks to change a picked/selected/yellow element, agents should call
+`get_selected_element` first, then call `apply_css` with `selector` omitted and
+CSS declarations only (for example `color:red;`). Complete CSS rules such as
+`.hero { color:red; }` are global/page-wide and are rejected while a selector or
+picked element is targeted.
 
 The picker closes the extension popup, shows an overlay on the page, records the
 next clicked element in the page's built-in tool state, and leaves persistent
@@ -298,9 +339,12 @@ yellow selected areas" in the agent chat. It works on normal `http`/`https` page
 Chromium blocks extension scripts on pages such as `chrome://`, the Chrome Web
 Store, and some restricted browser pages.
 
-Disable built-ins per page with `window.mcp.builtins(false)` before the tab is
-enabled. Note: `eval` is blocked on pages with a strict
-`Content-Security-Policy` (no `unsafe-eval`).
+Disable all built-ins per page with `window.mcp.builtins(false)` before the tab
+is enabled, or disable only the powerful `eval` tool (keeping the rest) with
+`window.mcp.allowEval(false)`. Note: `eval` is also blocked on pages with a
+strict `Content-Security-Policy` (no `unsafe-eval`), such as GitHub. On those
+pages, use the dedicated non-eval tools (`dom_query`, `get_selected_element`,
+`apply_css`, `click`, etc.) instead of injecting inline/script-tag JavaScript.
 
 ### Browser control (opt-in)
 
@@ -348,7 +392,8 @@ pnpm --filter mcp-page-bridge dev              # run bridge with reload
 - [x] Built-in tools (eval / DOM / console / screenshot / navigate / CSS design patches / element picker)
 - [x] Prompts + resources aggregation, logging passthrough
 - [x] Optional auth token; `npx mcp-page-bridge` bin; runs on Node / Bun / Deno
-- [x] Status dashboard + JSON API on the bridge port (`/`, `/api/providers`)
-- [ ] Publish to npm + Chrome Web Store zip; resource templates; `mcp_page_bridge_focus`
+- [x] Status dashboard + JSON API on the bridge port (`/`, `/api/providers`, `/api/health`)
+- [x] Published to npm (`npx -y mcp-page-bridge`); GitHub Release ships the extension zip
+- [ ] Chrome Web Store listing; resource templates; `mcp_page_bridge_focus`
 
 MIT © Eray Ates

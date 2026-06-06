@@ -60,7 +60,11 @@ if (!guard[CONTENT_GUARD_KEY]) {
 
   // page (MAIN) -> SW
   window.addEventListener("message", (event: MessageEvent) => {
+    // Only accept envelopes posted by this same document's MAIN world. The
+    // source check rejects cross-frame posts; the origin check rejects messages
+    // forged with a spoofed origin (defense-in-depth alongside SW-side gating).
     if (event.source !== window) return;
+    if (event.origin !== location.origin && event.origin !== "null") return;
     const data = event.data;
     if (!isChannelMessage(data) || data.dir !== "up") return;
     try {

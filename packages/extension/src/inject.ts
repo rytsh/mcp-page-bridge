@@ -17,6 +17,7 @@
  * to the bridge until the tab is activated via the popup.
  */
 import {
+  MCP_PAGE_BRIDGE_VERSION,
   sanitizeLabel,
   type ChannelMessage,
   type ControlPayload,
@@ -52,6 +53,7 @@ interface SdkLikeServer {
 
 let activated = false;
 let builtinsEnabled = true;
+let evalEnabled = true;
 let label = sanitizeLabel(location.host || document.title || "browser");
 
 let embedded: EmbeddedMcpServer | undefined;
@@ -106,11 +108,13 @@ function embeddedServer(): EmbeddedMcpServer {
   if (!embedded) {
     embedded = new EmbeddedMcpServer({
       name: label,
-      version: "0.1.4",
+      version: MCP_PAGE_BRIDGE_VERSION,
       title: document.title,
       websiteUrl: location.href,
     });
-    if (builtinsEnabled) registerBuiltins(embedded, { extCall, console: consoleBuffer });
+    if (builtinsEnabled) {
+      registerBuiltins(embedded, { extCall, console: consoleBuffer, includeEval: evalEnabled });
+    }
   }
   if (activated && !embedded.connected && !reconnectingEmbedded) void embedded.connect(newTransport());
   return embedded;
@@ -169,6 +173,7 @@ const RESERVED_MCP_KEYS = new Set([
   "connected",
   "setLabel",
   "builtins",
+  "allowEval",
   "tool",
   "registerTool",
   "refresh",
@@ -265,6 +270,11 @@ const api = {
   /** Enable/disable the built-in tools (call before the tab is enabled). */
   builtins(enabled: boolean): void {
     builtinsEnabled = enabled;
+  },
+
+  /** Enable/disable just the `eval` built-in (call before the tab is enabled). */
+  allowEval(enabled: boolean): void {
+    evalEnabled = enabled;
   },
 
   tool(def: ToolDefinition, handler: ToolHandler): () => void {

@@ -162,6 +162,10 @@ function connectSocket(state: TabState, providerId: string): void {
   });
   ws.addEventListener("close", () => {
     entry.ws = undefined;
+    // The bridge re-runs `initialize` on the next socket, so any backlog queued
+    // against this dead session is stale; drop it to avoid replaying old RPCs
+    // (responses to defunct request ids, half-sent batches) onto a fresh session.
+    entry.outbuf.length = 0;
     if (entry.wantOpen) scheduleReconnect(state, providerId); // bridge down/restarting
   });
   ws.addEventListener("error", () => {
@@ -262,12 +266,14 @@ function closeAllSockets(state: TabState): void {
  * The scripts guard against double-injection. inject.js first so window.mcp
  * exists before content.js triggers activation.
  */
-async function injectIntoTab(tabId: number): Promise<void> {
+async function injectIntoTab(tabId: number): Promise<boolean> {
   try {
     await chrome.scripting.executeScript({ target: { tabId }, world: "MAIN", files: ["inject.js"] });
     await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
+    return true;
   } catch (error) {
     console.warn("[mcp-page-bridge] could not inject into tab", tabId, error);
+    return false;
   }
 }
 
@@ -524,6 +530,10 @@ async function handleUp(state: TabState, msg: ChannelMessage): Promise<void> {
   }
 
   if (msg.kind === "ext") {
+    // ext actions (screenshot/navigate/reload) are privileged; only run them on
+    // a tab the user has explicitly enabled, so an arbitrary page script can't
+    // drive them via a forged channel message.
+    if (!(await isEnabled(state.tabId))) return;
     await handleExt(state, msg.payload as ExtCallPayload);
     return;
   }
@@ -575,7 +585,13 @@ async function runExt(
 
 // ---- popup messaging ---------------------------------------------------------
 
-chrome.runtime.onMessage.addListener((req, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
+  // Only the extension's own pages (popup) may drive these privileged commands.
+  // Reject anything originating from a tab/content script or another extension.
+  if (sender.id !== chrome.runtime.id || sender.tab) {
+    sendResponse({ ok: false, error: "unauthorized sender" });
+    return false;
+  }
   void (async () => {
     if (req?.type === "getStatus") {
       const tabId = req.tabId as number;
@@ -605,14 +621,38 @@ chrome.runtime.onMessage.addListener((req, _sender, sendResponse) => {
 
     if (req?.type === "setEnabled") {
       const tabId = req.tabId as number;
-      await setEnabled(tabId, !!req.enabled);
-      void updateActionIcon(tabId, !!req.enabled);
-      const state = tabs.get(tabId);
       if (req.enabled) {
-        if (state) sendControl(state, "activate");
+        const state = tabs.get(tabId);
+        if (state) {
+          await setEnabled(tabId, true);
+          void updateActionIcon(tabId, true);
+          sendControl(state, "activate");
+          sendResponse({ ok: true });
+          return;
+        }
         // Tab opened before the extension loaded → no content script yet.
-        else await injectIntoTab(tabId);
-      } else if (state) {
+        const injected = await injectIntoTab(tabId);
+        if (!injected) {
+          // Restricted page (chrome://, Web Store, etc.): don't mark it enabled
+          // or flip the icon green — it can never connect.
+          await setEnabled(tabId, false);
+          void updateActionIcon(tabId, false);
+          sendResponse({
+            ok: false,
+            error: "This page does not allow extensions (e.g. chrome://, the Web Store, or PDF viewer).",
+          });
+          return;
+        }
+        await setEnabled(tabId, true);
+        void updateActionIcon(tabId, true);
+        sendResponse({ ok: true });
+        return;
+      }
+
+      await setEnabled(tabId, false);
+      void updateActionIcon(tabId, false);
+      const state = tabs.get(tabId);
+      if (state) {
         sendControl(state, "deactivate");
         closeAllSockets(state);
       }
@@ -786,9 +826,26 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   void setEnabled(tabId, false);
 });
 
-// A WebSocket keeps the SW alive while messages flow (Chrome 116+); the alarm
-// nudges the SW awake periodically in case it went idle between bursts.
+// MV3 service workers are recycled after ~30s idle. An open WebSocket only
+// keeps the SW alive while bytes actually flow, so we run a periodic alarm
+// (< 30s) that (a) wakes the SW and (b) does real work: touch a chrome API and
+// reconnect any socket that should be open but isn't. This shrinks the window
+// where a recycled SW has dropped sockets without noticing.
 chrome.alarms.create("mcp-page-bridge-keepalive", { periodInMinutes: 0.4 });
-chrome.alarms.onAlarm.addListener(() => {
-  // no-op: waking the SW is the point.
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== "mcp-page-bridge-keepalive") return;
+  // Touching a chrome API in the handler resets the idle timer for another cycle.
+  void chrome.runtime.getPlatformInfo().catch(() => {
+    // ignore
+  });
+  for (const state of tabs.values()) {
+    for (const [providerId, entry] of state.sockets) {
+      if (entry.wantOpen && !entry.ws) {
+        if (entry.timer) clearTimeout(entry.timer);
+        entry.timer = undefined;
+        connectSocket(state, providerId);
+      }
+    }
+  }
+  if (browserControl && !browserProvider.active) browserProvider.start();
 });

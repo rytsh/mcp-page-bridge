@@ -54,6 +54,71 @@ export interface ProviderMeta {
 export const MCP_PAGE_BRIDGE_DASHBOARD_ACTIVATE_TAB = "mcpPageBridge/activateTab" as const;
 export const MCP_PAGE_BRIDGE_DASHBOARD_CLOSE_TAB = "mcpPageBridge/closeTab" as const;
 
+/**
+ * Header the local dashboard sends on state-changing HTTP requests. Cross-origin
+ * pages cannot set custom headers without a CORS preflight, so this (combined
+ * with Origin/Host validation on the bridge) keeps the JSON API local-only.
+ */
+export const DASHBOARD_HEADER = "x-mcp-page-bridge-dashboard" as const;
+export const DASHBOARD_HEADER_VALUE = "1" as const;
+
+/** Header carrying the shared token on HTTP API requests when a token is set. */
+export const TOKEN_HEADER = "x-mcp-page-bridge-token" as const;
+
+/** Stable service identifier returned by `GET /api/providers` so clients can be sure the port hosts a real bridge (not a foreign HTTP server). */
+export const SERVICE_ID = "mcp-page-bridge" as const;
+
+/**
+ * Names of the built-in page tools the extension registers on an enabled tab.
+ * Single source of truth so the dashboard can classify them without drifting.
+ * Must stay in sync with the tools registered in
+ * packages/extension/src/builtins.ts.
+ */
+export const BUILTIN_TOOL_NAMES = [
+  // Page inspection / interaction
+  "eval",
+  "dom_query",
+  "get_page_info",
+  "click",
+  "set_value",
+  "scroll",
+  "wait_for",
+  "get_html",
+  // Element selection
+  "get_selected_element",
+  "get_selected_elements",
+  "get_computed_style",
+  "highlight_element",
+  "show_selected_marker",
+  "hide_selected_marker",
+  "clear_selected_elements",
+  "remove_selected_element",
+  "update_selected_element",
+  // CSS patching
+  "apply_css",
+  "list_css_patches",
+  "remove_css_patch",
+  "clear_css_patches",
+  "export_css_patches",
+  "export_design_changes",
+  // Audits / diagnostics
+  "accessibility_audit",
+  "responsive_summary",
+  "debug_summary",
+  "console_logs",
+  // Design baseline
+  "capture_design_baseline",
+  "compare_design_baseline",
+  "clear_design_baseline",
+  // Service-worker delegated
+  "screenshot",
+  "navigate",
+  "reload",
+] as const;
+
+/** Names of the opt-in "browser" provider tools (service-worker hosted, all-tabs). */
+export const BROWSER_TOOL_NAMES = ["list_tabs", "open_tab", "activate_tab", "navigate_tab", "close_tab"] as const;
+
 /** Direction of an internal channel message relative to the bridge. */
 export type ChannelDir = "up" | "down";
 

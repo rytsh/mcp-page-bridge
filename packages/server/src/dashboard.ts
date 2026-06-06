@@ -6,6 +6,8 @@
  * Polls GET /api/providers.
  */
 
+import { BROWSER_TOOL_NAMES, BUILTIN_TOOL_NAMES } from "mcp-page-bridge-protocol";
+
 /** The mcp-page-bridge mark (hexagon + plug), served at GET /favicon.svg. */
 export const FAVICON_SVG =
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><polygon points="22.39,6.00 22.39,18.00 12.00,24.00 1.61,18.00 1.61,6.00 12.00,0.00" fill="#E63946"/><svg x="3" y="3" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22v-5"/><path d="M15 8V2"/><path d="M17 8a1 1 0 0 1 1 1v4a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1z"/><path d="M9 8V2"/></svg></svg>';
@@ -111,7 +113,21 @@ export const DASHBOARD_HTML = `<!doctype html>
       .status { display: flex; align-items: center; gap: 9px; color: var(--muted); }
       .dot { width: 8px; height: 8px; background: var(--brand); box-shadow: 0 0 0 4px var(--brand-soft); }
       .dot.on { background: var(--green); box-shadow: 0 0 0 4px var(--green-soft); }
+      .status-actions { display: flex; align-items: center; gap: 10px; }
       .refresh { color: var(--quiet); font-size: 12px; font-family: var(--mono); }
+      .shutdown-btn {
+        appearance: none;
+        border: 1px solid color-mix(in srgb, var(--brand) 42%, var(--line));
+        border-radius: 4px;
+        background: var(--brand-soft);
+        color: var(--brand);
+        padding: 6px 9px;
+        cursor: pointer;
+        font-size: 12px;
+        font-weight: 700;
+      }
+      .shutdown-btn:hover { border-color: var(--brand); }
+      .shutdown-btn:disabled { opacity: 0.58; cursor: wait; }
       .stats {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -306,7 +322,33 @@ export const DASHBOARD_HTML = `<!doctype html>
       .empty.small { min-height: 96px; border: 1px dashed var(--line); border-radius: 5px; background: var(--panel-2); }
       .placeholder { color: var(--muted); }
       code { border: 1px solid var(--line); background: var(--panel-2); padding: 1px 5px; border-radius: 3px; font-family: var(--mono); }
-      footer { margin-top: 20px; color: var(--quiet); font-size: 12px; }
+      .search {
+        width: 100%;
+        margin-bottom: 12px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--panel-2);
+        color: var(--fg);
+        padding: 9px 11px;
+        font: inherit;
+        font-size: 13px;
+      }
+      .search:focus { outline: none; border-color: var(--line-strong); }
+      .search::placeholder { color: var(--quiet); }
+      .provider-meta { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 10px; color: var(--quiet); font-family: var(--mono); font-size: 11px; }
+      .detail-head-right { display: flex; align-items: center; gap: 10px; }
+      .copy-btn {
+        appearance: none;
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        background: var(--panel-2);
+        color: var(--muted);
+        padding: 4px 8px;
+        cursor: pointer;
+        font-size: 11px;
+      }
+      .copy-btn:hover { color: var(--fg); border-color: var(--line-strong); }
+      mark { background: var(--brand-soft); color: inherit; border-radius: 2px; padding: 0 1px; }
       @media (max-width: 900px) {
         .topbar, .status-row { align-items: flex-start; flex-direction: column; }
         .endpoint { justify-content: flex-start; }
@@ -346,7 +388,10 @@ export const DASHBOARD_HTML = `<!doctype html>
           <span class="dot" id="dot"></span>
           <span id="statusText">connecting</span>
         </div>
-        <div class="refresh">auto refresh: 1.5s</div>
+        <div class="status-actions">
+          <div class="refresh">auto refresh: 1.5s</div>
+          <button class="shutdown-btn" id="shutdownBtn" type="button">Shutdown bridge</button>
+        </div>
       </div>
 
       <section class="stats" aria-label="Connected provider summary">
@@ -357,14 +402,13 @@ export const DASHBOARD_HTML = `<!doctype html>
       <main class="layout">
         <section>
           <div class="panel-title"><span>Providers</span><span id="listCount">0 connected</span></div>
+          <input class="search" id="search" type="search" placeholder="Filter tools by name or description…" autocomplete="off" spellcheck="false" />
           <div id="list"></div>
         </section>
         <aside class="detail" id="detail">
           <div class="detail-inner"><div class="empty placeholder">Select an item to inspect its schema and source.</div></div>
         </aside>
       </main>
-
-      <footer>Dashboard is served by the local bridge on the same port as WebSocket transport.</footer>
     </div>
 
     <script>
@@ -372,27 +416,51 @@ export const DASHBOARD_HTML = `<!doctype html>
       const esc = (s) =>
         String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
+      // The bridge requires the shared token (if configured) on HTTP requests too.
+      // Operators open the dashboard as http://127.0.0.1:<port>/?token=<secret>.
+      const BRIDGE_TOKEN = new URLSearchParams(location.search).get("token") || "";
+      const TOKEN_HEADER = "x-mcp-page-bridge-token";
+      const DASHBOARD_HEADER = "x-mcp-page-bridge-dashboard";
+      function authHeaders(extra) {
+        const headers = Object.assign({}, extra || {});
+        if (BRIDGE_TOKEN) headers[TOKEN_HEADER] = BRIDGE_TOKEN;
+        return headers;
+      }
+      function withToken(path) {
+        return BRIDGE_TOKEN ? path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(BRIDGE_TOKEN) : path;
+      }
+
       const EMPTY = "No tools published.";
-      const BUILTIN_TOOLS = new Set([
-        "eval",
-        "dom_query",
-        "get_html",
-        "get_page_info",
-        "click",
-        "set_value",
-        "scroll",
-        "wait_for",
-        "console_logs",
-        "screenshot",
-        "navigate",
-        "reload",
-      ]);
-      const BROWSER_TOOLS = new Set(["list_tabs", "open_tab", "activate_tab", "navigate_tab", "close_tab"]);
+      const BUILTIN_TOOLS = new Set(${JSON.stringify([...BUILTIN_TOOL_NAMES])});
+      const BROWSER_TOOLS = new Set(${JSON.stringify([...BROWSER_TOOL_NAMES])});
 
       let data = { version: "", port: 8787, providers: [] };
       let selected = null; // { kind, provider, key }
+      let filter = ""; // lowercased tool filter query
+      let bridgeOnline = false;
+      let shutdownRequested = false;
       const openProviders = Object.create(null);
       const openGroups = Object.create(null);
+
+      function timeAgo(iso) {
+        const t = Date.parse(iso);
+        if (!Number.isFinite(t)) return "";
+        const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+        if (s < 60) return s + "s";
+        const m = Math.floor(s / 60);
+        if (m < 60) return m + "m";
+        const h = Math.floor(m / 60);
+        if (h < 24) return h + "h";
+        return Math.floor(h / 24) + "d";
+      }
+
+      function highlight(text) {
+        const s = esc(text);
+        if (!filter) return s;
+        const i = s.toLowerCase().indexOf(filter);
+        if (i < 0) return s;
+        return s.slice(0, i) + "<mark>" + s.slice(i, i + filter.length) + "</mark>" + s.slice(i + filter.length);
+      }
 
       function shortName(provider, key) {
         const raw = String(key || "");
@@ -440,9 +508,16 @@ export const DASHBOARD_HTML = `<!doctype html>
         return "Page tools";
       }
 
+      function matchesFilter(provider, item) {
+        if (!filter) return true;
+        const hay = (shortName(provider, item.name) + " " + item.name + " " + (item.description || "")).toLowerCase();
+        return hay.includes(filter);
+      }
+
       function groupsFor(provider) {
         const buckets = new Map();
         for (const item of itemList(provider)) {
+          if (!matchesFilter(provider, item)) continue;
           const title = classifyTool(provider, item);
           if (!buckets.has(title)) buckets.set(title, []);
           buckets.get(title).push(item);
@@ -463,12 +538,12 @@ export const DASHBOARD_HTML = `<!doctype html>
           esc(key) +
           '">' +
           '<span><span class="nm">' +
-          esc(local) +
+          highlight(local) +
           '</span><span class="full">' +
           esc(key) +
           "</span></span>" +
           '<span class="ds">' +
-          esc(itemDescription(item)) +
+          highlight(itemDescription(item)) +
           "</span></button>"
         );
       }
@@ -479,7 +554,7 @@ export const DASHBOARD_HTML = `<!doctype html>
         return groups
           .map((group) => {
             const id = groupId(provider, group.title);
-            const open = openGroups[id] !== false;
+            const open = filter ? true : openGroups[id] !== false;
             return (
               '<details class="group" data-group="' +
               esc(id) +
@@ -499,8 +574,16 @@ export const DASHBOARD_HTML = `<!doctype html>
 
       function renderProvider(provider) {
         const c = counts(provider);
+        if (filter && !groupsFor(provider).length) return "";
         const title = provider.title || provider.name || provider.label;
-        const open = openProviders[provider.label] === true;
+        const open = filter ? true : openProviders[provider.label] === true;
+        const metaParts = [];
+        if (provider.version) metaParts.push("v" + esc(provider.version));
+        const ago = timeAgo(provider.connectedAt);
+        if (ago) metaParts.push("connected " + ago + " ago");
+        const metaHtml = metaParts.length
+          ? '<div class="provider-meta">' + metaParts.map((m) => "<span>" + m + "</span>").join("") + "</div>"
+          : "";
         const actions =
           provider.tabId === undefined
             ? ""
@@ -522,6 +605,7 @@ export const DASHBOARD_HTML = `<!doctype html>
           esc(title) +
           "</span></div>" +
           (provider.url ? '<div class="url">' + esc(provider.url) + "</div>" : "") +
+          metaHtml +
           '</div><div class="provider-side"><div class="metrics"><span class="metric">Tools ' +
           c.tool +
           "</span></div>" +
@@ -543,9 +627,9 @@ export const DASHBOARD_HTML = `<!doctype html>
 
       async function callProviderAction(provider, action) {
         if (action === "close" && !confirm("Close tab for provider " + provider + "?")) return;
-        const res = await fetch("/api/providers/" + encodeURIComponent(provider) + "/" + action, {
+        const res = await fetch(withToken("/api/providers/" + encodeURIComponent(provider) + "/" + action), {
           method: "POST",
-          headers: { "x-mcp-page-bridge-dashboard": "1" },
+          headers: authHeaders({ [DASHBOARD_HEADER]: "1" }),
         });
         const body = await res.json().catch(() => ({}));
         if (!res.ok || body.ok === false) throw new Error(body.error || "action failed");
@@ -553,14 +637,47 @@ export const DASHBOARD_HTML = `<!doctype html>
         await tick();
       }
 
+      async function shutdownBridge() {
+        if (!confirm("Shutdown the local mcp-page-bridge daemon? Connected agents and browser tabs will disconnect.")) return;
+        const btn = $("shutdownBtn");
+        btn.disabled = true;
+        $("statusText").textContent = "shutting down bridge";
+        const res = await fetch(withToken("/api/shutdown"), {
+          method: "POST",
+          headers: authHeaders({ [DASHBOARD_HEADER]: "1" }),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok || body.ok === false) throw new Error(body.error || "shutdown failed");
+        shutdownRequested = true;
+        bridgeOnline = false;
+        selected = null;
+        data = { version: data.version, port: data.port, providers: [] };
+        $("dot").className = "dot";
+        $("statusText").textContent = "bridge shutdown requested";
+        updateStats();
+        renderList();
+        renderDetail();
+      }
+
       function renderList() {
         const list = $("list");
+        if (!bridgeOnline) {
+          list.innerHTML = shutdownRequested
+            ? '<div class="card"><div class="empty">Bridge shutdown requested.<br/>Restart mcp-page-bridge to use the dashboard again.</div></div>'
+            : '<div class="card"><div class="empty">Bridge is not reachable.<br/>Start mcp-page-bridge and refresh this page.</div></div>';
+          return;
+        }
         if (!data.providers.length) {
           list.innerHTML =
             '<div class="card"><div class="empty">No browsers connected yet.<br/>Enable the mcp-page-bridge extension on a tab.</div></div>';
           return;
         }
-        list.innerHTML = data.providers.map(renderProvider).join("");
+        const html = data.providers.map(renderProvider).join("");
+        if (!html) {
+          list.innerHTML = '<div class="card"><div class="empty">No tools match "' + esc(filter) + '".</div></div>';
+          return;
+        }
+        list.innerHTML = html;
 
         for (const card of document.querySelectorAll(".provider-card")) {
           card.addEventListener("toggle", () => {
@@ -626,6 +743,10 @@ export const DASHBOARD_HTML = `<!doctype html>
 
       function renderDetail() {
         const el = $("detail");
+        if (!bridgeOnline) {
+          el.innerHTML = '<div class="detail-inner"><div class="empty placeholder">Bridge is offline.</div></div>';
+          return;
+        }
         if (!selected) {
           el.innerHTML = '<div class="detail-inner"><div class="empty placeholder">Select an item to inspect its schema and source.</div></div>';
           return;
@@ -653,13 +774,28 @@ export const DASHBOARD_HTML = `<!doctype html>
         el.innerHTML =
           '<div class="detail-inner"><div class="detail-head"><span class="kind">' +
           kind +
-          '</span><span class="from">' +
+          '</span><div class="detail-head-right"><button class="copy-btn" id="copyName" type="button">Copy name</button><span class="from">' +
           esc(source) +
-          "</span></div><h2>" +
+          "</span></div></div><h2>" +
           esc(key) +
           "</h2>" +
           body +
           "</div>";
+
+        const copyBtn = $("copyName");
+        if (copyBtn) {
+          copyBtn.addEventListener("click", () => {
+            const done = () => {
+              copyBtn.textContent = "Copied";
+              setTimeout(() => {
+                copyBtn.textContent = "Copy name";
+              }, 1200);
+            };
+            if (navigator.clipboard?.writeText) {
+              navigator.clipboard.writeText(key).then(done).catch(() => {});
+            }
+          });
+        }
       }
 
       function updateStats() {
@@ -671,8 +807,21 @@ export const DASHBOARD_HTML = `<!doctype html>
 
       async function tick() {
         try {
-          const res = await fetch("/api/providers", { cache: "no-store" });
+          const res = await fetch(withToken("/api/providers"), { cache: "no-store", headers: authHeaders() });
           data = await res.json();
+          if (shutdownRequested) {
+            bridgeOnline = false;
+            selected = null;
+            data = { version: data.version, port: data.port, providers: [] };
+            $("dot").className = "dot";
+            $("statusText").textContent = "bridge shutdown requested";
+            updateStats();
+            renderList();
+            renderDetail();
+            return;
+          }
+          bridgeOnline = true;
+          $("shutdownBtn").disabled = false;
           $("dot").className = "dot on";
           $("version").textContent = "v" + data.version;
           $("endpoint").textContent = "ws://127.0.0.1:" + data.port;
@@ -682,12 +831,30 @@ export const DASHBOARD_HTML = `<!doctype html>
           renderList();
           renderDetail();
         } catch {
+          bridgeOnline = false;
+          selected = null;
           data = { version: "", port: 8787, providers: [] };
           $("dot").className = "dot";
-          $("statusText").textContent = "bridge not reachable";
+          $("statusText").textContent = shutdownRequested ? "bridge shut down" : "bridge not reachable";
+          $("shutdownBtn").disabled = true;
           updateStats();
+          renderList();
+          renderDetail();
         }
       }
+
+      $("search").addEventListener("input", (event) => {
+        filter = event.target.value.trim().toLowerCase();
+        renderList();
+      });
+
+      $("shutdownBtn").addEventListener("click", () => {
+        shutdownBridge().catch((error) => {
+          shutdownRequested = false;
+          $("shutdownBtn").disabled = false;
+          $("statusText").textContent = error instanceof Error ? error.message : String(error);
+        });
+      });
 
       tick();
       setInterval(tick, 1500);

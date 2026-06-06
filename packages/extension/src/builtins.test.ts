@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { BUILTIN_TOOL_NAMES } from "mcp-page-bridge-protocol";
 import { EmbeddedMcpServer, type MinimalTransport } from "./embedded-server.js";
 import { registerBuiltins } from "./builtins.js";
 
@@ -9,7 +10,7 @@ import { registerBuiltins } from "./builtins.js";
  * (reads the buffer), and the SW-delegated tools (screenshot/navigate/reload)
  * via a mock extCall. DOM tools require a browser and are exercised manually.
  */
-async function setup() {
+async function setup(opts: { includeEval?: boolean } = {}) {
   const calls: Array<[string, unknown]> = [];
   const server = new EmbeddedMcpServer({ name: "builtins", version: "1.0.0" });
   registerBuiltins(server, {
@@ -26,6 +27,7 @@ async function setup() {
       return { ok: true };
     },
     console: { entries: [{ level: "warn", text: "careful", time: "2026" }] },
+    includeEval: opts.includeEval,
   });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   await server.connect(st as unknown as MinimalTransport);
@@ -82,10 +84,40 @@ describe("built-in tools", () => {
     }
   });
 
+  it("BUILTIN_TOOL_NAMES stays in sync with the registered built-ins", async () => {
+    // The dashboard classifies tools using BUILTIN_TOOL_NAMES. If a built-in is
+    // added here but not to the protocol list, it leaks into the "Page tools"
+    // group. This guard keeps the single source of truth honest.
+    const { client } = await setup();
+    const registered = (await client.listTools()).tools.map((t) => t.name).sort();
+    expect(registered).toEqual([...BUILTIN_TOOL_NAMES].sort());
+  });
+
   it("eval returns the evaluated expression", async () => {
     const { client } = await setup();
     const res = await client.callTool({ name: "eval", arguments: { code: "1 + 41" } });
     expect(textOf(res)).toContain("42");
+  });
+
+  it("eval explains CSP unsafe-eval failures", async () => {
+    const { client } = await setup();
+    const res = await client.callTool({
+      name: "eval",
+      arguments: {
+        code: `(() => { throw new EvalError("Refused to evaluate a string as JavaScript because 'unsafe-eval' is not an allowed source of script in the following Content Security Policy directive") })()`,
+      },
+    });
+    expect(textOf(res)).toContain("Page CSP blocked arbitrary JavaScript evaluation");
+    expect(textOf(res)).toContain("dedicated non-eval tools");
+  });
+
+  it("omits eval when includeEval is false", async () => {
+    const { client } = await setup({ includeEval: false });
+    const names = (await client.listTools()).tools.map((t) => t.name);
+    expect(names).not.toContain("eval");
+    // Other built-ins remain available.
+    expect(names).toContain("dom_query");
+    expect(names).toContain("screenshot");
   });
 
   it("console_logs returns captured entries", async () => {

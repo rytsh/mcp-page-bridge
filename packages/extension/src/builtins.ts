@@ -68,6 +68,17 @@ async function runEval(code: string): Promise<unknown> {
   }
 }
 
+function cspEvalHint(error: Error): string | undefined {
+  const message = error.message.toLowerCase();
+  if (!message.includes("content security policy") && !message.includes("unsafe-eval")) return undefined;
+  return [
+    "Page CSP blocked arbitrary JavaScript evaluation (unsafe-eval).",
+    "This is expected on locked-down pages such as GitHub.",
+    "Do not try to bypass the page CSP with inline/script-tag injection.",
+    "Use the dedicated non-eval tools instead: dom_query, get_html, get_page_info, get_selected_element, get_computed_style, apply_css, click, set_value, screenshot, or navigate.",
+  ].join(" ");
+}
+
 function el(selector: string): Element {
   const found = document.querySelector(selector);
   if (!found) throw new Error(`No element matches selector: ${selector}`);
@@ -481,9 +492,8 @@ function targetElement(selector: unknown): Element {
   throw new Error("No selector provided and no element has been picked from the extension popup yet.");
 }
 
-function targetSelector(selector: unknown, css: string): string | undefined {
+function targetSelector(selector: unknown): string | undefined {
   if (typeof selector === "string" && selector.trim()) return selector.trim();
-  if (css.includes("{")) return undefined;
   return getSelectedElementSnapshot()?.selector;
 }
 
@@ -491,7 +501,11 @@ function renderCss(selector: string | undefined, css: string): string {
   const trimmed = css.trim();
   if (!trimmed) throw new Error("CSS cannot be empty.");
   if (!selector) return trimmed;
-  if (trimmed.includes("{")) return trimmed;
+  if (trimmed.includes("{")) {
+    throw new Error(
+      "Targeted CSS patches must use declarations only (for example: color:red;). Complete CSS rules are page-wide; omit selector and avoid an active picked element only when that is intentional.",
+    );
+  }
   return `${selector} {\n${trimmed}\n}`;
 }
 
@@ -758,7 +772,7 @@ function collectMediaQueries(maxRules: unknown): string[] {
 
 export function registerBuiltins(
   server: EmbeddedMcpServer,
-  opts: { extCall: ExtCall; console: ConsoleBuffer },
+  opts: { extCall: ExtCall; console: ConsoleBuffer; includeEval?: boolean },
 ): void {
   const captureScreenshot = async (): Promise<{ dataUrl: string; base64: string }> => {
     const res = (await opts.extCall("screenshot", { download: false })) as { dataUrl: string };
@@ -766,11 +780,15 @@ export function registerBuiltins(
     return { dataUrl: res.dataUrl, base64 };
   };
 
-  server.registerTool(
+  // `eval` runs arbitrary JS in the page. It's the most powerful built-in, so a
+  // page can opt out of it (window.mcp.allowEval(false)) while keeping the other
+  // built-ins. Defaults to on to preserve existing behavior.
+  if (opts.includeEval !== false) {
+    server.registerTool(
     {
       name: "eval",
       description:
-        "Evaluate JavaScript in the page (MAIN world) and return the result. Accepts an expression or statements. Async/await supported.",
+        "Evaluate JavaScript in the page (MAIN world) and return the result. Accepts an expression or statements. Async/await supported. Some pages (for example GitHub) block arbitrary eval/inline script via CSP; on those pages prefer the dedicated DOM/CSS tools instead of eval.",
       inputSchema: {
         type: "object",
         properties: { code: { type: "string", description: "JS expression or statements" } },
@@ -782,13 +800,15 @@ export function registerBuiltins(
         const result = await runEval(String(args.code ?? ""));
         return json(result === undefined ? "undefined" : result);
       } catch (error) {
+        const hint = error instanceof Error ? cspEvalHint(error) : undefined;
         return {
-          content: [{ type: "text", text: `eval error: ${(error as Error).message}` }],
+          content: [{ type: "text", text: `eval error: ${hint ?? (error as Error).message}` }],
           isError: true,
         } satisfies ToolResult;
       }
     },
-  );
+    );
+  }
 
   server.registerTool(
     {
@@ -1102,14 +1122,19 @@ export function registerBuiltins(
     {
       name: "apply_css",
       description:
-        "Apply a temporary CSS patch. With selector omitted, declaration CSS targets the element picked from the extension popup. Returns a patch id for rollback.",
+        "Apply a temporary CSS patch. If the user refers to the picked/selected/yellow element, omit selector and pass declaration CSS only; the patch is scoped to that one picked element. Complete CSS rules are page-wide and should only be used for intentional global/page changes. Returns a patch id for rollback.",
       inputSchema: {
         type: "object",
         properties: {
-          selector: { type: "string", description: "CSS selector. Omit to use the picked element for declaration CSS." },
+          selector: {
+            type: "string",
+            description:
+              "CSS selector. Omit to use the picked element. When selector or a picked element is targeted, css must be declarations only, not complete CSS rules.",
+          },
           css: {
             type: "string",
-            description: "CSS declarations (e.g. color:red;) or complete CSS rules (e.g. .hero { color:red; }).",
+            description:
+              "CSS declarations for a selector/picked element (e.g. color:red;). Complete CSS rules (e.g. .hero { color:red; }) are page-wide and rejected when a selector or picked element is targeted.",
           },
           reason: { type: "string", description: "Short note explaining why this patch was applied." },
         },
@@ -1118,7 +1143,7 @@ export function registerBuiltins(
     },
     (args) => {
       const css = String(args.css ?? "");
-      const selector = targetSelector(args.selector, css);
+      const selector = targetSelector(args.selector);
       const patch = addCssPatch(selector, css, args.reason ? String(args.reason) : undefined);
       return json({ patch, totalPatches: cssPatches.size });
     },
