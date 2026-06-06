@@ -106,7 +106,7 @@ function embeddedServer(): EmbeddedMcpServer {
   if (!embedded) {
     embedded = new EmbeddedMcpServer({
       name: label,
-      version: "0.1.3",
+      version: "0.1.4",
       title: document.title,
       websiteUrl: location.href,
     });
