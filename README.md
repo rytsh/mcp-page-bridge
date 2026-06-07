@@ -8,10 +8,16 @@
   Bridge a <strong>live browser page's MCP server</strong> to a coding agent (opencode, Claude, Cursor, ...).
 </p>
 
+<p align="center">
+  <a href="https://www.npmjs.com/package/mcp-page-bridge"><img src="https://img.shields.io/npm/v/mcp-page-bridge?style=flat-square&logo=npm&label=npm" alt="npm version" /></a>
+  <a href="https://chromewebstore.google.com/detail/mcp-page-bridge/lpehmmnlgeaocbnleigemiadocgadgmo"><img src="https://img.shields.io/chrome-web-store/v/lpehmmnlgeaocbnleigemiadocgadgmo?style=flat-square&logo=googlechrome&logoColor=white&label=chrome%20web%20store" alt="Chrome Web Store" /></a>
+  <a href="https://github.com/rytsh/mcp-page-bridge/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/mcp-page-bridge?style=flat-square&label=license" alt="License" /></a>
+</p>
+
 `mcp-page-bridge` lets an MCP client/agent use tools exposed by the active browser page. It has two parts:
 
 - A local MCP server started by your agent, or manually from your terminal.
-- A Chromium extension loaded from GitHub Releases, because it is not published to the Chrome Web Store yet.
+- A Chromium extension installed from the Chrome Web Store (or manually from GitHub Releases).
 
 ```mermaid
 flowchart LR
@@ -58,7 +64,36 @@ Add `mcp-page-bridge` extension in Chrome web Store.
 
 ### 2. Add the MCP server to your agent
 
-Use the npm package when it is published:
+The bridge runs as a local MCP server over stdio, started via the published npm package with `npx`. Configure it once for your agent.
+
+<details><summary>OpenCode</summary>
+
+Add it to `opencode.json` (project) or `~/.config/opencode/opencode.json` (global):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "mcp-page-bridge": {
+      "type": "local",
+      "command": ["npx", "-y", "mcp-page-bridge", "--port", "8787"],
+      "enabled": true
+    }
+  }
+}
+```
+
+</details>
+
+<details><summary>Claude Code</summary>
+
+Add it from the CLI:
+
+```bash
+claude mcp add mcp-page-bridge -- npx -y mcp-page-bridge --port 8787
+```
+
+Or add it to `.mcp.json` (project scope):
 
 ```json
 {
@@ -71,9 +106,28 @@ Use the npm package when it is published:
 }
 ```
 
+</details>
+
+<details><summary>Claude Desktop · Cursor · other agents</summary>
+
+Add it to the agent's MCP config (e.g. `claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "mcp-page-bridge": {
+      "command": "npx",
+      "args": ["-y", "mcp-page-bridge", "--port", "8787"]
+    }
+  }
+}
+```
+
+</details>
+
 <details><summary>Alternative local build and configuration</summary>
 
-If the npm package is not available yet, use a local checkout:
+If you prefer a local checkout instead of the npm package:
 
 ```bash
 git clone https://github.com/rytsh/mcp-page-bridge.git
@@ -83,7 +137,22 @@ pnpm approve-builds --all
 pnpm --filter mcp-page-bridge build
 ```
 
-Then configure your agent with the built local CLI:
+Then point your agent at the built local CLI. For opencode:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "mcp-page-bridge": {
+      "type": "local",
+      "command": ["node", "/absolute/path/to/mcp-page-bridge/packages/server/dist/cli.js", "--port", "8787"],
+      "enabled": true
+    }
+  }
+}
+```
+
+For Claude / Cursor and other `mcpServers`-style agents:
 
 ```json
 {
