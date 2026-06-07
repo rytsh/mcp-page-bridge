@@ -39,11 +39,13 @@ flowchart LR
 
 ## Install
 
-Requires Node.js 18 or newer. Local builds also require `pnpm`.
-
 ### 1. Install the Chrome extension
 
-Chrome Web Store publishing is not available yet.
+Add `mcp-page-bridge` extension in Chrome web Store.
+
+> https://chromewebstore.google.com/detail/mcp-page-bridge/lpehmmnlgeaocbnleigemiadocgadgmo
+
+<details><summary>Alternative manual installation from GitHub Releases</summary>
 
 1. Open the [GitHub Releases](https://github.com/rytsh/mcp-page-bridge/releases) page.
 2. Download the extension zip from the latest release.
@@ -51,6 +53,8 @@ Chrome Web Store publishing is not available yet.
 4. Open `chrome://extensions`.
 5. Enable **Developer mode**.
 6. Click **Load unpacked** and select the unzipped extension folder containing `manifest.json`.
+
+</details>
 
 ### 2. Add the MCP server to your agent
 
@@ -66,6 +70,8 @@ Use the npm package when it is published:
   }
 }
 ```
+
+<details><summary>Alternative local build and configuration</summary>
 
 If the npm package is not available yet, use a local checkout:
 
@@ -90,6 +96,8 @@ Then configure your agent with the built local CLI:
 }
 ```
 
+</details>
+
 ### 3. Use it
 
 1. Start your agent session. The agent should spawn `mcp-page-bridge` from the MCP config.
@@ -101,20 +109,6 @@ Then configure your agent with the built local CLI:
 Optional dashboard: open `http://127.0.0.1:8787/` while the bridge is running.
 Use **Shutdown bridge** there when you want to stop the background daemon.
 
-## Local Extension Build
-
-If you do not want to use a release zip, build the extension locally:
-
-```bash
-pnpm install
-pnpm approve-builds --all
-pnpm --filter @mcp-page-bridge/extension build
-```
-
-Then open `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, and select `packages/extension/dist`.
-
 ## More Details
 
 Advanced usage, page authoring with `window.mcp`, built-in browser tools, security notes, examples, and development details are in [DETAILS.md](DETAILS.md).
-
-MIT © Eray Ates

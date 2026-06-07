@@ -393,6 +393,18 @@ pnpm --filter @mcp-page-bridge/extension dev   # rebuild extension on change
 pnpm --filter mcp-page-bridge dev              # run bridge with reload
 ```
 
+### Local Extension Build
+
+If you do not want to use a release zip, build the extension locally:
+
+```bash
+pnpm install
+pnpm approve-builds --all
+pnpm --filter @mcp-page-bridge/extension build
+```
+
+Then open `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, and select `packages/extension/dist`.
+
 ## Status
 
 - [x] Bridge: stdio MCP server, WS server, aggregating proxy, namespacing, `mcp_page_bridge_list_clients`
@@ -402,6 +414,6 @@ pnpm --filter mcp-page-bridge dev              # run bridge with reload
 - [x] Optional auth token; `npx mcp-page-bridge` bin; runs on Node / Bun / Deno
 - [x] Status dashboard + JSON API on the bridge port (`/`, `/api/providers`, `/api/health`)
 - [x] Published to npm (`npx -y mcp-page-bridge`); GitHub Release ships the extension zip
-- [ ] Chrome Web Store listing; resource templates; `mcp_page_bridge_focus`
+- [x] Chrome Web Store listing; resource templates; `mcp_page_bridge_focus`
 
 MIT © Eray Ates
