@@ -1,12 +1,13 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createServer } from "node:net";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { createBridge, type Bridge } from "./bridge.js";
-import { assertCompatibleToken, parsePort, probeBridge } from "./cli.js";
+import { assertCompatibleToken, isDirectInvocation, parsePort, probeBridge } from "./cli.js";
 
 const children = new Set<ChildProcessWithoutNullStreams>();
 const daemonPids = new Set<number>();
@@ -116,6 +117,17 @@ async function stopChild(child: ChildProcessWithoutNullStreams): Promise<void> {
 }
 
 describe("mcp-page-bridge CLI", () => {
+  it("recognizes npm bin symlinks as direct CLI invocations", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "mcp-page-bridge-"));
+    tempDirs.add(tempDir);
+    const realEntry = join(tempDir, "cli.js");
+    const binEntry = join(tempDir, "mcp-page-bridge");
+    await writeFile(realEntry, "");
+    await symlink(realEntry, binEntry);
+
+    expect(isDirectInvocation(binEntry, pathToFileURL(realEntry).href)).toBe(true);
+  });
+
   it("keeps the bridge daemon alive after the first stdio proxy exits", async () => {
     const port = await getFreePort();
     const tempDir = await mkdtemp(join(tmpdir(), "mcp-page-bridge-"));

@@ -1,6 +1,6 @@
 {
   "name": "mcp-page-bridge-monorepo",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "private": true,
   "type": "module",
   "description": "Bridge a live browser app's MCP server to a coding agent over WebSocket",

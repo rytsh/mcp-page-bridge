@@ -1,6 +1,7 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { WebSocketClientTransport } from "@modelcontextprotocol/sdk/client/websocket.js";
 import { spawn } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -353,9 +354,17 @@ async function main(): Promise<void> {
   await connectProxy(port, token);
 }
 
+export function isDirectInvocation(entry = process.argv[1], moduleUrl = import.meta.url): boolean {
+  if (!entry) return false;
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(moduleUrl));
+  } catch {
+    return moduleUrl === pathToFileURL(entry).href;
+  }
+}
+
 // Only run when invoked as the entry script, not when imported by tests.
-const invokedDirectly = !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
-if (invokedDirectly) {
+if (isDirectInvocation()) {
   main().catch((error) => {
     console.error("[mcp-page-bridge] fatal:", error);
     process.exit(1);

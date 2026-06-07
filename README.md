@@ -2,10 +2,10 @@
   <img src="assets/favicon.svg" alt="mcp-page-bridge" width="96" height="96" />
 </p>
 
-<h1 align="center">mcp-page-bridge</h1>
+<h1 align="center">MCP Page Bridge</h1>
 
 <p align="center">
-  Bridge a <strong>live browser page's MCP server</strong> to a coding agent (opencode, Claude, Cursor, ...).
+  Bridge a <strong>live browser page's MCP server</strong> to a coding agent (OpenCode, Claude, Cursor, ...).
 </p>
 
 <p align="center">
@@ -21,7 +21,7 @@
 
 ```mermaid
 flowchart LR
-    A["Agent<br/>opencode · Claude · …"]
+    A["Agent<br/>OpenCode · Claude · …"]
 
     subgraph bridge["mcp-page-bridge (Node)"]
         B["MCP server over stdio<br/>aggregating proxy<br/>1 MCP Client per tab<br/>tools → label__tool"]
