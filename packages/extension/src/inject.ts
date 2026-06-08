@@ -29,6 +29,7 @@ import {
   type ToolHandler,
 } from "./embedded-server.js";
 import { TunnelTransport, allTransports, getTransport } from "./tunnel.js";
+import { teardownAutomationTools } from "./automation-tools.js";
 import {
   clearCssPatches,
   clearSelectedElements,
@@ -54,9 +55,12 @@ interface SdkLikeServer {
 let activated = false;
 let builtinsEnabled = true;
 let evalEnabled = true;
+let coreToolsEnabled = true;
 // Opt-in design/selection built-ins (popup "Design tools"). Off by default to
 // keep the built-in tool catalog small. Set from the activate control message.
 let designToolsEnabled = false;
+let automationToolsEnabled = false;
+let cdpToolsEnabled = false;
 let label = sanitizeLabel(location.host || document.title || "browser");
 
 let embedded: EmbeddedMcpServer | undefined;
@@ -120,7 +124,10 @@ function embeddedServer(): EmbeddedMcpServer {
         extCall,
         console: consoleBuffer,
         includeEval: evalEnabled,
+        coreTools: coreToolsEnabled,
         designTools: designToolsEnabled,
+        automationTools: automationToolsEnabled,
+        cdpTools: cdpToolsEnabled,
       });
     }
   }
@@ -141,6 +148,9 @@ function activateAll(): void {
 function deactivateAll(): void {
   activated = false;
   stopGlobalToolScan();
+  // Restore any page patches the automation tools installed (fetch/XHR hooks,
+  // alert/confirm/prompt overrides) so a disabled tab no longer affects the page.
+  teardownAutomationTools();
   for (const t of allTransports()) void t.close();
 }
 
@@ -203,10 +213,10 @@ function syncGlobalLabel(): boolean {
 }
 
 /**
- * Toggle the opt-in design/selection built-ins. Rebuilds the embedded server so
- * its registered tool set matches, and re-registers any page-declared tools.
+ * Toggle opt-in built-ins. Rebuilds the embedded server so its registered tool
+ * set matches, and re-registers any page-declared tools.
  */
-function rebuildEmbeddedForDesignTools(): void {
+function rebuildEmbeddedForToolset(): void {
   const server = embedded;
   if (!server) {
     if (activated) embeddedServer();
@@ -544,10 +554,18 @@ if (!globalWin.__mcpPageBridgeReadyV2) {
           | undefined;
         const action = payload?.action;
         if (action === "activate") {
+          const wantCore = payload?.coreTools !== false;
           const wantDesign = payload?.designTools === true;
-          const changed = wantDesign !== designToolsEnabled;
+          const wantAutomation = payload?.automationTools === true;
+          const wantCdp = payload?.cdpTools === true;
+          const changed = wantCore !== coreToolsEnabled || wantDesign !== designToolsEnabled || wantAutomation !== automationToolsEnabled || wantCdp !== cdpToolsEnabled;
+          // Turning automation off must restore the page patches it installed.
+          if (automationToolsEnabled && !wantAutomation) teardownAutomationTools();
+          coreToolsEnabled = wantCore;
           designToolsEnabled = wantDesign;
-          if (activated && changed) rebuildEmbeddedForDesignTools();
+          automationToolsEnabled = wantAutomation;
+          cdpToolsEnabled = wantCdp;
+          if (activated && changed) rebuildEmbeddedForToolset();
           else activateAll();
         } else if (action === "deactivate") {
           stopElementPicker?.();

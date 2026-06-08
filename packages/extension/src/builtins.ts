@@ -5,6 +5,8 @@
  * delegated to the service worker via `extCall`.
  */
 import type { ContentBlock, EmbeddedMcpServer, ToolResult } from "./embedded-server.js";
+import { registerAutomationTools } from "./automation-tools.js";
+import { registerCdpTools } from "./cdp-tools.js";
 import { safeSerialize, toLogString } from "./serialize.js";
 
 export interface ConsoleEntry {
@@ -772,7 +774,7 @@ function collectMediaQueries(maxRules: unknown): string[] {
 
 export function registerBuiltins(
   server: EmbeddedMcpServer,
-  opts: { extCall: ExtCall; console: ConsoleBuffer; includeEval?: boolean; designTools?: boolean },
+  opts: { extCall: ExtCall; console: ConsoleBuffer; includeEval?: boolean; coreTools?: boolean; designTools?: boolean; automationTools?: boolean; cdpTools?: boolean },
 ): void {
   const captureScreenshot = async (): Promise<{ dataUrl: string; base64: string }> => {
     const res = (await opts.extCall("screenshot", { download: false })) as { dataUrl: string };
@@ -780,10 +782,11 @@ export function registerBuiltins(
     return { dataUrl: res.dataUrl, base64 };
   };
 
-  // `eval` runs arbitrary JS in the page. It's the most powerful built-in, so a
-  // page can opt out of it (window.mcp.allowEval(false)) while keeping the other
-  // built-ins. Defaults to on to preserve existing behavior.
-  if (opts.includeEval !== false) {
+  if (opts.coreTools !== false) {
+    // `eval` runs arbitrary JS in the page. It's the most powerful built-in, so a
+    // page can opt out of it (window.mcp.allowEval(false)) while keeping the other
+    // built-ins. Defaults to on to preserve existing behavior.
+    if (opts.includeEval !== false) {
     server.registerTool(
     {
       name: "eval",
@@ -964,6 +967,10 @@ export function registerBuiltins(
       return text(html.length > max ? `${html.slice(0, max)}…(${html.length - max} more)` : html);
     },
   );
+  }
+
+  if (opts.automationTools) registerAutomationTools(server, { extCall: opts.extCall });
+  if (opts.cdpTools) registerCdpTools(server, { extCall: opts.extCall });
 
   // ---- design / selection toolset (opt-in) ----
   // Off by default to keep the built-in catalog small (fewer tokens in the
@@ -1284,6 +1291,7 @@ export function registerBuiltins(
   );
   } // end design/selection toolset
 
+  if (opts.coreTools !== false) {
   server.registerTool(
     {
       name: "console_logs",
@@ -1303,6 +1311,7 @@ export function registerBuiltins(
       return json(entries.slice(-limit));
     },
   );
+  }
 
   // ---- design baseline tools (opt-in, delegated to the service worker) ----
   if (opts.designTools) {
@@ -1391,6 +1400,7 @@ export function registerBuiltins(
   );
   } // end design baseline tools
 
+  if (opts.coreTools !== false) {
   // ---- core extension-backed tools (delegated to the service worker) ----
 
   server.registerTool(
@@ -1446,4 +1456,5 @@ export function registerBuiltins(
       return text("reloading");
     },
   );
+  }
 }

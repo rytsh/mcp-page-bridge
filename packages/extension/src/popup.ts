@@ -13,7 +13,12 @@ interface Status {
   port: number;
   token: string;
   browserControl: boolean;
+  coreTools: boolean;
   designTools: boolean;
+  automationTools: boolean;
+  cdpTools: boolean;
+  cdpDebuggerPermission: boolean;
+  cdpAttached: boolean;
   selectedElements?: SelectedElementStatus[];
   selectionMarkersVisible?: boolean;
   cssPatches?: CssPatchStatus[];
@@ -70,7 +75,15 @@ function render(status: Status): void {
   el<HTMLInputElement>("port").value = String(status.port);
   el<HTMLInputElement>("token").value = status.token ?? "";
   el<HTMLInputElement>("browserControl").checked = !!status.browserControl;
+  el<HTMLInputElement>("coreTools").checked = status.coreTools !== false;
   el<HTMLInputElement>("designTools").checked = !!status.designTools;
+  el<HTMLInputElement>("automationTools").checked = !!status.automationTools;
+  el<HTMLInputElement>("cdpTools").checked = !!status.cdpTools;
+  el<HTMLParagraphElement>("cdpHint").textContent = status.cdpTools
+    ? `Advanced CDP tools enabled${status.cdpAttached ? " and attached" : ""}. Chrome shows a debugging banner while attached.`
+    : status.cdpDebuggerPermission
+      ? "Debugger permission granted. Enable only when you need CDP-level control."
+      : "Requires optional debugger permission. Chrome shows a debugging banner while attached.";
   // The picker + CSS-patch panels only matter when the design/selection tools
   // are enabled (otherwise the agent can't act on a selection), so hide them.
   el<HTMLDivElement>("designPanel").style.display = status.designTools ? "" : "none";
@@ -147,6 +160,12 @@ function selectionEditFocused(): boolean {
   return !!active?.closest("#selectedElements .selection-edit");
 }
 
+async function ensureDebuggerPermission(): Promise<boolean> {
+  const request = { permissions: ["debugger"] };
+  if (await chrome.permissions.contains(request)) return true;
+  return chrome.permissions.request(request);
+}
+
 async function refresh(opts: { skipSelectionEdit?: boolean } = {}): Promise<void> {
   if (opts.skipSelectionEdit && selectionEditFocused()) return;
   const tabId = await activeTabId();
@@ -172,14 +191,25 @@ async function main(): Promise<void> {
     const port = Number(el<HTMLInputElement>("port").value) || 8787;
     const token = el<HTMLInputElement>("token").value.trim();
     const browserControl = el<HTMLInputElement>("browserControl").checked;
+    const coreTools = el<HTMLInputElement>("coreTools").checked;
     const designTools = el<HTMLInputElement>("designTools").checked;
-    await chrome.runtime.sendMessage({ type: "setSettings", port, token, browserControl, designTools });
+    const automationTools = el<HTMLInputElement>("automationTools").checked;
+    let cdpTools = el<HTMLInputElement>("cdpTools").checked;
+    if (cdpTools && !(await ensureDebuggerPermission())) {
+      cdpTools = false;
+      el<HTMLInputElement>("cdpTools").checked = false;
+      el<HTMLParagraphElement>("cdpHint").textContent = "Debugger permission was not granted; Advanced CDP tools stayed off.";
+    }
+    await chrome.runtime.sendMessage({ type: "setSettings", port, token, browserControl, coreTools, designTools, automationTools, cdpTools });
     await refresh();
   }
 
   el<HTMLButtonElement>("saveSettings").addEventListener("click", saveSettings);
   el<HTMLInputElement>("browserControl").addEventListener("change", saveSettings);
+  el<HTMLInputElement>("coreTools").addEventListener("change", saveSettings);
   el<HTMLInputElement>("designTools").addEventListener("change", saveSettings);
+  el<HTMLInputElement>("automationTools").addEventListener("change", saveSettings);
+  el<HTMLInputElement>("cdpTools").addEventListener("change", saveSettings);
 
   el<HTMLInputElement>("viewSelection").addEventListener("change", async () => {
     const visible = el<HTMLInputElement>("viewSelection").checked;

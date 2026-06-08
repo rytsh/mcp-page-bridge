@@ -10,7 +10,7 @@ import { registerBuiltins } from "./builtins.js";
  * (reads the buffer), and the SW-delegated tools (screenshot/navigate/reload)
  * via a mock extCall. DOM tools require a browser and are exercised manually.
  */
-async function setup(opts: { includeEval?: boolean; designTools?: boolean } = {}) {
+async function setup(opts: { includeEval?: boolean; coreTools?: boolean; designTools?: boolean; automationTools?: boolean; cdpTools?: boolean } = {}) {
   const calls: Array<[string, unknown]> = [];
   const server = new EmbeddedMcpServer({ name: "builtins", version: "1.0.0" });
   registerBuiltins(server, {
@@ -24,13 +24,17 @@ async function setup(opts: { includeEval?: boolean; designTools?: boolean } = {}
           savedAs: download ? filename ?? "mcp-page-bridge.png" : undefined,
         };
       }
+      if (action === "cdp") return { ok: true, action: (args as { action?: string } | undefined)?.action };
       return { ok: true };
     },
     console: { entries: [{ level: "warn", text: "careful", time: "2026" }] },
     includeEval: opts.includeEval,
+    coreTools: opts.coreTools,
     // Default the design/selection toolset ON in tests unless a case overrides
     // it, so the existing full-catalog assertions keep covering those tools.
     designTools: opts.designTools !== false,
+    automationTools: opts.automationTools !== false,
+    cdpTools: opts.cdpTools !== false,
   });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   await server.connect(st as unknown as MinimalTransport);
@@ -82,6 +86,61 @@ describe("built-in tools", () => {
       "screenshot",
       "navigate",
       "reload",
+      "find_by_text",
+      "find_by_role",
+      "find_by_label",
+      "find_by_test_id",
+      "locator_snapshot",
+      "locator_count",
+      "smart_click",
+      "hover",
+      "double_click",
+      "type_text",
+      "press_key",
+      "clear_value",
+      "select_option",
+      "check",
+      "uncheck",
+      "upload_file",
+      "drag_and_drop",
+      "start_network_capture",
+      "stop_network_capture",
+      "list_network_requests",
+      "wait_for_response",
+      "get_response_body",
+      "clear_network_capture",
+      "get_storage_state",
+      "set_local_storage",
+      "set_session_storage",
+      "clear_storage",
+      "list_cookies",
+      "set_cookie",
+      "delete_cookie",
+      "set_dialog_behavior",
+      "list_dialogs",
+      "clear_dialogs",
+      "list_frames",
+      "frame_dom_query",
+      "frame_click",
+      "frame_set_value",
+      "resize_window",
+      "cdp_status",
+      "cdp_attach",
+      "cdp_detach",
+      "cdp_send_command",
+      "cdp_list_events",
+      "cdp_clear_events",
+      "cdp_get_response_body",
+      "cdp_emulate_viewport",
+      "cdp_clear_emulation",
+      "cdp_dispatch_mouse",
+      "cdp_dispatch_key",
+      "cdp_evaluate",
+      "cdp_capture_screenshot",
+      "cdp_get_performance_metrics",
+      "cdp_set_network_conditions",
+      "cdp_set_user_agent",
+      "cdp_set_geolocation",
     ]) {
       expect(names).toContain(n);
     }
@@ -98,7 +157,7 @@ describe("built-in tools", () => {
   });
 
   it("registers only the lean core toolset when design tools are off", async () => {
-    const { client } = await setup({ designTools: false });
+    const { client } = await setup({ designTools: false, automationTools: false, cdpTools: false });
     const names = (await client.listTools()).tools.map((t) => t.name).sort();
     expect(names).toEqual(
       [
@@ -120,6 +179,41 @@ describe("built-in tools", () => {
     expect(names).not.toContain("apply_css");
     expect(names).not.toContain("get_selected_element");
     expect(names).not.toContain("capture_design_baseline");
+    expect(names).not.toContain("smart_click");
+    expect(names).not.toContain("start_network_capture");
+    expect(names).not.toContain("cdp_attach");
+  });
+
+  it("registers automation tools only when enabled", async () => {
+    const off = await setup({ automationTools: false });
+    expect((await off.client.listTools()).tools.map((t) => t.name)).not.toContain("smart_click");
+
+    const on = await setup({ automationTools: true });
+    const names = (await on.client.listTools()).tools.map((t) => t.name);
+    expect(names).toContain("smart_click");
+    expect(names).toContain("start_network_capture");
+    expect(names).toContain("get_storage_state");
+  });
+
+  it("can disable only the default core tools", async () => {
+    const { client } = await setup({ coreTools: false, designTools: false, automationTools: true, cdpTools: false });
+    const names = (await client.listTools()).tools.map((t) => t.name);
+    expect(names).toContain("smart_click");
+    expect(names).not.toContain("eval");
+    expect(names).not.toContain("dom_query");
+    expect(names).not.toContain("screenshot");
+    expect(names).not.toContain("console_logs");
+  });
+
+  it("registers CDP tools only when enabled", async () => {
+    const off = await setup({ cdpTools: false });
+    expect((await off.client.listTools()).tools.map((t) => t.name)).not.toContain("cdp_attach");
+
+    const on = await setup({ cdpTools: true });
+    const names = (await on.client.listTools()).tools.map((t) => t.name);
+    expect(names).toContain("cdp_attach");
+    expect(names).toContain("cdp_send_command");
+    expect(names).toContain("cdp_emulate_viewport");
   });
 
   it("eval returns the evaluated expression", async () => {

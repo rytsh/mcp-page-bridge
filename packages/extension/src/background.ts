@@ -40,10 +40,35 @@ const tabs = new Map<number, TabState>();
 let bridgePort = DEFAULT_PORT;
 let bridgeToken = "";
 let browserControl = false;
+// Core built-in page tools (DOM/query/click/screenshot/etc.). On by default;
+// exposed as a popup toggle so users can keep only page-declared tools if wanted.
+let coreTools = true;
 // Opt-in design/selection built-in tools. Off by default to keep the per-tab
 // built-in catalog (and the agent's token cost) small. Forwarded to the page on
 // the activate control message.
 let designTools = false;
+// Opt-in Playwright-like automation helpers. Also gated to keep the default
+// catalog small and the permission surface explicit in the popup.
+let automationTools = false;
+// Optional Chrome DevTools Protocol tools. Requires the optional "debugger"
+// permission and is kept off by default because Chrome shows a debugging banner.
+let cdpTools = false;
+
+interface CdpEventEntry {
+  method: string;
+  params: unknown;
+  time: string;
+}
+
+interface CdpSession {
+  attached: boolean;
+  domains: Set<string>;
+  events: CdpEventEntry[];
+}
+
+const CDP_MAX_EVENTS = 500;
+const CDP_ENABLEABLE_DOMAINS = new Set(["CSS", "DOM", "Log", "Network", "Page", "Performance", "Runtime"]);
+const cdpSessions = new Map<number, CdpSession>();
 
 function wsUrl(meta: Record<string, string | number | undefined> = {}): string {
   const url = new URL(`ws://127.0.0.1:${bridgePort}`);
@@ -57,11 +82,15 @@ function wsUrl(meta: Record<string, string | number | undefined> = {}): string {
 // Optional, opt-in "browser" provider (controls all tabs, not just one page).
 const browserProvider = new BrowserProvider(() => wsUrl());
 
-void chrome.storage.local.get(["port", "token", "browserControl", "designTools"]).then((v) => {
+void chrome.storage.local.get(["port", "token", "browserControl", "coreTools", "designTools", "automationTools", "cdpTools"]).then(async (v) => {
   if (v.port) bridgePort = Number(v.port) || DEFAULT_PORT;
   if (typeof v.token === "string") bridgeToken = v.token;
   browserControl = !!v.browserControl;
+  coreTools = v.coreTools !== false;
   designTools = !!v.designTools;
+  automationTools = !!v.automationTools;
+  cdpTools = !!v.cdpTools && (await hasDebuggerPermission());
+  if (cdpTools) ensureCdpListeners();
   if (browserControl) browserProvider.start();
 });
 
@@ -81,6 +110,229 @@ async function setEnabled(tabId: number, on: boolean): Promise<void> {
   if (on) set.add(tabId);
   else set.delete(tabId);
   await chrome.storage.session.set({ enabledTabs: [...set] });
+}
+
+// ---- optional CDP / chrome.debugger tools ------------------------------------
+
+function cdpTarget(tabId: number): chrome.debugger.Debuggee {
+  return { tabId };
+}
+
+function cdpSession(tabId: number): CdpSession {
+  let session = cdpSessions.get(tabId);
+  if (!session) {
+    session = { attached: false, domains: new Set(), events: [] };
+    cdpSessions.set(tabId, session);
+  }
+  return session;
+}
+
+async function hasDebuggerPermission(): Promise<boolean> {
+  return chrome.permissions.contains({ permissions: ["debugger"] });
+}
+
+async function sendCdpCommand<T = unknown>(tabId: number, command: string, params?: Record<string, unknown>): Promise<T> {
+  return chrome.debugger.sendCommand(cdpTarget(tabId), command, params) as Promise<T>;
+}
+
+async function enableCdpDomain(tabId: number, domain: string): Promise<void> {
+  const session = cdpSession(tabId);
+  if (session.domains.has(domain)) return;
+  if (!CDP_ENABLEABLE_DOMAINS.has(domain)) return;
+  await sendCdpCommand(tabId, `${domain}.enable`);
+  session.domains.add(domain);
+}
+
+async function ensureCdpAttached(tabId: number, domains: string[] = []): Promise<CdpSession> {
+  if (!(await hasDebuggerPermission())) {
+    throw new Error("CDP tools require the optional debugger permission. Enable Advanced CDP tools in the popup.");
+  }
+  ensureCdpListeners();
+  const session = cdpSession(tabId);
+  if (!session.attached) {
+    await chrome.debugger.attach(cdpTarget(tabId), "1.3");
+    session.attached = true;
+  }
+  for (const domain of domains) await enableCdpDomain(tabId, domain);
+  return session;
+}
+
+async function detachCdp(tabId: number): Promise<void> {
+  const session = cdpSessions.get(tabId);
+  if (!session?.attached) {
+    cdpSessions.delete(tabId);
+    return;
+  }
+  try {
+    await chrome.debugger.detach(cdpTarget(tabId));
+  } catch {
+    // Already detached, tab gone, or another debugger took over.
+  }
+  cdpSessions.delete(tabId);
+}
+
+async function detachAllCdp(): Promise<void> {
+  await Promise.all([...cdpSessions.keys()].map((tabId) => detachCdp(tabId)));
+}
+
+function pushCdpEvent(tabId: number, method: string, params: unknown): void {
+  const session = cdpSession(tabId);
+  session.events.push({ method, params, time: new Date().toISOString() });
+  if (session.events.length > CDP_MAX_EVENTS) session.events.splice(0, session.events.length - CDP_MAX_EVENTS);
+}
+
+// `debugger` is an OPTIONAL permission, so `chrome.debugger` may be undefined
+// until the user grants it. Registering these listeners at module load would
+// throw and break the whole service worker, so wire them lazily once the API is
+// available (after the permission is granted) and only once.
+let cdpListenersReady = false;
+function ensureCdpListeners(): void {
+  if (cdpListenersReady || !chrome.debugger?.onEvent) return;
+  cdpListenersReady = true;
+  chrome.debugger.onEvent.addListener((source, method, params) => {
+    if (source.tabId === undefined) return;
+    pushCdpEvent(source.tabId, method, params);
+  });
+  chrome.debugger.onDetach.addListener((source) => {
+    if (source.tabId === undefined) return;
+    cdpSessions.delete(source.tabId);
+  });
+}
+
+function boolArg(value: unknown, fallback = false): boolean {
+  return value === undefined ? fallback : value === true;
+}
+
+function strArg(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function numArg(value: unknown, fallback: number): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+async function runCdp(tabId: number, args: Record<string, unknown>): Promise<unknown> {
+  const action = strArg(args.action);
+  switch (action) {
+    case "status": {
+      const session = cdpSessions.get(tabId);
+      return {
+        permission: await hasDebuggerPermission(),
+        attached: !!session?.attached,
+        enabledDomains: [...(session?.domains ?? [])],
+        bufferedEvents: session?.events.length ?? 0,
+      };
+    }
+    case "attach": {
+      const domains = Array.isArray(args.domains) ? args.domains.map(String) : ["Network", "Page", "Runtime"];
+      const session = await ensureCdpAttached(tabId, domains);
+      return { attached: true, enabledDomains: [...session.domains] };
+    }
+    case "detach":
+      await detachCdp(tabId);
+      return { attached: false };
+    case "send": {
+      await ensureCdpAttached(tabId);
+      const command = strArg(args.command);
+      if (!command) throw new Error("CDP command is required.");
+      const params = args.params && typeof args.params === "object" ? args.params as Record<string, unknown> : undefined;
+      return sendCdpCommand(tabId, command, params);
+    }
+    case "events": {
+      await ensureCdpAttached(tabId);
+      const limit = Math.max(1, Math.min(CDP_MAX_EVENTS, numArg(args.limit, 100)));
+      const method = strArg(args.method);
+      const domain = strArg(args.domain);
+      let events = cdpSession(tabId).events;
+      if (method) events = events.filter((event) => event.method === method);
+      if (domain) events = events.filter((event) => event.method.startsWith(`${domain}.`));
+      return events.slice(-limit);
+    }
+    case "clearEvents": {
+      const session = cdpSession(tabId);
+      const count = session.events.length;
+      session.events.length = 0;
+      return { cleared: count };
+    }
+    case "getResponseBody":
+      await ensureCdpAttached(tabId, ["Network"]);
+      return sendCdpCommand(tabId, "Network.getResponseBody", { requestId: String(args.requestId ?? "") });
+    case "emulateViewport":
+      await ensureCdpAttached(tabId);
+      await sendCdpCommand(tabId, "Emulation.setDeviceMetricsOverride", {
+        width: Math.max(1, Math.floor(numArg(args.width, 1280))),
+        height: Math.max(1, Math.floor(numArg(args.height, 720))),
+        deviceScaleFactor: Math.max(0, numArg(args.deviceScaleFactor, 1)),
+        mobile: boolArg(args.mobile),
+      });
+      return { ok: true };
+    case "clearEmulation":
+      await ensureCdpAttached(tabId);
+      await sendCdpCommand(tabId, "Emulation.clearDeviceMetricsOverride");
+      await sendCdpCommand(tabId, "Emulation.clearGeolocationOverride").catch(() => undefined);
+      await sendCdpCommand(tabId, "Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }).catch(() => undefined);
+      return { ok: true };
+    case "dispatchMouse":
+      await ensureCdpAttached(tabId);
+      return sendCdpCommand(tabId, "Input.dispatchMouseEvent", {
+        type: strArg(args.type, "mousePressed"),
+        x: numArg(args.x, 0),
+        y: numArg(args.y, 0),
+        button: strArg(args.button, "left"),
+        clickCount: Math.max(0, Math.floor(numArg(args.clickCount, 1))),
+      });
+    case "dispatchKey": {
+      await ensureCdpAttached(tabId);
+      const key = strArg(args.key);
+      const code = strArg(args.code, key);
+      const textValue = strArg(args.text, key.length === 1 ? key : "");
+      const windowsVirtualKeyCode = Math.floor(numArg(args.windowsVirtualKeyCode, key.length === 1 ? key.toUpperCase().charCodeAt(0) : 0));
+      await sendCdpCommand(tabId, "Input.dispatchKeyEvent", { type: "keyDown", key, code, text: textValue, windowsVirtualKeyCode });
+      await sendCdpCommand(tabId, "Input.dispatchKeyEvent", { type: "keyUp", key, code, windowsVirtualKeyCode });
+      return { ok: true };
+    }
+    case "evaluate":
+      await ensureCdpAttached(tabId, ["Runtime"]);
+      return sendCdpCommand(tabId, "Runtime.evaluate", {
+        expression: String(args.expression ?? ""),
+        awaitPromise: args.awaitPromise !== false,
+        returnByValue: args.returnByValue !== false,
+      });
+    case "screenshot":
+      await ensureCdpAttached(tabId, ["Page"]);
+      return sendCdpCommand(tabId, "Page.captureScreenshot", {
+        format: strArg(args.format, "png"),
+        quality: args.quality === undefined ? undefined : Math.max(0, Math.min(100, Math.floor(numArg(args.quality, 90)))),
+        captureBeyondViewport: boolArg(args.captureBeyondViewport),
+      });
+    case "performanceMetrics":
+      await ensureCdpAttached(tabId, ["Performance"]);
+      return sendCdpCommand(tabId, "Performance.getMetrics");
+    case "setNetworkConditions":
+      await ensureCdpAttached(tabId, ["Network"]);
+      await sendCdpCommand(tabId, "Network.emulateNetworkConditions", {
+        offline: boolArg(args.offline),
+        latency: Math.max(0, numArg(args.latency, 0)),
+        downloadThroughput: numArg(args.downloadThroughput, -1),
+        uploadThroughput: numArg(args.uploadThroughput, -1),
+      });
+      return { ok: true };
+    case "setUserAgent":
+      await ensureCdpAttached(tabId, ["Network"]);
+      await sendCdpCommand(tabId, "Network.setUserAgentOverride", { userAgent: String(args.userAgent ?? "") });
+      return { ok: true };
+    case "setGeolocation":
+      await ensureCdpAttached(tabId);
+      await sendCdpCommand(tabId, "Emulation.setGeolocationOverride", {
+        latitude: numArg(args.latitude, 0),
+        longitude: numArg(args.longitude, 0),
+        accuracy: Math.max(0, numArg(args.accuracy, 100)),
+      });
+      return { ok: true };
+    default:
+      throw new Error(`unknown cdp action: ${action}`);
+  }
 }
 
 // ---- downstream helpers (SW -> content -> page) ------------------------------
@@ -352,7 +604,7 @@ async function ensureEnabledTab(tabId: number): Promise<TabState | undefined> {
   for (let i = 0; i < 6; i += 1) {
     state = tabs.get(tabId);
     if (state) {
-      sendControl(state, "activate", { designTools });
+      sendControl(state, "activate", { coreTools, designTools, automationTools, cdpTools });
       return state;
     }
     await sleep(80);
@@ -518,7 +770,7 @@ async function handleUp(state: TabState, msg: ChannelMessage): Promise<void> {
     if (action === "hello") {
       const on = await isEnabled(state.tabId);
       void updateActionIcon(state.tabId, on);
-      if (on) sendControl(state, "activate", { designTools });
+      if (on) sendControl(state, "activate", { coreTools, designTools, automationTools, cdpTools });
     }
     return;
   }
@@ -583,6 +835,17 @@ async function runExt(
     case "reload":
       await chrome.tabs.reload(tabId);
       return { ok: true };
+    case "resizeWindow": {
+      const tab = await chrome.tabs.get(tabId);
+      if (tab.windowId === undefined) throw new Error("tab has no windowId");
+      const width = Math.max(320, Math.min(4096, Number(args.width) || 0));
+      const height = Math.max(240, Math.min(4096, Number(args.height) || 0));
+      const win = await chrome.windows.update(tab.windowId, { width, height });
+      return { ok: true, window: { id: win?.id, width: win?.width, height: win?.height } };
+    }
+    case "cdp":
+      if (!cdpTools) throw new Error("Advanced CDP tools are not enabled in the extension popup.");
+      return runCdp(tabId, args);
     default:
       throw new Error(`unknown ext action: ${action}`);
   }
@@ -606,6 +869,7 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
       const design = designTools
         ? await readPageDesignState(tabId)
         : { selection: { items: [], markersVisible: true }, cssPatches: [] };
+      const cdpPermission = await hasDebuggerPermission();
       const providers = state
         ? [...state.sockets.entries()].map(([id, e]) => ({
             id,
@@ -621,7 +885,12 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
         port: bridgePort,
         token: bridgeToken,
         browserControl,
+        coreTools,
         designTools,
+        automationTools,
+        cdpTools: cdpTools && cdpPermission,
+        cdpDebuggerPermission: cdpPermission,
+        cdpAttached: !!cdpSessions.get(tabId)?.attached,
         selectedElements: design.selection.items,
         selectionMarkersVisible: design.selection.markersVisible,
         cssPatches: design.cssPatches,
@@ -632,19 +901,10 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
     if (req?.type === "setEnabled") {
       const tabId = req.tabId as number;
       if (req.enabled) {
-        const state = tabs.get(tabId);
-        if (state) {
-          await setEnabled(tabId, true);
-          void updateActionIcon(tabId, true);
-          sendControl(state, "activate", { designTools });
-          sendResponse({ ok: true });
-          return;
-        }
-        // Tab opened before the extension loaded → no content script yet.
-        const injected = await injectIntoTab(tabId);
-        if (!injected) {
-          // Restricted page (chrome://, Web Store, etc.): don't mark it enabled
-          // or flip the icon green — it can never connect.
+        const state = await ensureEnabledTab(tabId);
+        if (!state) {
+          // Restricted page (chrome://, Web Store, etc.): don't leave it enabled
+          // or keep the icon green — it can never connect.
           await setEnabled(tabId, false);
           void updateActionIcon(tabId, false);
           sendResponse({
@@ -653,8 +913,6 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
           });
           return;
         }
-        await setEnabled(tabId, true);
-        void updateActionIcon(tabId, true);
         sendResponse({ ok: true });
         return;
       }
@@ -666,6 +924,7 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
         sendControl(state, "deactivate");
         closeAllSockets(state);
       }
+      await detachCdp(tabId);
       sendResponse({ ok: true });
       return;
     }
@@ -813,19 +1072,26 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
       bridgePort = Number(req.port) || DEFAULT_PORT;
       bridgeToken = typeof req.token === "string" ? req.token : "";
       browserControl = !!req.browserControl;
+      const prevCoreTools = coreTools;
       const prevDesignTools = designTools;
+      const prevAutomationTools = automationTools;
+      const prevCdpTools = cdpTools;
+      coreTools = req.coreTools !== false;
       designTools = !!req.designTools;
-      await chrome.storage.local.set({ port: bridgePort, token: bridgeToken, browserControl, designTools });
+      automationTools = !!req.automationTools;
+      cdpTools = !!req.cdpTools && (await hasDebuggerPermission());
+      await chrome.storage.local.set({ port: bridgePort, token: bridgeToken, browserControl, coreTools, designTools, automationTools, cdpTools });
       if (browserControl) browserProvider.restart();
       else browserProvider.stop();
-      // Re-apply the design-tools setting to already-enabled tabs so the
+      if (prevCdpTools && !cdpTools) await detachAllCdp();
+      // Re-apply opt-in toolset settings to already-enabled tabs so the
       // built-in catalog updates live (the page rebuilds its embedded server).
-      if (designTools !== prevDesignTools) {
+      if (coreTools !== prevCoreTools || designTools !== prevDesignTools || automationTools !== prevAutomationTools || cdpTools !== prevCdpTools) {
         for (const state of tabs.values()) {
-          if (await isEnabled(state.tabId)) sendControl(state, "activate", { designTools });
+          if (await isEnabled(state.tabId)) sendControl(state, "activate", { coreTools, designTools, automationTools, cdpTools });
         }
       }
-      sendResponse({ ok: true, port: bridgePort, hasToken: !!bridgeToken, browserControl, designTools });
+      sendResponse({ ok: true, port: bridgePort, hasToken: !!bridgeToken, browserControl, coreTools, designTools, automationTools, cdpTools });
       return;
     }
 
@@ -843,6 +1109,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     tabs.delete(tabId);
   }
   void setEnabled(tabId, false);
+  void detachCdp(tabId);
 });
 
 // MV3 service workers are recycled after ~30s idle. An open WebSocket only

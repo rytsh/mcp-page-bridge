@@ -114,6 +114,63 @@ export const BUILTIN_TOOL_NAMES = [
   "screenshot",
   "navigate",
   "reload",
+  // Automation (opt-in)
+  "find_by_text",
+  "find_by_role",
+  "find_by_label",
+  "find_by_test_id",
+  "locator_snapshot",
+  "locator_count",
+  "smart_click",
+  "hover",
+  "double_click",
+  "type_text",
+  "press_key",
+  "clear_value",
+  "select_option",
+  "check",
+  "uncheck",
+  "upload_file",
+  "drag_and_drop",
+  "start_network_capture",
+  "stop_network_capture",
+  "list_network_requests",
+  "wait_for_response",
+  "get_response_body",
+  "clear_network_capture",
+  "get_storage_state",
+  "set_local_storage",
+  "set_session_storage",
+  "clear_storage",
+  "list_cookies",
+  "set_cookie",
+  "delete_cookie",
+  "set_dialog_behavior",
+  "list_dialogs",
+  "clear_dialogs",
+  "list_frames",
+  "frame_dom_query",
+  "frame_click",
+  "frame_set_value",
+  "resize_window",
+  // Advanced CDP (opt-in, requires optional debugger permission)
+  "cdp_status",
+  "cdp_attach",
+  "cdp_detach",
+  "cdp_send_command",
+  "cdp_list_events",
+  "cdp_clear_events",
+  "cdp_get_response_body",
+  "cdp_emulate_viewport",
+  "cdp_clear_emulation",
+  "cdp_dispatch_mouse",
+  "cdp_dispatch_key",
+  "cdp_evaluate",
+  "cdp_capture_screenshot",
+  "cdp_get_performance_metrics",
+  "cdp_set_network_conditions",
+  "cdp_set_user_agent",
+  "cdp_set_geolocation",
 ] as const;
 
 /** Names of the opt-in "browser" provider tools (service-worker hosted, all-tabs). */
@@ -184,12 +241,18 @@ export interface ControlPayload {
   name?: string;
   group?: string;
   visible?: boolean;
+  /** On "activate": whether the lean core built-in tools are registered. Defaults to true. */
+  coreTools?: boolean;
   /**
    * On "activate": whether the opt-in design/selection built-in toolset should
    * be registered. Off by default to keep the built-in tool catalog (and the
    * agent's token cost) small.
    */
   designTools?: boolean;
+  /** On "activate": whether the opt-in Playwright-like automation tools are registered. */
+  automationTools?: boolean;
+  /** On "activate": whether optional Chrome DevTools Protocol tools are registered. */
+  cdpTools?: boolean;
 }
 
 export const MCP_PAGE_BRIDGE_MARK = "__mcpPageBridge" as const;

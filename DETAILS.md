@@ -310,12 +310,40 @@ the same provider (so any page is reachable even without calling `window.mcp`):
 `document_start`), `screenshot` (pass `download:true` to also save the PNG to
 the browser's Downloads folder), `navigate`, `reload`.
 
+The popup's **Core tools (default MCPs)** switch controls this lean default
+toolset and is checked by default. Turn it off before enabling a tab if you only
+want page-declared tools and/or the opt-in tool groups below.
+
 This core set is kept small on purpose: every tool's name + schema sits in the
 agent's tool list and costs tokens for the whole session, so the heavier
 **design/selection toolset** below is **opt-in**. Turn it on with the **Design
 tools** switch in the popup (off by default); the change applies to enabled tabs
 immediately. With design tools off the catalog is ~12 tools; on, it adds the 21
 selection/CSS/audit tools listed below.
+
+The popup also has a separate **Automation tools** switch for Playwright-like live
+page automation. It adds locator helpers (`find_by_text`, `find_by_role`,
+`find_by_label`, `find_by_test_id`, `locator_snapshot`, `locator_count`), safer
+actions (`smart_click`, `hover`, `double_click`, `type_text`, `press_key`,
+`clear_value`, `select_option`, `check`, `uncheck`, `upload_file`,
+`drag_and_drop`), page-level `fetch`/`XMLHttpRequest` capture
+(`start_network_capture`, `list_network_requests`, `wait_for_response`,
+`get_response_body`), storage/cookie helpers, dialog auto-handling,
+same-origin iframe helpers, and best-effort `resize_window`. This is not a full
+Playwright replacement: there is no isolated browser context, HTTP-only cookie
+access, cross-origin iframe control, trace viewer, or video.
+
+For browser-protocol-level work, the popup has a separate **Advanced CDP tools**
+switch. It requests Chrome's optional `debugger` permission only when enabled.
+Chrome shows a debugging banner while CDP is attached; turning the switch off or
+calling `cdp_detach` detaches it. CDP tools include `cdp_attach`,
+`cdp_detach`, `cdp_send_command`, `cdp_list_events`,
+`cdp_get_response_body`, `cdp_emulate_viewport`, `cdp_dispatch_mouse`,
+`cdp_dispatch_key`, `cdp_evaluate`, `cdp_capture_screenshot`,
+`cdp_get_performance_metrics`, `cdp_set_network_conditions`,
+`cdp_set_user_agent`, and `cdp_set_geolocation`. They can see browser-level
+network events and use CDP input/emulation APIs, but still do not create
+Playwright-style isolated browser contexts or multi-browser sessions.
 
 Design tools: click **Pick element** in the popup, select a page
 element, then tell your agent something like "make the place I picked look
