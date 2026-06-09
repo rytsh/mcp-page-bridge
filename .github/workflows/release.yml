@@ -95,6 +95,9 @@ jobs:
           NPM_CONFIG_PROVENANCE: true
 
       - name: Publish platform binary packages to npm (with provenance)
+        # pnpm (not npm) because OIDC trusted publishing needs npm >= 11.5.1 and
+        # Node 22 ships npm 10. Note pnpm pack strips the binary's executable
+        # bit; the wrapper's launcher restores it before spawning.
         run: |
           VERSION="$(node -p "require('./packages/server/package.json').version")"
           if [[ "$VERSION" == *-* ]]; then DIST_TAG=next; else DIST_TAG=latest; fi
@@ -105,7 +108,7 @@ jobs:
               continue
             fi
             echo "Publishing $NAME@$VERSION with dist-tag '$DIST_TAG'"
-            (cd "$dir" && npm publish --access public --provenance --tag "$DIST_TAG")
+            (cd "$dir" && pnpm publish --access public --no-git-checks --provenance --tag "$DIST_TAG")
           done
         env:
           NPM_CONFIG_PROVENANCE: true
