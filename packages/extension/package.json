@@ -1,6 +1,6 @@
 {
   "name": "@mcp-page-bridge/extension",
-  "version": "0.1.7",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "mcp-page-bridge browser extension (MV3): exposes a page's MCP server to the agent via the bridge",
@@ -18,7 +18,6 @@
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "mcp-page-bridge": "workspace:*",
     "@types/chrome": "^0.0.287",
     "@types/node": "^22.10.2",
     "esbuild": "^0.24.2",

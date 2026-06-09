@@ -1,15 +1,15 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { WebSocketClientTransport } from "@modelcontextprotocol/sdk/client/websocket.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createBridge, type Bridge } from "../../server/src/bridge.js";
 import { EmbeddedMcpServer, type MinimalTransport } from "./embedded-server.js";
+import { startGoBridge, type GoBridge } from "./go-bridge.test-helper.js";
 
 /**
- * Full lightweight-path integration: the EmbeddedMcpServer (what window.mcp
- * builds) talks raw MCP JSON-RPC over a real WebSocket to the bridge, exactly
- * as the service worker pipes it. Proves an agent can discover + call a tool a
- * page registered with window.mcp.tool().
+ * Full lightweight-path integration against the REAL (Go) bridge: the
+ * EmbeddedMcpServer (what window.mcp builds) talks raw MCP JSON-RPC over a real
+ * WebSocket to a spawned bridge daemon, exactly as the service worker pipes it.
+ * Proves an agent can discover + call a tool a page registered with
+ * window.mcp.tool().
  */
 
 async function waitFor<T>(
@@ -31,7 +31,7 @@ function textOf(result: unknown): string {
   return content.map((c) => (c.type === "text" ? c.text ?? "" : "")).join("");
 }
 
-let bridge: Bridge | undefined;
+let bridge: GoBridge | undefined;
 const cleanups: Array<() => void | Promise<void>> = [];
 
 afterEach(async () => {
@@ -43,21 +43,22 @@ afterEach(async () => {
     }
   }
   if (bridge) {
-    await bridge.close();
+    await bridge.stop();
     bridge = undefined;
   }
 });
 
+async function connectAgent(port: number): Promise<Client> {
+  const agent = new Client({ name: "agent", version: "0.0.0" }, { capabilities: {} });
+  await agent.connect(new WebSocketClientTransport(new URL(`ws://127.0.0.1:${port}/agent`)));
+  cleanups.push(() => agent.close());
+  return agent;
+}
+
 describe("lightweight window.mcp wire (EmbeddedMcpServer over WebSocket)", () => {
   it("agent discovers and calls a tool registered via the embedded server", async () => {
-    bridge = await createBridge({ port: 0 });
-
-    // agent side
-    const [clientT, serverT] = InMemoryTransport.createLinkedPair();
-    await bridge.server.connect(serverT);
-    const agent = new Client({ name: "agent", version: "0.0.0" }, { capabilities: {} });
-    await agent.connect(clientT);
-    cleanups.push(() => agent.close());
+    bridge = await startGoBridge();
+    const agent = await connectAgent(bridge.port);
 
     // "browser" side: embedded server over a real WS to the bridge
     const embedded = new EmbeddedMcpServer({ name: "lite-app", version: "1.0.0" });
@@ -88,19 +89,15 @@ describe("lightweight window.mcp wire (EmbeddedMcpServer over WebSocket)", () =>
   });
 
   it("dynamically reflects tools registered after connect", async () => {
-    bridge = await createBridge({ port: 0 });
-    const [clientT, serverT] = InMemoryTransport.createLinkedPair();
-    await bridge.server.connect(serverT);
-    const agent = new Client({ name: "agent", version: "0.0.0" }, { capabilities: {} });
-    await agent.connect(clientT);
-    cleanups.push(() => agent.close());
+    bridge = await startGoBridge();
+    const agent = await connectAgent(bridge.port);
 
     const embedded = new EmbeddedMcpServer({ name: "live", version: "1.0.0" });
     const transport = new WebSocketClientTransport(new URL(`ws://127.0.0.1:${bridge.port}`));
     await embedded.connect(transport as unknown as MinimalTransport);
     cleanups.push(() => embedded.close());
 
-    await waitFor(() => bridge!.listProviders().length, (n) => n === 1);
+    await waitFor(() => bridge!.listProviders(), (providers) => providers.length === 1);
 
     // Register AFTER the agent is already connected -> list_changed should flow.
     embedded.registerTool({ name: "now" }, () => new Date(0).toISOString());

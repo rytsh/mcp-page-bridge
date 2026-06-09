@@ -1,6 +1,6 @@
 {
   "name": "@mcp-page-bridge/demo-app",
-  "version": "0.1.7",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Static demo page that exposes tools via window.mcp",

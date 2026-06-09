@@ -23,6 +23,11 @@ jobs:
           node-version: 22
           cache: pnpm
 
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
       - name: Install
         run: pnpm install --frozen-lockfile
 
@@ -34,3 +39,17 @@ jobs:
 
       - name: Build
         run: pnpm -r --if-present build
+
+      - name: Verify dashboard embed is in sync
+        run: |
+          git diff --exit-code internal/server/assets/dashboard.html || {
+            echo "::error::dashboard embed is stale; run 'pnpm --filter mcp-page-bridge-dashboard build' and commit"; exit 1; }
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Go test
+        run: go test -race ./...
+
+      - name: Go build
+        run: go build ./...

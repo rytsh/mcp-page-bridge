@@ -1,0 +1,19 @@
+{
+  "name": "mcp-page-bridge-dashboard",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Status dashboard for mcp-page-bridge, built to a single HTML file embedded by both the Go and Node bridge servers",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && node sync-embeds.mjs",
+    "preview": "vite preview --port 5174"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7.1.2",
+    "mcp-page-bridge-protocol": "workspace:*",
+    "svelte": "^5.56.1",
+    "vite": "^8.0.16",
+    "vite-plugin-singlefile": "^2.3.0"
+  }
+}

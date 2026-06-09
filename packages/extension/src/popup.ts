@@ -10,6 +10,7 @@ interface Status {
   enabled: boolean;
   connected: boolean;
   providers: ProviderStatus[];
+  host?: string;
   port: number;
   token: string;
   browserControl: boolean;
@@ -72,6 +73,7 @@ function render(status: Status): void {
     ? "Disable on this tab"
     : "Enable on this tab";
 
+  el<HTMLInputElement>("host").value = status.host ?? "127.0.0.1";
   el<HTMLInputElement>("port").value = String(status.port);
   el<HTMLInputElement>("token").value = status.token ?? "";
   el<HTMLInputElement>("browserControl").checked = !!status.browserControl;
@@ -188,6 +190,7 @@ async function main(): Promise<void> {
   });
 
   async function saveSettings(): Promise<void> {
+    const host = el<HTMLInputElement>("host").value.trim() || "127.0.0.1";
     const port = Number(el<HTMLInputElement>("port").value) || 8787;
     const token = el<HTMLInputElement>("token").value.trim();
     const browserControl = el<HTMLInputElement>("browserControl").checked;
@@ -200,7 +203,7 @@ async function main(): Promise<void> {
       el<HTMLInputElement>("cdpTools").checked = false;
       el<HTMLParagraphElement>("cdpHint").textContent = "Debugger permission was not granted; Advanced CDP tools stayed off.";
     }
-    await chrome.runtime.sendMessage({ type: "setSettings", port, token, browserControl, coreTools, designTools, automationTools, cdpTools });
+    await chrome.runtime.sendMessage({ type: "setSettings", host, port, token, browserControl, coreTools, designTools, automationTools, cdpTools });
     await refresh();
   }
 
@@ -218,8 +221,12 @@ async function main(): Promise<void> {
   });
 
   el<HTMLButtonElement>("openDashboard").addEventListener("click", async () => {
+    const rawHost = el<HTMLInputElement>("host").value.trim() || "127.0.0.1";
+    const host = rawHost.includes(":") && !rawHost.startsWith("[") ? `[${rawHost}]` : rawHost;
     const port = Number(el<HTMLInputElement>("port").value) || 8787;
-    await chrome.tabs.create({ url: `http://127.0.0.1:${port}/` });
+    const token = el<HTMLInputElement>("token").value.trim();
+    const query = token ? `/?token=${encodeURIComponent(token)}` : "/";
+    await chrome.tabs.create({ url: `http://${host}:${port}${query}` });
   });
 
   async function startPicker(append: boolean): Promise<void> {

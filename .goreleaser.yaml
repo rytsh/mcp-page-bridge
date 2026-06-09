@@ -1,0 +1,45 @@
+version: 2
+
+project_name: mcp-page-bridge
+
+builds:
+  - id: mcp-page-bridge
+    main: ./cmd/mcp-page-bridge
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X github.com/rytsh/mcp-page-bridge/internal/protocol.Version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .Date }}
+
+archives:
+  # No version in the name so stable URLs work:
+  #   https://github.com/rytsh/mcp-page-bridge/releases/latest/download/mcp-page-bridge-linux-x64.tar.gz
+  - formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}-{{ .Os }}-{{ if eq .Arch "amd64" }}x64{{ else }}{{ .Arch }}{{ end }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+release:
+  # The release workflow creates the GitHub release itself (with the extension
+  # zip); goreleaser only builds the binaries into dist/.
+  disable: true

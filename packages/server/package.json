@@ -1,6 +1,6 @@
 {
   "name": "mcp-page-bridge",
-  "version": "0.1.7",
+  "version": "0.2.0",
   "type": "module",
   "description": "MCP bridge that aggregates live browser-page MCP servers and exposes them to a coding agent over stdio",
   "license": "MIT",
@@ -11,42 +11,20 @@
   },
   "keywords": ["mcp", "model-context-protocol", "browser", "websocket", "agent", "opencode"],
   "bin": {
-    "mcp-page-bridge": "./dist/cli.js"
+    "mcp-page-bridge": "./bin/mcp-page-bridge.js"
   },
-  "exports": {
-    "./bridge": {
-      "types": "./dist/bridge.d.ts",
-      "import": "./dist/bridge.js"
-    }
-  },
-  "files": ["dist"],
+  "files": ["bin"],
   "engines": {
     "node": ">=18"
   },
   "publishConfig": {
     "access": "public"
   },
-  "scripts": {
-    "start": "tsx src/cli.ts",
-    "dev": "tsx watch src/cli.ts",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "typecheck": "tsc -p tsconfig.json",
-    "build": "tsup",
-    "prepublishOnly": "pnpm build"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "ws": "^8.21.0"
-  },
-  "devDependencies": {
-    "mcp-page-bridge-protocol": "workspace:*",
-    "@types/node": "^22.10.2",
-    "@types/ws": "^8.5.13",
-    "tsup": "^8.3.5",
-    "tsx": "^4.19.2",
-    "typescript": "^5.7.3",
-    "vitest": "^2.1.8",
-    "zod": "^3.25.0"
+  "optionalDependencies": {
+    "mcp-page-bridge-linux-x64": "0.2.0",
+    "mcp-page-bridge-linux-arm64": "0.2.0",
+    "mcp-page-bridge-darwin-x64": "0.2.0",
+    "mcp-page-bridge-darwin-arm64": "0.2.0",
+    "mcp-page-bridge-windows-x64": "0.2.0"
   }
 }

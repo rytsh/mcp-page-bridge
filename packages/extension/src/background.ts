@@ -37,6 +37,8 @@ interface TabState {
 }
 
 const tabs = new Map<number, TabState>();
+const DEFAULT_HOST = "127.0.0.1";
+let bridgeHost = DEFAULT_HOST;
 let bridgePort = DEFAULT_PORT;
 let bridgeToken = "";
 let browserControl = false;
@@ -70,8 +72,14 @@ const CDP_MAX_EVENTS = 500;
 const CDP_ENABLEABLE_DOMAINS = new Set(["CSS", "DOM", "Log", "Network", "Page", "Performance", "Runtime"]);
 const cdpSessions = new Map<number, CdpSession>();
 
+/** Bracket bare IPv6 addresses so they are valid inside a URL authority. */
+function urlHost(host: string): string {
+  const h = host.trim() || DEFAULT_HOST;
+  return h.includes(":") && !h.startsWith("[") ? `[${h}]` : h;
+}
+
 function wsUrl(meta: Record<string, string | number | undefined> = {}): string {
-  const url = new URL(`ws://127.0.0.1:${bridgePort}`);
+  const url = new URL(`ws://${urlHost(bridgeHost)}:${bridgePort}`);
   if (bridgeToken) url.searchParams.set("token", bridgeToken);
   for (const [key, value] of Object.entries(meta)) {
     if (value !== undefined) url.searchParams.set(key, String(value));
@@ -82,7 +90,8 @@ function wsUrl(meta: Record<string, string | number | undefined> = {}): string {
 // Optional, opt-in "browser" provider (controls all tabs, not just one page).
 const browserProvider = new BrowserProvider(() => wsUrl());
 
-void chrome.storage.local.get(["port", "token", "browserControl", "coreTools", "designTools", "automationTools", "cdpTools"]).then(async (v) => {
+void chrome.storage.local.get(["host", "port", "token", "browserControl", "coreTools", "designTools", "automationTools", "cdpTools"]).then(async (v) => {
+  if (typeof v.host === "string" && v.host.trim()) bridgeHost = v.host.trim();
   if (v.port) bridgePort = Number(v.port) || DEFAULT_PORT;
   if (typeof v.token === "string") bridgeToken = v.token;
   browserControl = !!v.browserControl;
@@ -882,6 +891,7 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
         enabled: await isEnabled(tabId),
         connected: !!state,
         providers,
+        host: bridgeHost,
         port: bridgePort,
         token: bridgeToken,
         browserControl,
@@ -1069,6 +1079,7 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
     }
 
     if (req?.type === "setSettings") {
+      bridgeHost = typeof req.host === "string" && req.host.trim() ? req.host.trim() : DEFAULT_HOST;
       bridgePort = Number(req.port) || DEFAULT_PORT;
       bridgeToken = typeof req.token === "string" ? req.token : "";
       browserControl = !!req.browserControl;
@@ -1080,7 +1091,7 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
       designTools = !!req.designTools;
       automationTools = !!req.automationTools;
       cdpTools = !!req.cdpTools && (await hasDebuggerPermission());
-      await chrome.storage.local.set({ port: bridgePort, token: bridgeToken, browserControl, coreTools, designTools, automationTools, cdpTools });
+      await chrome.storage.local.set({ host: bridgeHost, port: bridgePort, token: bridgeToken, browserControl, coreTools, designTools, automationTools, cdpTools });
       if (browserControl) browserProvider.restart();
       else browserProvider.stop();
       if (prevCdpTools && !cdpTools) await detachAllCdp();
@@ -1091,7 +1102,7 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
           if (await isEnabled(state.tabId)) sendControl(state, "activate", { coreTools, designTools, automationTools, cdpTools });
         }
       }
-      sendResponse({ ok: true, port: bridgePort, hasToken: !!bridgeToken, browserControl, coreTools, designTools, automationTools, cdpTools });
+      sendResponse({ ok: true, host: bridgeHost, port: bridgePort, hasToken: !!bridgeToken, browserControl, coreTools, designTools, automationTools, cdpTools });
       return;
     }
 

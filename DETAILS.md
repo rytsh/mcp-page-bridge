@@ -76,16 +76,16 @@ Prereqs: Node ≥ 18, pnpm, a Chromium browser.
 ```bash
 pnpm install
 pnpm approve-builds --all      # one-time: allow esbuild's native binary
-pnpm -r build                  # builds server (dist/cli.js) + extension (dist/)
+pnpm -r build                  # builds protocol + dashboard (Go embed) + extension (dist/)
 ```
 
 1. **Run the bridge** (the agent normally spawns this; you can also run it
    standalone to watch logs):
 
    ```bash
-   pnpm --filter mcp-page-bridge start        # ws://127.0.0.1:8787
-   # or after build: node packages/server/dist/cli.js --port 8787
-   # optional auth:  node packages/server/dist/cli.js --token secret
+   pnpm server                                # = go run ./cmd/mcp-page-bridge --daemon
+   # or: go run ./cmd/mcp-page-bridge --daemon --port 8787
+   # optional auth: go run ./cmd/mcp-page-bridge --daemon --token secret
    ```
 
    Then open **http://127.0.0.1:8787/** in a browser for the live dashboard —
@@ -113,12 +113,19 @@ pnpm -r build                  # builds server (dist/cli.js) + extension (dist/)
 the browser's WebSocket and re-exposes the page's tools. Add it to your agent's
 MCP config like any other stdio server.
 
-> **Before it's published to npm**, replace `npx -y mcp-page-bridge` everywhere below with
-> the built binary:
-> `node /ABSOLUTE/PATH/mcp-page-bridge/packages/server/dist/cli.js`
-> (run `pnpm --filter mcp-page-bridge build` once first). Flags/env are the same.
+> **From a local checkout**, replace `npx -y mcp-page-bridge` everywhere below with
+> the built binary: `go build -o mcp-page-bridge ./cmd/mcp-page-bridge` and use
+> `/ABSOLUTE/PATH/mcp-page-bridge/mcp-page-bridge`. Flags/env are the same.
 
-Flags: `--port <n>` (default 8787), `--token <secret>`. Env: `MCP_PAGE_BRIDGE_PORT`, `MCP_PAGE_BRIDGE_TOKEN`.
+Flags: `--port <n>` (default 8787), `--token <secret>`, `--host <addr>` (default `127.0.0.1`).
+Env: `MCP_PAGE_BRIDGE_PORT`, `MCP_PAGE_BRIDGE_TOKEN`, `MCP_PAGE_BRIDGE_HOST`.
+
+> **Remote browser**: to connect a browser on another device (phone/laptop on
+> your LAN), start the bridge with `--host 0.0.0.0 --token <secret>` and set the
+> same host/IP + token in the extension popup. A token is **required** for any
+> non-loopback bind — page tools (`eval` etc.) must never be open to the network
+> unauthenticated. The Host/Origin checks relax to port matching in this mode;
+> the token carries the authorization.
 
 Multiple agents can use the same port. On first use, `mcp-page-bridge` starts a
 detached local bridge daemon that owns the browser WebSocket/dashboard port.
@@ -174,12 +181,10 @@ the MCP SDK is cross-runtime, so the agent's `command` can use any of:
 | Bun | `["bunx", "mcp-page-bridge", "--port", "8787"]` |
 | Deno | `["deno", "run", "-A", "npm:mcp-page-bridge", "--port", "8787"]` |
 
-Bun and Deno can also run the TypeScript source directly (no build step):
-`bun packages/server/src/cli.ts --port 8787`. Bun is fully supported. On Deno,
-the only thing to watch is the `ws` server (it relies on the `node:http`
-`upgrade` event) — it works on recent Deno via npm compat; if you hit issues,
-fall back to Node or Bun. The published `bin` shebang is `#!/usr/bin/env node`,
-so plain `npx mcp-page-bridge` always uses Node.
+The npm package is a thin launcher around the native Go binary, so the runtime
+above only spawns the launcher — the bridge itself has no Node/Bun/Deno
+dependency. You can also skip npm entirely and run the
+[standalone binary](https://github.com/rytsh/mcp-page-bridge/releases) directly.
 
 ### opencode
 
@@ -242,8 +247,8 @@ Windows: `%APPDATA%\Claude\`), then restart the app:
 
 ### Any other MCP client
 
-It's a standard stdio MCP server — run `npx -y mcp-page-bridge` (or the `dist/cli.js`
-path) as the command. `stdout` is the MCP channel; logs go to `stderr`.
+It's a standard stdio MCP server — run `npx -y mcp-page-bridge` (or a standalone
+binary) as the command. `stdout` is the MCP channel; logs go to `stderr`.
 
 ### Putting it together
 
@@ -415,11 +420,16 @@ agent's permission prompts.
 ## Development
 
 ```bash
-pnpm test         # vitest (bridge + embedded server + e2e over a real socket)
+go test ./...     # bridge test suite (e2e over real sockets); requires Go
+pnpm test         # vitest (extension + embedded server e2e against the Go bridge)
 pnpm typecheck    # tsc across all packages
 pnpm --filter @mcp-page-bridge/extension dev   # rebuild extension on change
-pnpm --filter mcp-page-bridge dev              # run bridge with reload
+pnpm server                                    # run the bridge daemon in the foreground
+pnpm --filter mcp-page-bridge-dashboard dev    # dashboard UI with Vite dev server
 ```
+
+> The extension e2e tests spawn the Go bridge, so a Go toolchain is required
+> for `pnpm test` as well.
 
 ### Local Extension Build
 
@@ -433,15 +443,38 @@ pnpm --filter @mcp-page-bridge/extension build
 
 Then open `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, and select `packages/extension/dist`.
 
+### The Go bridge and npm distribution
+
+The bridge implementation is Go (`cmd/mcp-page-bridge` + `internal/`, built on
+the rakunlabs stack: into/logi/chu/ada). Release binaries (~9 MB, CGO-free) are
+built with goreleaser and attached to each GitHub Release.
+
+The `mcp-page-bridge` npm package is a thin launcher (esbuild/turbo model): the
+binary ships in per-platform packages (`mcp-page-bridge-linux-x64`, …) wired as
+`optionalDependencies`, so `npx -y mcp-page-bridge` downloads only the binary
+matching your machine and passes stdio straight through.
+
+```bash
+go test ./...                  # Go test suite (bridge e2e over real sockets)
+go build ./cmd/mcp-page-bridge
+pnpm build:binaries            # goreleaser snapshot build for all 5 targets → dist/
+pnpm build:npm-packages        # dist/ → npm-dist/ per-platform npm packages
+```
+
+The status dashboard is a Svelte app in `packages/dashboard`, built to a single
+HTML file and embedded into the binary via `go:embed`. After changing it, run
+`pnpm --filter mcp-page-bridge-dashboard build` and commit the regenerated
+`internal/server/assets/dashboard.html`.
+
 ## Status
 
-- [x] Bridge: stdio MCP server, WS server, aggregating proxy, namespacing, `mcp_page_bridge_list_clients`
+- [x] Bridge (Go): stdio MCP proxy, WS server, aggregating daemon, namespacing, `mcp_page_bridge_list_clients`
 - [x] Extension: `window.mcp` (lightweight + full SDK), content relay, SW WS manager (auto-reconnect), popup
 - [x] Built-in tools (eval / DOM / console / screenshot / navigate / CSS design patches / element picker)
 - [x] Prompts + resources aggregation, logging passthrough
-- [x] Optional auth token; `npx mcp-page-bridge` bin; runs on Node / Bun / Deno
-- [x] Status dashboard + JSON API on the bridge port (`/`, `/api/providers`, `/api/health`)
-- [x] Published to npm (`npx -y mcp-page-bridge`); GitHub Release ships the extension zip
+- [x] Optional auth token; `npx mcp-page-bridge` launcher backed by per-platform binary packages
+- [x] Status dashboard (Svelte) + JSON API on the bridge port (`/`, `/api/providers`, `/api/health`)
+- [x] Published to npm; GitHub Release ships the extension zip + standalone Go binaries (linux/macos/windows)
 - [x] Chrome Web Store listing; resource templates; `mcp_page_bridge_focus`
 
 MIT © Eray Ates

@@ -28,6 +28,11 @@ jobs:
           registry-url: https://registry.npmjs.org
           cache: pnpm
 
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
       - name: Install
         run: pnpm install --frozen-lockfile
 
@@ -37,10 +42,17 @@ jobs:
           PKG="$(node -p "require('./packages/server/package.json').version")"
           PROTOCOL="$(node -p "require('./packages/protocol/package.json').version")"
           EXT="$(node -p "require('./packages/extension/manifest.json').version")"
-          echo "tag=$TAG package=$PKG protocol=$PROTOCOL extension=$EXT"
+          GO="$(sed -n 's/^var Version = "\(.*\)"$/\1/p' internal/protocol/protocol.go)"
+          echo "tag=$TAG package=$PKG protocol=$PROTOCOL extension=$EXT go=$GO"
           test "$TAG" = "$PKG" || { echo "::error::Tag v$TAG does not match mcp-page-bridge@$PKG"; exit 1; }
           test "$TAG" = "$PROTOCOL" || { echo "::error::Tag v$TAG does not match mcp-page-bridge-protocol@$PROTOCOL"; exit 1; }
           test "$TAG" = "$EXT" || { echo "::error::Tag v$TAG does not match extension@$EXT"; exit 1; }
+          test "$TAG" = "$GO" || { echo "::error::Tag v$TAG does not match internal/protocol Version=$GO"; exit 1; }
+          node -e '
+            const pkg = require("./packages/server/package.json");
+            const bad = Object.entries(pkg.optionalDependencies ?? {}).filter(([, v]) => v !== pkg.version);
+            if (bad.length) { console.error("optionalDependencies out of sync with version:", bad); process.exit(1); }
+          '
 
       - name: Typecheck
         run: pnpm -r --if-present typecheck
@@ -51,47 +63,62 @@ jobs:
       - name: Build
         run: pnpm -r --if-present build
 
-      - name: Check whether npm version already exists
-        id: npm_version
+      - name: Verify dashboard embed is in sync
         run: |
-          VERSION="$(node -p "require('./packages/server/package.json').version")"
-          if npm view "mcp-page-bridge@$VERSION" version >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "mcp-page-bridge@$VERSION already exists on npm; publish will be skipped"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
+          git diff --exit-code internal/server/assets/dashboard.html || {
+            echo "::error::dashboard embed is stale; run 'pnpm --filter mcp-page-bridge-dashboard build' and commit"; exit 1; }
 
-      - name: Check whether protocol npm version already exists
-        id: protocol_npm_version
+      - name: Go test
+        run: go test ./...
+
+      - name: Build standalone binaries (goreleaser)
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean --skip=publish,announce,validate
+
+      - name: Build npm platform packages
+        run: node scripts/build-npm-packages.mjs
+
+      - name: Publish mcp-page-bridge-protocol to npm (with provenance)
         run: |
           VERSION="$(node -p "require('./packages/protocol/package.json').version")"
           if npm view "mcp-page-bridge-protocol@$VERSION" version >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "mcp-page-bridge-protocol@$VERSION already exists on npm; publish will be skipped"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "mcp-page-bridge-protocol@$VERSION already exists; skipping"
+            exit 0
           fi
-
-      - name: Publish mcp-page-bridge-protocol to npm (with provenance)
-        if: steps.protocol_npm_version.outputs.exists != 'true'
-        working-directory: packages/protocol
-        run: |
-          VERSION="$(node -p "require('./package.json').version")"
           if [[ "$VERSION" == *-* ]]; then DIST_TAG=next; else DIST_TAG=latest; fi
           echo "Publishing mcp-page-bridge-protocol@$VERSION with dist-tag '$DIST_TAG'"
-          pnpm publish --access public --no-git-checks --provenance --tag "$DIST_TAG"
+          (cd packages/protocol && pnpm publish --access public --no-git-checks --provenance --tag "$DIST_TAG")
         env:
           NPM_CONFIG_PROVENANCE: true
 
-      - name: Publish mcp-page-bridge to npm (with provenance)
-        if: steps.npm_version.outputs.exists != 'true'
-        working-directory: packages/server
+      - name: Publish platform binary packages to npm (with provenance)
         run: |
-          VERSION="$(node -p "require('./package.json').version")"
+          VERSION="$(node -p "require('./packages/server/package.json').version")"
+          if [[ "$VERSION" == *-* ]]; then DIST_TAG=next; else DIST_TAG=latest; fi
+          for dir in npm-dist/*/; do
+            NAME="$(node -p "require('./$dir/package.json').name")"
+            if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+              echo "$NAME@$VERSION already exists; skipping"
+              continue
+            fi
+            echo "Publishing $NAME@$VERSION with dist-tag '$DIST_TAG'"
+            (cd "$dir" && npm publish --access public --provenance --tag "$DIST_TAG")
+          done
+        env:
+          NPM_CONFIG_PROVENANCE: true
+
+      - name: Publish mcp-page-bridge wrapper to npm (with provenance)
+        run: |
+          VERSION="$(node -p "require('./packages/server/package.json').version")"
+          if npm view "mcp-page-bridge@$VERSION" version >/dev/null 2>&1; then
+            echo "mcp-page-bridge@$VERSION already exists; skipping"
+            exit 0
+          fi
           if [[ "$VERSION" == *-* ]]; then DIST_TAG=next; else DIST_TAG=latest; fi
           echo "Publishing mcp-page-bridge@$VERSION with dist-tag '$DIST_TAG'"
-          pnpm publish --access public --no-git-checks --provenance --tag "$DIST_TAG"
+          (cd packages/server && pnpm publish --access public --no-git-checks --provenance --tag "$DIST_TAG")
         env:
           NPM_CONFIG_PROVENANCE: true
 
@@ -107,6 +134,9 @@ jobs:
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then PRERELEASE="--prerelease"; else PRERELEASE=""; fi
           gh release create "$GITHUB_REF_NAME" \
             "mcp-page-bridge-extension-${GITHUB_REF_NAME}.zip" \
+            dist/mcp-page-bridge-*.tar.gz \
+            dist/mcp-page-bridge-*.zip \
+            dist/checksums.txt \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
             $PRERELEASE

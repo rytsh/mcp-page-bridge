@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "mcp-page-bridge",
-  "version": "0.1.7",
+  "version": "0.2.0",
   "description": "Expose a live browser page's MCP tools to a coding agent via the mcp-page-bridge bridge.",
   "minimum_chrome_version": "116",
   "permissions": ["scripting", "tabs", "activeTab", "storage", "alarms", "downloads"],
