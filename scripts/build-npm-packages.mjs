@@ -4,8 +4,15 @@
 // on these via optionalDependencies; npm installs only the one matching the
 // host os/cpu.
 //
+// It also injects the matching optionalDependencies into
+// packages/server/package.json. They are intentionally NOT committed: the
+// platform packages only exist on npm once a release publishes them, so a
+// committed reference would break `pnpm install --frozen-lockfile` in CI
+// (chicken-and-egg). The release workflow runs this script right before
+// publishing the wrapper, so the published package.json always carries them.
+//
 // Usage: node scripts/build-npm-packages.mjs   (after `goreleaser release/build`)
-// Output: npm-dist/mcp-page-bridge-<os>-<arch>/
+// Output: npm-dist/mcp-page-bridge-<os>-<arch>/ + mutated packages/server/package.json
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -84,5 +91,13 @@ for (const platform of PLATFORMS) {
 
   console.log(`packaged ${platform.pkg}@${version}`);
 }
+
+// Inject optionalDependencies into the wrapper package for publishing (see
+// header comment for why these are not committed).
+const wrapperPath = join(root, "packages/server/package.json");
+const wrapper = JSON.parse(readFileSync(wrapperPath, "utf8"));
+wrapper.optionalDependencies = Object.fromEntries(PLATFORMS.map((p) => [p.pkg, version]));
+writeFileSync(wrapperPath, JSON.stringify(wrapper, null, 2) + "\n");
+console.log(`injected optionalDependencies@${version} into packages/server/package.json`);
 
 console.log(`done → ${outRoot}`);

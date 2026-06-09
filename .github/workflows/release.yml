@@ -49,9 +49,10 @@ jobs:
           test "$TAG" = "$EXT" || { echo "::error::Tag v$TAG does not match extension@$EXT"; exit 1; }
           test "$TAG" = "$GO" || { echo "::error::Tag v$TAG does not match internal/protocol Version=$GO"; exit 1; }
           node -e '
+            // optionalDependencies must NOT be committed; scripts/build-npm-packages.mjs
+            // injects them at publish time (see its header comment).
             const pkg = require("./packages/server/package.json");
-            const bad = Object.entries(pkg.optionalDependencies ?? {}).filter(([, v]) => v !== pkg.version);
-            if (bad.length) { console.error("optionalDependencies out of sync with version:", bad); process.exit(1); }
+            if (pkg.optionalDependencies) { console.error("optionalDependencies must not be committed in packages/server/package.json"); process.exit(1); }
           '
 
       - name: Typecheck

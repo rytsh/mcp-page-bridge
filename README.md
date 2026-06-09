@@ -267,8 +267,7 @@ window.mcp = {
 
 If the extension is not installed, `window.mcp` is just inert page data — safe
 to ship in production. Tool changes are picked up live while the tab is enabled.
-For full MCP SDK servers (resources, prompts) via `window.mcp.connect(server)`,
-see [DETAILS.md](DETAILS.md#authoring-tools-in-your-own-page). Working examples:
+More in [DETAILS.md](DETAILS.md#authoring-tools-in-your-own-page); working examples:
 [`examples/demo-app`](examples/demo-app) (vanilla) and
 [`examples/svelte-app`](examples/svelte-app) (Svelte 5 runes).
 

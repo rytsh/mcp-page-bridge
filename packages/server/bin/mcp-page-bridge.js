@@ -3,6 +3,7 @@
 // real implementation lives in a per-platform optionalDependency; npm installs
 // only the one matching this machine. All arguments and stdio pass through.
 import { spawn } from "node:child_process";
+import { accessSync, chmodSync, constants } from "node:fs";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
@@ -32,7 +33,17 @@ function resolveBinary() {
 
   const [pkg, bin] = entry;
   try {
-    return require.resolve(`${pkg}/bin/${bin}`);
+    const path = require.resolve(`${pkg}/bin/${bin}`);
+    // Some package managers (e.g. pnpm pack) strip the executable bit from
+    // files not listed in `bin`; restore it before spawning.
+    if (process.platform !== "win32") {
+      try {
+        accessSync(path, constants.X_OK);
+      } catch {
+        chmodSync(path, 0o755);
+      }
+    }
+    return path;
   } catch {
     console.error(
       `[mcp-page-bridge] the platform package ${pkg} is missing. ` +
