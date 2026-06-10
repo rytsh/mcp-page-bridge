@@ -10,7 +10,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -786,6 +788,12 @@ func (b *Bridge) ProviderSummary() []ProviderSummaryEntry {
 		}
 		out = append(out, entry)
 	}
+	slices.SortFunc(out, func(a, b ProviderSummaryEntry) int {
+		if c := strings.Compare(a.ConnectedAt, b.ConnectedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Label, b.Label)
+	})
 	return out
 }
 
