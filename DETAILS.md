@@ -130,6 +130,27 @@ Env: `MCP_PAGE_BRIDGE_PORT`, `MCP_PAGE_BRIDGE_TOKEN`, `MCP_PAGE_BRIDGE_HOST`.
 > Host/Origin checks relax to port matching in this mode; the token carries the
 > authorization.
 
+### Per-tab bridges, profiles, and tab groups
+
+The extension keeps a small list of **bridge profiles** — one per unique
+`(host, port, token)` triple. Saving settings that point at an
+already-known daemon reuses its profile automatically, so tabs aimed at the
+same daemon are grouped together without any bookkeeping. The popup shows the
+profiles in a **Recent** dropdown (most recently used first, capped at 8 with
+LRU eviction; profiles in use are never evicted).
+
+By default every tab follows the **global default profile**. Turn on **"Use a
+custom bridge for this tab"** in the popup to pin the active tab to a different
+daemon — e.g. tab A on `:8787` for one agent and tab B on `:8788` for another.
+Pins live for the browser session (and the tab's lifetime); changing a bridge
+bounces only the affected tabs' sockets. The opt-in **"Browser control"**
+provider always connects to the default profile.
+
+The optional **"Group tabs by bridge"** switch (off by default) mirrors the
+grouping visually: enabled tabs are placed into Chrome tab groups named
+`host:port` with a per-profile color. Only groups created by the extension are
+ever touched, and turning the switch off releases the tabs again.
+
 Multiple agents can use the same port. On first use, `mcp-page-bridge` starts a
 detached local bridge daemon that owns the browser WebSocket/dashboard port.
 Every agent process, including the first one, attaches its stdio MCP connection
@@ -373,13 +394,18 @@ immediately. With design tools off the catalog is ~12 tools; on, it adds the 21
 selection/CSS/audit tools listed below.
 
 The popup also has a separate **Automation tools** switch for Playwright-like live
-page automation. It adds locator helpers (`find_by_text`, `find_by_role`,
-`find_by_label`, `find_by_test_id`, `locator_snapshot`, `locator_count`), safer
+page automation. It adds a uid-based page snapshot (`take_snapshot` returns a
+compact text tree of interactive/structural elements with stable `uid`s; pass
+`uid` to the action tools below instead of guessing CSS selectors — uids go
+stale after navigation/DOM changes, just re-snapshot), locator helpers
+(`find_by_text`, `find_by_role`, `find_by_label`, `find_by_test_id`,
+`locator_snapshot`, `locator_count`), safer
 actions (`smart_click`, `hover`, `double_click`, `type_text`, `press_key`,
 `clear_value`, `select_option`, `check`, `uncheck`, `upload_file`,
-`drag_and_drop`), page-level `fetch`/`XMLHttpRequest` capture
-(`start_network_capture`, `list_network_requests`, `wait_for_response`,
-`get_response_body`), storage/cookie helpers, dialog auto-handling,
+`drag_and_drop` — all accepting `uid` or a locator), page-level `fetch`/`XMLHttpRequest` capture
+(`start_network_capture`, `stop_network_capture`, `list_network_requests`,
+`wait_for_response`, `get_response_body`, `clear_network_capture`),
+storage/cookie helpers, dialog auto-handling,
 same-origin iframe helpers, and best-effort `resize_window`. This is not a full
 Playwright replacement: there is no isolated browser context, HTTP-only cookie
 access, cross-origin iframe control, trace viewer, or video.
@@ -387,12 +413,12 @@ access, cross-origin iframe control, trace viewer, or video.
 For browser-protocol-level work, the popup has a separate **Advanced CDP tools**
 switch. It requests Chrome's optional `debugger` permission only when enabled.
 Chrome shows a debugging banner while CDP is attached; turning the switch off or
-calling `cdp_detach` detaches it. CDP tools include `cdp_attach`,
-`cdp_detach`, `cdp_send_command`, `cdp_list_events`,
-`cdp_get_response_body`, `cdp_emulate_viewport`, `cdp_dispatch_mouse`,
-`cdp_dispatch_key`, `cdp_evaluate`, `cdp_capture_screenshot`,
-`cdp_get_performance_metrics`, `cdp_set_network_conditions`,
-`cdp_set_user_agent`, and `cdp_set_geolocation`. They can see browser-level
+calling `cdp_detach` detaches it. CDP tools include `cdp_status`, `cdp_attach`,
+`cdp_detach`, `cdp_send_command`, `cdp_list_events`, `cdp_clear_events`,
+`cdp_get_response_body`, `cdp_emulate_viewport`, `cdp_clear_emulation`,
+`cdp_dispatch_mouse`, `cdp_dispatch_key`, `cdp_evaluate`,
+`cdp_capture_screenshot`, `cdp_get_performance_metrics`,
+`cdp_set_network_conditions`, `cdp_set_user_agent`, and `cdp_set_geolocation`. They can see browser-level
 network events and use CDP input/emulation APIs, but still do not create
 Playwright-style isolated browser contexts or multi-browser sessions.
 
@@ -463,6 +489,16 @@ agent's permission prompts.
 - Optional shared token: run `mcp-page-bridge --token <secret>` (or `MCP_PAGE_BRIDGE_TOKEN=<secret>`)
   and enter the same token in the extension popup. Without it, any local process
   can connect — fine on a trusted machine.
+- Built-in TLS: `--tls-cert <fullchain.pem> --tls-key <privkey.pem>` makes the
+  daemon serve `https://`/`wss://`, protecting the token and all traffic on
+  the wire. Clients opt in with `--tls` (the stdio proxy and `stop` then dial
+  `https`/`wss`), plus `--tls-ca <ca.pem>` to trust a private CA or
+  `--tls-insecure` to skip verification (testing only). The extension has a
+  matching **Secure connection (TLS / wss)** toggle per bridge profile; the
+  browser must trust the certificate. Binding a non-loopback host without TLS
+  logs a warning. Env equivalents: `MCP_PAGE_BRIDGE_TLS`,
+  `MCP_PAGE_BRIDGE_TLS_CERT`, `MCP_PAGE_BRIDGE_TLS_KEY`,
+  `MCP_PAGE_BRIDGE_TLS_CA`, `MCP_PAGE_BRIDGE_TLS_INSECURE_SKIP_VERIFY`.
 - Tool calls execute code in your page; the agent gates each call behind its own
   permission prompts.
 

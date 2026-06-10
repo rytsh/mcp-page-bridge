@@ -29,7 +29,7 @@ func startBridge(t *testing.T, opts bridge.Options, srvOpts server.Options) *tes
 	t.Helper()
 	b := bridge.New(opts)
 	srvOpts.Token = opts.Token
-	srv, err := server.Start(context.Background(), b, srvOpts)
+	srv, err := server.Start(t.Context(), b, srvOpts)
 	if err != nil {
 		t.Fatalf("start server: %v", err)
 	}
@@ -47,7 +47,7 @@ func (tb *testBridge) wsURL(path string) string {
 
 func dialPeer(t *testing.T, wsURL string) *mcpwire.Peer {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
 		Subprotocols: []string{protocol.WSSubprotocol},
@@ -164,7 +164,7 @@ func dialAgent(t *testing.T, tb *testBridge, query string) *mcpwire.Peer {
 
 func call(t *testing.T, peer *mcpwire.Peer, method string, params any) json.RawMessage {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	result, err := peer.Call(ctx, method, params, 0)
 	if err != nil {
@@ -286,7 +286,7 @@ func TestPortAlreadyInUse(t *testing.T) {
 
 	b := bridge.New(bridge.Options{})
 	defer b.Close()
-	if _, err := server.Start(context.Background(), b, server.Options{Port: port}); err == nil {
+	if _, err := server.Start(t.Context(), b, server.Options{Port: port}); err == nil {
 		t.Fatal("expected an error for an occupied port")
 	}
 }
@@ -592,7 +592,7 @@ func TestNonLoopbackBindRelaxesHostCheck(t *testing.T) {
 	// Bound to 0.0.0.0 (token-gated), the bridge must accept LAN-style Host
 	// headers but still require the matching port and the token for data.
 	b := bridge.New(bridge.Options{Token: "secret"})
-	srv, err := server.Start(context.Background(), b, server.Options{Host: "0.0.0.0", Token: "secret"})
+	srv, err := server.Start(t.Context(), b, server.Options{Host: "0.0.0.0", Token: "secret"})
 	if err != nil {
 		t.Fatalf("start server: %v", err)
 	}
@@ -648,7 +648,7 @@ func TestWSTokenEnforced(t *testing.T) {
 	tb := startBridge(t, bridge.Options{Token: "secret"}, server.Options{})
 
 	// Without token: handshake must fail.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	conn, _, err := websocket.Dial(ctx, tb.wsURL("/agent"), &websocket.DialOptions{
 		Subprotocols: []string{protocol.WSSubprotocol},

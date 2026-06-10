@@ -55,13 +55,21 @@
         color: #fff;
         border-color: transparent;
       }
-      input {
+      input,
+      select {
         font: inherit;
         padding: 5px 8px;
         border-radius: 6px;
         border: 1px solid #8886;
         background: transparent;
         color: inherit;
+      }
+      .field select {
+        flex: 1;
+        min-width: 0;
+      }
+      select option {
+        color: initial;
       }
       .settings {
         display: flex;
@@ -221,7 +229,13 @@
       <div id="cssPatches" class="selection-list"></div>
     </div>
 
+    <p id="bridgeSummary" class="muted" style="display: none"></p>
+
     <div id="settings" class="settings">
+      <div class="field" id="recentRow" style="display: none">
+        <label for="recentServers">Recent</label>
+        <select id="recentServers"></select>
+      </div>
       <div class="field">
         <label for="host">Host</label>
         <input id="host" type="text" placeholder="127.0.0.1" />
@@ -234,6 +248,14 @@
         <label for="token">Token</label>
         <input id="token" type="text" placeholder="(optional)" />
       </div>
+      <label class="switch-row" style="margin-top: 0">
+        <span>Secure connection (TLS / wss)</span>
+        <input id="secure" type="checkbox" />
+      </label>
+      <label class="switch-row" style="margin-top: 0">
+        <span>Use a custom bridge for this tab</span>
+        <input id="tabBridge" type="checkbox" />
+      </label>
       <button id="saveSettings" class="full">Save settings</button>
     </div>
 
@@ -256,6 +278,10 @@
 
     <div class="row">
       <label><input id="browserControl" type="checkbox" /> Browser control (all tabs)</label>
+    </div>
+
+    <div class="row">
+      <label><input id="tabGroups" type="checkbox" /> Group tabs by bridge (visual tab groups)</label>
     </div>
 
     <div id="providers"></div>

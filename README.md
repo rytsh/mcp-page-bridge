@@ -293,9 +293,38 @@ Notes:
   the port, a second one is never spawned — every agent connects to it. The
   local daemon is reachable at `http://127.0.0.1:8787/mcp` too.
 - The extension popup on the remote browser needs the same host/IP + token.
-- Traffic is plain `http://`/`ws://` — use a token and a trusted network (or
-  an SSH tunnel / reverse proxy with TLS). See
+- Without TLS, traffic is plain `http://`/`ws://` — use a token and a trusted
+  network, or enable built-in TLS (below). See
   [DETAILS.md](DETAILS.md#security) for the security notes.
+
+**TLS (built-in).** Give the daemon a certificate and it serves
+`https://`/`wss://` natively:
+
+```bash
+mcp-page-bridge --host 0.0.0.0 --port 8787 --token <secret> \
+  --tls-cert /path/fullchain.pem --tls-key /path/privkey.pem
+```
+
+Clients then connect securely:
+
+- **Remote MCP URL**: `https://bridge.example.com:8787/mcp`.
+- **stdio proxy**: add `--tls` (plus `--tls-ca <ca.pem>` for a private CA, or
+  `--tls-insecure` to skip verification — testing only):
+
+  ```json
+  { "args": ["-y", "mcp-page-bridge", "--host", "bridge.example.com", "--port", "8787", "--token", "<secret>", "--tls"] }
+  ```
+
+- **Extension popup**: tick **Secure connection (TLS / wss)** in the bridge
+  settings. Note the browser must trust the certificate (use a real CA, e.g.
+  Let's Encrypt, or install your private CA in the OS/browser trust store —
+  self-signed certs are rejected for `wss://`).
+
+The TLS flags are also available as `MCP_PAGE_BRIDGE_TLS`,
+`MCP_PAGE_BRIDGE_TLS_CERT`, `MCP_PAGE_BRIDGE_TLS_KEY`, `MCP_PAGE_BRIDGE_TLS_CA`
+and `MCP_PAGE_BRIDGE_TLS_INSECURE_SKIP_VERIFY` environment variables.
+Alternatively, a reverse proxy (Caddy/nginx) or SSH tunnel in front of a
+plain-HTTP bridge works as before.
 
 </details>
 
@@ -315,8 +344,14 @@ Use **Shutdown bridge** there when you want to stop the background daemon.
 
 > **Browser on another device?** Start the bridge with
 > `--host 0.0.0.0 --token <secret>` and set the same Host/IP + token in the
-> extension popup. A token is required for any non-loopback bind. See
-> [DETAILS.md](DETAILS.md) for the security notes.
+> extension popup. A token is strongly recommended for any non-loopback bind.
+> See [DETAILS.md](DETAILS.md) for the security notes.
+
+> **Multiple daemons?** Each tab can use its own bridge: enable **"Use a
+> custom bridge for this tab"** in the popup (with a **Recent** servers
+> dropdown for known daemons), and optionally **"Group tabs by bridge"** to
+> mirror it as Chrome tab groups. See
+> [DETAILS.md](DETAILS.md#per-tab-bridges-profiles-and-tab-groups).
 
 ## Expose your page's own tools — `window.mcp`
 

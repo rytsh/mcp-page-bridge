@@ -37,10 +37,20 @@ func Run(ctx context.Context, argv []string) error {
 	}
 
 	dialHost := config.DialHost(cfg.Host)
+	clientTLS, err := cfg.ClientTLS()
+	if err != nil {
+		return err
+	}
+	dial := daemon.Dial{
+		Host:   dialHost,
+		Port:   cfg.Port,
+		Secure: cfg.TLSEnabled(),
+		TLS:    clientTLS,
+	}
 
 	switch {
 	case args.command == "stop":
-		return daemon.Stop(ctx, dialHost, cfg.Port, cfg.Token)
+		return daemon.Stop(ctx, dial, cfg.Token)
 	case args.command != "":
 		return fmt.Errorf("unknown command %q (expected: stop)", args.command)
 	case args.daemon:
@@ -48,14 +58,21 @@ func Run(ctx context.Context, argv []string) error {
 	default:
 		if err := daemon.Ensure(ctx, daemon.EnsureOptions{
 			BindHost:       cfg.Host,
-			DialHost:       dialHost,
-			Port:           cfg.Port,
+			Dial:           dial,
 			Token:          cfg.Token,
 			IdleTimeoutSec: cfg.IdleTimeout,
+			TLSCert:        cfg.TLSCert,
+			TLSKey:         cfg.TLSKey,
 		}); err != nil {
 			return err
 		}
-		return proxy.Run(ctx, dialHost, cfg.Port, cfg.Token)
+		return proxy.Run(ctx, proxy.Options{
+			Host:   dialHost,
+			Port:   cfg.Port,
+			Token:  cfg.Token,
+			Secure: cfg.TLSEnabled(),
+			TLS:    clientTLS,
+		})
 	}
 }
 
@@ -77,6 +94,8 @@ func runDaemon(ctx context.Context, cfg *config.Config) error {
 		Host:       cfg.Host,
 		Port:       cfg.Port,
 		Token:      cfg.Token,
+		TLSCert:    cfg.TLSCert,
+		TLSKey:     cfg.TLSKey,
 		OnShutdown: into.CtxCancel,
 	})
 	if err != nil {
@@ -94,8 +113,12 @@ func runDaemon(ctx context.Context, cfg *config.Config) error {
 	if displayHost == "" {
 		displayHost = "127.0.0.1"
 	}
-	banner := fmt.Sprintf("daemon v%s — ws://%s:%d · dashboard http://%s:%d/",
-		protocol.Version, displayHost, srv.Port(), displayHost, srv.Port())
+	wsScheme, httpScheme := "ws", "http"
+	if cfg.ServesTLS() {
+		wsScheme, httpScheme = "wss", "https"
+	}
+	banner := fmt.Sprintf("daemon v%s — %s://%s:%d · dashboard %s://%s:%d/",
+		protocol.Version, wsScheme, displayHost, srv.Port(), httpScheme, displayHost, srv.Port())
 	if cfg.Token != "" {
 		banner += " (token required)"
 	}
@@ -132,6 +155,16 @@ func parseArgs(cfg *config.Config, argv []string) (cliArgs, error) {
 	fs.StringVar(&cfg.Token, "token", cfg.Token, "shared auth token (env MCP_PAGE_BRIDGE_TOKEN)")
 	fs.Float64Var(&cfg.IdleTimeout, "idle-timeout", cfg.IdleTimeout,
 		"shut the daemon down after this many idle seconds; 0 disables (env MCP_PAGE_BRIDGE_IDLE_TIMEOUT)")
+	fs.BoolVar(&cfg.TLS, "tls", cfg.TLS,
+		"dial the bridge with https/wss; implied by --tls-cert/--tls-key (env MCP_PAGE_BRIDGE_TLS)")
+	fs.StringVar(&cfg.TLSCert, "tls-cert", cfg.TLSCert,
+		"PEM certificate file; with --tls-key the daemon serves TLS (env MCP_PAGE_BRIDGE_TLS_CERT)")
+	fs.StringVar(&cfg.TLSKey, "tls-key", cfg.TLSKey,
+		"PEM private key file for --tls-cert (env MCP_PAGE_BRIDGE_TLS_KEY)")
+	fs.StringVar(&cfg.TLSCA, "tls-ca", cfg.TLSCA,
+		"PEM CA bundle used to verify the bridge certificate, e.g. a private CA (env MCP_PAGE_BRIDGE_TLS_CA)")
+	fs.BoolVar(&cfg.TLSInsecureSkipVerify, "tls-insecure", cfg.TLSInsecureSkipVerify,
+		"skip TLS certificate verification — testing only (env MCP_PAGE_BRIDGE_TLS_INSECURE_SKIP_VERIFY)")
 	fs.BoolVar(&args.daemon, "daemon", false, "run the bridge daemon in the foreground (internal)")
 	if err := fs.Parse(argv); err != nil {
 		return args, err

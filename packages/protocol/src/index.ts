@@ -115,6 +115,7 @@ export const BUILTIN_TOOL_NAMES = [
   "navigate",
   "reload",
   // Automation (opt-in)
+  "take_snapshot",
   "find_by_text",
   "find_by_role",
   "find_by_label",

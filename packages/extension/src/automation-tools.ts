@@ -264,11 +264,142 @@ function inputLabels(element: Element): string[] {
   return out.map(normalizeText).filter(Boolean);
 }
 
-function locatorMatches(args: Record<string, unknown>, root: ParentNode = document, applyNth = true): Element[] {
+// ---- uid snapshot (take_snapshot) --------------------------------------------
+//
+// take_snapshot walks the visible DOM, assigns short uids to interactive and
+// structural elements, and returns a compact indented text tree. The uids
+// resolve through this registry, so follow-up actions (smart_click, type_text,
+// check, ...) can target `uid` directly instead of guessing CSS selectors —
+// the same interaction model as chrome-devtools-mcp's take_snapshot.
+
+interface SnapshotEntry {
+  element: Element;
+  children: SnapshotEntry[];
+}
+
+let snapshotGeneration = 0;
+let snapshotUidSeq = 0;
+const snapshotRefs = new Map<string, WeakRef<Element>>();
+
+const INTERACTIVE_ROLES = new Set([
+  "button", "link", "textbox", "searchbox", "checkbox", "radio", "combobox", "listbox",
+  "slider", "spinbutton", "switch", "tab", "menuitem", "menuitemcheckbox", "menuitemradio", "option",
+]);
+
+const STRUCTURAL_ROLES = new Set([
+  "heading", "navigation", "main", "banner", "contentinfo", "form", "dialog", "alertdialog",
+  "alert", "img", "table", "list", "listitem", "tablist", "tabpanel", "region", "article", "search",
+]);
+
+function isSnapshotInteractive(element: Element): boolean {
+  const role = elementRole(element);
+  if (role && INTERACTIVE_ROLES.has(role)) return true;
+  if (isEditableElement(element)) return true;
+  if (element.hasAttribute("onclick")) return true;
+  const tabindex = element.getAttribute("tabindex");
+  return tabindex !== null && Number(tabindex) >= 0;
+}
+
+function isSnapshotStructural(element: Element): boolean {
+  const role = elementRole(element);
+  return !!role && STRUCTURAL_ROLES.has(role);
+}
+
+function snapshotStates(element: Element): string[] {
+  const states: string[] = [];
+  if (isDisabledElement(element)) states.push("disabled");
+  if (element instanceof HTMLInputElement && ["checkbox", "radio"].includes(element.type)) {
+    states.push(element.checked ? "checked" : "unchecked");
+  }
+  const expanded = element.getAttribute("aria-expanded");
+  if (expanded === "true") states.push("expanded");
+  else if (expanded === "false") states.push("collapsed");
+  if (element.getAttribute("aria-selected") === "true") states.push("selected");
+  if (element instanceof HTMLOptionElement && element.selected) states.push("selected");
+  return states;
+}
+
+function snapshotLine(uid: string, element: Element): string {
+  const role = elementRole(element) ?? element.tagName.toLowerCase();
+  let line = `uid=${uid} ${role}`;
+  if (role === "heading") {
+    const level = element.getAttribute("aria-level") ?? element.tagName.match(/^H([1-6])$/i)?.[1];
+    if (level) line += ` level=${level}`;
+  }
+  const name = normalizeText(accessibleName(element)).slice(0, 80);
+  if (name) line += ` ${JSON.stringify(name)}`;
+  if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
+    const value = String(element.value ?? "");
+    if (value && !(element instanceof HTMLInputElement && element.type === "password")) {
+      line += ` value=${JSON.stringify(value.slice(0, 40))}`;
+    }
+  }
+  if (element instanceof HTMLAnchorElement && element.getAttribute("href")) {
+    line += ` href=${JSON.stringify(String(element.getAttribute("href")).slice(0, 80))}`;
+  }
+  const states = snapshotStates(element);
+  if (states.length) line += ` [${states.join(", ")}]`;
+  return line;
+}
+
+/** Collect interesting elements, lifting children of boring wrappers. */
+function buildSnapshotEntries(element: Element, includeHidden: boolean): SnapshotEntry[] {
+  const entries: SnapshotEntry[] = [];
+  for (const child of element.children) {
+    if (!includeHidden && !isVisibleElement(child)) continue;
+    const sub = buildSnapshotEntries(child, includeHidden);
+    if (isSnapshotInteractive(child) || isSnapshotStructural(child)) {
+      entries.push({ element: child, children: sub });
+    } else {
+      entries.push(...sub);
+    }
+  }
+  return entries;
+}
+
+function renderSnapshotEntries(entries: SnapshotEntry[], depth: number, lines: string[], budget: { left: number; truncated: boolean }): void {
+  for (const entry of entries) {
+    if (budget.left <= 0) {
+      budget.truncated = true;
+      return;
+    }
+    budget.left -= 1;
+    const uid = `${snapshotGeneration}_${++snapshotUidSeq}`;
+    snapshotRefs.set(uid, new WeakRef(entry.element));
+    lines.push(`${"  ".repeat(depth)}${snapshotLine(uid, entry.element)}`);
+    renderSnapshotEntries(entry.children, depth + 1, lines, budget);
+  }
+}
+
+function resolveUid(uid: string): Element {
+  const element = snapshotRefs.get(uid)?.deref();
+  if (!element) {
+    throw new Error(`Unknown or stale uid "${uid}" (current snapshot generation is ${snapshotGeneration}); call take_snapshot for fresh uids.`);
+  }
+  if (!element.isConnected) {
+    throw new Error(`Element for uid "${uid}" is no longer attached to the DOM; call take_snapshot again.`);
+  }
+  return element;
+}
+
+function clearSnapshotRefs(): void {
+  snapshotRefs.clear();
+}
+
+function locatorMatches(args: Record<string, unknown>, rootArg?: ParentNode, applyNth = true): Element[] {
   const selector = stringArg(args.selector);
   const exact = args.exact === true;
   let matches: Element[];
 
+  if (args.uid !== undefined) {
+    // Resolved through the snapshot registry; deliberately before any
+    // `document` access so stale-uid errors stay cheap and precise.
+    matches = [resolveUid(String(args.uid))];
+    if (args.visible === true) matches = matches.filter(isVisibleElement);
+    return matches;
+  }
+
+  const root = rootArg ?? document;
   if (selector) {
     matches = [...root.querySelectorAll(selector)];
   } else if (args.testId !== undefined) {
@@ -286,7 +417,7 @@ function locatorMatches(args: Record<string, unknown>, root: ParentNode = docume
     matches = visibleMatches.filter((element) => ![...element.children].some((child) => textMatches(elementText(child), args.text, exact)));
     if (!matches.length) matches = visibleMatches;
   } else {
-    throw new Error("Provide selector, text, role, label, testId, or placeholder.");
+    throw new Error("Provide uid (from take_snapshot), selector, text, role, label, testId, or placeholder.");
   }
 
   if (args.name !== undefined) matches = matches.filter((element) => textMatches(accessibleName(element), args.name, exact));
@@ -677,9 +808,41 @@ function sameOriginFrameDocument(frame: HTMLIFrameElement): Document {
 export function teardownAutomationTools(): void {
   uninstallNetworkCapture();
   restoreDialogCapture();
+  clearSnapshotRefs();
 }
 
 export function registerAutomationTools(server: EmbeddedMcpServer, opts: { extCall: ExtCall }): void {
+  server.registerTool(
+    {
+      name: "take_snapshot",
+      description:
+        "Take a compact text snapshot of the page's interactive/structural elements with stable uids. " +
+        "Pass a uid to smart_click / type_text / hover / check / select_option etc. instead of a selector. " +
+        "Uids go stale after navigation or DOM changes — take a fresh snapshot then.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          maxNodes: { type: "number", description: "max elements in the snapshot (default 400)" },
+          includeHidden: { type: "boolean", description: "include elements that are not visible (default false)" },
+        },
+      },
+    },
+    (args) => {
+      snapshotGeneration += 1;
+      snapshotUidSeq = 0;
+      snapshotRefs.clear();
+      const budget = { left: numberArg(args.maxNodes, 400, 10, 2000), truncated: false };
+      const entries = buildSnapshotEntries(document.body, args.includeHidden === true);
+      const lines: string[] = [];
+      renderSnapshotEntries(entries, 0, lines, budget);
+      const header = `Page snapshot — ${document.title ? `"${normalizeText(document.title)}" — ` : ""}${location.href}`;
+      const footer = budget.truncated
+        ? `\n[truncated at ${numberArg(args.maxNodes, 400, 10, 2000)} nodes — pass a larger maxNodes to see more]`
+        : "";
+      return text(`${header}\n${lines.join("\n") || "(no interactive or structural elements found)"}${footer}`);
+    },
+  );
+
   server.registerTool(
     {
       name: "find_by_text",
@@ -735,8 +898,8 @@ export function registerAutomationTools(server: EmbeddedMcpServer, opts: { extCa
   server.registerTool(
     {
       name: "locator_snapshot",
-      description: "Resolve a selector/text/role/label/testId locator and return element snapshots plus actionability state.",
-      inputSchema: { type: "object", properties: { selector: { type: "string" }, text: { type: "string" }, role: { type: "string" }, name: { type: "string" }, label: { type: "string" }, testId: { type: "string" }, placeholder: { type: "string" }, exact: { type: "boolean" }, nth: { type: "number" }, visible: { type: "boolean" }, limit: { type: "number", description: "max results (default 10)" }, includeHtml: { type: "boolean" } } },
+      description: "Resolve a uid/selector/text/role/label/testId locator and return element snapshots plus actionability state.",
+      inputSchema: { type: "object", properties: { uid: { type: "string", description: "element uid from take_snapshot" }, selector: { type: "string" }, text: { type: "string" }, role: { type: "string" }, name: { type: "string" }, label: { type: "string" }, testId: { type: "string" }, placeholder: { type: "string" }, exact: { type: "boolean" }, nth: { type: "number" }, visible: { type: "boolean" }, limit: { type: "number", description: "max results (default 10)" }, includeHtml: { type: "boolean" } } },
     },
     async (args) => {
       const limit = numberArg(args.limit, 10, 1, 50);
@@ -757,8 +920,8 @@ export function registerAutomationTools(server: EmbeddedMcpServer, opts: { extCa
   server.registerTool(
     {
       name: "smart_click",
-      description: "Click a locator after Playwright-like visibility/enabled/stability/coverage checks.",
-      inputSchema: { type: "object", properties: { selector: { type: "string" }, text: { type: "string" }, role: { type: "string" }, name: { type: "string" }, label: { type: "string" }, testId: { type: "string" }, exact: { type: "boolean" }, nth: { type: "number" }, timeoutMs: { type: "number", description: "default 5000" }, force: { type: "boolean", description: "skip actionability checks" }, strict: { type: "boolean" } } },
+      description: "Click a locator (uid from take_snapshot, or selector/text/role/...) after Playwright-like visibility/enabled/stability/coverage checks.",
+      inputSchema: { type: "object", properties: { uid: { type: "string", description: "element uid from take_snapshot" }, selector: { type: "string" }, text: { type: "string" }, role: { type: "string" }, name: { type: "string" }, label: { type: "string" }, testId: { type: "string" }, exact: { type: "boolean" }, nth: { type: "number" }, timeoutMs: { type: "number", description: "default 5000" }, force: { type: "boolean", description: "skip actionability checks" }, strict: { type: "boolean" } } },
     },
     async (args) => {
       const element = await waitForLocator(args, { actionable: args.force !== true, strict: args.strict === true });
@@ -768,7 +931,7 @@ export function registerAutomationTools(server: EmbeddedMcpServer, opts: { extCa
     },
   );
 
-  server.registerTool({ name: "hover", description: "Move the synthetic pointer over a locator.", inputSchema: { type: "object", properties: { selector: { type: "string" }, text: { type: "string" }, role: { type: "string" }, name: { type: "string" }, testId: { type: "string" }, timeoutMs: { type: "number" } } } }, async (args) => {
+  server.registerTool({ name: "hover", description: "Move the synthetic pointer over a locator.", inputSchema: { type: "object", properties: { uid: { type: "string", description: "element uid from take_snapshot" }, selector: { type: "string" }, text: { type: "string" }, role: { type: "string" }, name: { type: "string" }, testId: { type: "string" }, timeoutMs: { type: "number" } } } }, async (args) => {
     const element = await waitForLocator(args, { actionable: false });
     element.scrollIntoView({ block: "center", inline: "center" });
     dispatchPointerLike(element, "pointerover");
@@ -778,7 +941,7 @@ export function registerAutomationTools(server: EmbeddedMcpServer, opts: { extCa
     return json({ hovered: locatorSummary(element) });
   });
 
-  server.registerTool({ name: "double_click", description: "Double-click a locator after actionability checks.", inputSchema: { type: "object", properties: { selector: { type: "string" }, text: { type: "string" }, role: { type: "string" }, name: { type: "string" }, testId: { type: "string" }, timeoutMs: { type: "number" }, force: { type: "boolean" } } } }, async (args) => {
+  server.registerTool({ name: "double_click", description: "Double-click a locator after actionability checks.", inputSchema: { type: "object", properties: { uid: { type: "string", description: "element uid from take_snapshot" }, selector: { type: "string" }, text: { type: "string" }, role: { type: "string" }, name: { type: "string" }, testId: { type: "string" }, timeoutMs: { type: "number" }, force: { type: "boolean" } } } }, async (args) => {
     const element = await waitForLocator(args, { actionable: args.force !== true });
     clickElement(element, 1);
     clickElement(element, 1);
@@ -786,26 +949,26 @@ export function registerAutomationTools(server: EmbeddedMcpServer, opts: { extCa
     return json({ doubleClicked: locatorSummary(element) });
   });
 
-  server.registerTool({ name: "type_text", description: "Type or set text into an input/textarea/contenteditable locator and fire input/change events.", inputSchema: { type: "object", properties: { selector: { type: "string" }, label: { type: "string" }, placeholder: { type: "string" }, text: { type: "string" }, value: { type: "string" }, append: { type: "boolean" }, timeoutMs: { type: "number" } } } }, async (args) => {
+  server.registerTool({ name: "type_text", description: "Type or set text into an input/textarea/contenteditable locator and fire input/change events.", inputSchema: { type: "object", properties: { uid: { type: "string", description: "element uid from take_snapshot" }, selector: { type: "string" }, label: { type: "string" }, placeholder: { type: "string" }, text: { type: "string" }, value: { type: "string" }, append: { type: "boolean" }, timeoutMs: { type: "number" } } } }, async (args) => {
     const element = await waitForLocator(args, { actionable: false });
     setTextValue(element, String(args.value ?? args.text ?? ""), args.append === true);
     return json({ typed: locatorSummary(element), value: (element as HTMLInputElement | HTMLTextAreaElement).value ?? element.textContent ?? "" });
   });
 
-  server.registerTool({ name: "press_key", description: "Dispatch keydown/keyup to a locator or the active element.", inputSchema: { type: "object", properties: { selector: { type: "string" }, text: { type: "string" }, role: { type: "string" }, name: { type: "string" }, label: { type: "string" }, testId: { type: "string" }, placeholder: { type: "string" }, key: { type: "string" }, code: { type: "string" }, altKey: { type: "boolean" }, ctrlKey: { type: "boolean" }, metaKey: { type: "boolean" }, shiftKey: { type: "boolean" } }, required: ["key"] } }, async (args) => {
-    const hasLocator = args.selector || args.text || args.role || args.name || args.label || args.testId || args.placeholder;
+  server.registerTool({ name: "press_key", description: "Dispatch keydown/keyup to a locator or the active element.", inputSchema: { type: "object", properties: { uid: { type: "string", description: "element uid from take_snapshot" }, selector: { type: "string" }, text: { type: "string" }, role: { type: "string" }, name: { type: "string" }, label: { type: "string" }, testId: { type: "string" }, placeholder: { type: "string" }, key: { type: "string" }, code: { type: "string" }, altKey: { type: "boolean" }, ctrlKey: { type: "boolean" }, metaKey: { type: "boolean" }, shiftKey: { type: "boolean" } }, required: ["key"] } }, async (args) => {
+    const hasLocator = args.uid || args.selector || args.text || args.role || args.name || args.label || args.testId || args.placeholder;
     const element = hasLocator ? await waitForLocator(args) : (document.activeElement ?? document.body);
     triggerKey(element, String(args.key ?? ""), args);
     return json({ pressed: args.key, target: locatorSummary(element) });
   });
 
-  server.registerTool({ name: "clear_value", description: "Clear an input/textarea/contenteditable locator.", inputSchema: { type: "object", properties: { selector: { type: "string" }, label: { type: "string" }, placeholder: { type: "string" }, timeoutMs: { type: "number" } } } }, async (args) => {
+  server.registerTool({ name: "clear_value", description: "Clear an input/textarea/contenteditable locator.", inputSchema: { type: "object", properties: { uid: { type: "string", description: "element uid from take_snapshot" }, selector: { type: "string" }, label: { type: "string" }, placeholder: { type: "string" }, timeoutMs: { type: "number" } } } }, async (args) => {
     const element = await waitForLocator(args);
     setTextValue(element, "", false);
     return json({ cleared: locatorSummary(element) });
   });
 
-  server.registerTool({ name: "select_option", description: "Select one or more values on a <select> element and fire input/change events.", inputSchema: { type: "object", properties: { selector: { type: "string" }, label: { type: "string" }, value: { description: "string or string[]" }, timeoutMs: { type: "number" } }, required: ["value"] } }, async (args) => {
+  server.registerTool({ name: "select_option", description: "Select one or more values on a <select> element and fire input/change events.", inputSchema: { type: "object", properties: { uid: { type: "string", description: "element uid from take_snapshot" }, selector: { type: "string" }, label: { type: "string" }, value: { description: "string or string[]" }, timeoutMs: { type: "number" } }, required: ["value"] } }, async (args) => {
     const element = await waitForLocator(args);
     if (!(element instanceof HTMLSelectElement)) throw new Error("Target is not a select element.");
     const values = new Set(Array.isArray(args.value) ? args.value.map(String) : [String(args.value ?? "")]);
@@ -814,19 +977,19 @@ export function registerAutomationTools(server: EmbeddedMcpServer, opts: { extCa
     return json({ selected: [...element.selectedOptions].map((option) => ({ value: option.value, label: option.label })) });
   });
 
-  server.registerTool({ name: "check", description: "Check a checkbox/radio locator.", inputSchema: { type: "object", properties: { selector: { type: "string" }, label: { type: "string" }, timeoutMs: { type: "number" } } } }, async (args) => {
+  server.registerTool({ name: "check", description: "Check a checkbox/radio locator.", inputSchema: { type: "object", properties: { uid: { type: "string", description: "element uid from take_snapshot" }, selector: { type: "string" }, label: { type: "string" }, timeoutMs: { type: "number" } } } }, async (args) => {
     const element = await waitForLocator(args);
     setCheckedValue(element, true);
     return json({ checked: locatorSummary(element) });
   });
 
-  server.registerTool({ name: "uncheck", description: "Uncheck a checkbox locator.", inputSchema: { type: "object", properties: { selector: { type: "string" }, label: { type: "string" }, timeoutMs: { type: "number" } } } }, async (args) => {
+  server.registerTool({ name: "uncheck", description: "Uncheck a checkbox locator.", inputSchema: { type: "object", properties: { uid: { type: "string", description: "element uid from take_snapshot" }, selector: { type: "string" }, label: { type: "string" }, timeoutMs: { type: "number" } } } }, async (args) => {
     const element = await waitForLocator(args);
     setCheckedValue(element, false);
     return json({ unchecked: locatorSummary(element) });
   });
 
-  server.registerTool({ name: "upload_file", description: "Attach a synthetic File to an input[type=file] from base64 or text content.", inputSchema: { type: "object", properties: { selector: { type: "string" }, filename: { type: "string" }, mimeType: { type: "string" }, base64: { type: "string" }, text: { type: "string" } }, required: ["selector", "filename"] } }, async (args) => {
+  server.registerTool({ name: "upload_file", description: "Attach a synthetic File to an input[type=file] from base64 or text content.", inputSchema: { type: "object", properties: { uid: { type: "string", description: "element uid from take_snapshot" }, selector: { type: "string" }, filename: { type: "string" }, mimeType: { type: "string" }, base64: { type: "string" }, text: { type: "string" } }, required: ["filename"] } }, async (args) => {
     const element = await waitForLocator(args);
     if (!(element instanceof HTMLInputElement) || element.type !== "file") throw new Error("Target is not input[type=file].");
     const bytes = args.base64 !== undefined ? decodeBase64(String(args.base64)) : new TextEncoder().encode(String(args.text ?? ""));
@@ -839,9 +1002,9 @@ export function registerAutomationTools(server: EmbeddedMcpServer, opts: { extCa
     return json({ uploaded: { name: file.name, type: file.type, size: file.size } });
   });
 
-  server.registerTool({ name: "drag_and_drop", description: "Dispatch drag/drop events from one locator to another.", inputSchema: { type: "object", properties: { sourceSelector: { type: "string" }, targetSelector: { type: "string" }, timeoutMs: { type: "number" } }, required: ["sourceSelector", "targetSelector"] } }, async (args) => {
-    const source = await waitForLocator({ selector: args.sourceSelector, timeoutMs: args.timeoutMs }, { actionable: true });
-    const target = await waitForLocator({ selector: args.targetSelector, timeoutMs: args.timeoutMs }, { actionable: true });
+  server.registerTool({ name: "drag_and_drop", description: "Dispatch drag/drop events from one locator to another (selector or uid from take_snapshot).", inputSchema: { type: "object", properties: { sourceSelector: { type: "string" }, targetSelector: { type: "string" }, sourceUid: { type: "string", description: "source element uid from take_snapshot" }, targetUid: { type: "string", description: "target element uid from take_snapshot" }, timeoutMs: { type: "number" } } } }, async (args) => {
+    const source = await waitForLocator({ selector: args.sourceSelector, uid: args.sourceUid, timeoutMs: args.timeoutMs }, { actionable: true });
+    const target = await waitForLocator({ selector: args.targetSelector, uid: args.targetUid, timeoutMs: args.timeoutMs }, { actionable: true });
     const dataTransfer = new DataTransfer();
     source.dispatchEvent(new DragEvent("dragstart", { bubbles: true, cancelable: true, dataTransfer }));
     target.dispatchEvent(new DragEvent("dragenter", { bubbles: true, cancelable: true, dataTransfer }));

@@ -1,7 +1,6 @@
 package daemon_test
 
 import (
-	"context"
 	"net"
 	"net/http"
 	"testing"
@@ -25,7 +24,7 @@ func freePort(t *testing.T) int {
 func startTestBridge(t *testing.T, token string) int {
 	t.Helper()
 	b := bridge.New(bridge.Options{Token: token})
-	srv, err := server.Start(context.Background(), b, server.Options{Token: token})
+	srv, err := server.Start(t.Context(), b, server.Options{Token: token})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,8 +32,12 @@ func startTestBridge(t *testing.T, token string) int {
 	return srv.Port()
 }
 
+func localDial(port int) daemon.Dial {
+	return daemon.Dial{Host: "127.0.0.1", Port: port}
+}
+
 func TestProbeNone(t *testing.T) {
-	probe := daemon.ProbeBridge(context.Background(), "127.0.0.1", freePort(t))
+	probe := daemon.ProbeBridge(t.Context(), localDial(freePort(t)))
 	if probe.Status != daemon.StatusNone {
 		t.Fatalf("expected none, got %s", probe.Status)
 	}
@@ -53,7 +56,7 @@ func TestProbeForeign(t *testing.T) {
 	go srv.Serve(listener) //nolint:errcheck
 	defer srv.Close()
 
-	probe := daemon.ProbeBridge(context.Background(), "127.0.0.1", listener.Addr().(*net.TCPAddr).Port)
+	probe := daemon.ProbeBridge(t.Context(), localDial(listener.Addr().(*net.TCPAddr).Port))
 	if probe.Status != daemon.StatusForeign {
 		t.Fatalf("expected foreign, got %s", probe.Status)
 	}
@@ -61,7 +64,7 @@ func TestProbeForeign(t *testing.T) {
 
 func TestProbeRealBridge(t *testing.T) {
 	port := startTestBridge(t, "")
-	probe := daemon.ProbeBridge(context.Background(), "127.0.0.1", port)
+	probe := daemon.ProbeBridge(t.Context(), localDial(port))
 	if probe.Status != daemon.StatusBridge || probe.RequiresToken {
 		t.Fatalf("unexpected probe: %+v", probe)
 	}
@@ -69,33 +72,33 @@ func TestProbeRealBridge(t *testing.T) {
 
 func TestProbeTokenProtectedBridge(t *testing.T) {
 	port := startTestBridge(t, "secret")
-	probe := daemon.ProbeBridge(context.Background(), "127.0.0.1", port)
+	probe := daemon.ProbeBridge(t.Context(), localDial(port))
 	if probe.Status != daemon.StatusBridge || !probe.RequiresToken {
 		t.Fatalf("unexpected probe: %+v", probe)
 	}
 }
 
 func TestAssertCompatibleToken(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	port := startTestBridge(t, "secret")
-	probe := daemon.ProbeBridge(ctx, "127.0.0.1", port)
+	probe := daemon.ProbeBridge(ctx, localDial(port))
 
-	if err := daemon.AssertCompatibleToken(ctx, "127.0.0.1", port, "", probe); err == nil {
+	if err := daemon.AssertCompatibleToken(ctx, localDial(port), "", probe); err == nil {
 		t.Fatal("expected an error without a token")
 	}
-	if err := daemon.AssertCompatibleToken(ctx, "127.0.0.1", port, "wrong", probe); err == nil {
+	if err := daemon.AssertCompatibleToken(ctx, localDial(port), "wrong", probe); err == nil {
 		t.Fatal("expected an error with a wrong token")
 	}
-	if err := daemon.AssertCompatibleToken(ctx, "127.0.0.1", port, "secret", probe); err != nil {
+	if err := daemon.AssertCompatibleToken(ctx, localDial(port), "secret", probe); err != nil {
 		t.Fatalf("matching token rejected: %v", err)
 	}
 }
 
 func TestAssertTokenAgainstTokenlessBridge(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	port := startTestBridge(t, "")
-	probe := daemon.ProbeBridge(ctx, "127.0.0.1", port)
-	if err := daemon.AssertCompatibleToken(ctx, "127.0.0.1", port, "extra", probe); err != nil {
+	probe := daemon.ProbeBridge(ctx, localDial(port))
+	if err := daemon.AssertCompatibleToken(ctx, localDial(port), "extra", probe); err != nil {
 		t.Fatalf("tokenless bridge should tolerate a token: %v", err)
 	}
 }
@@ -111,7 +114,7 @@ func TestEnsureRejectsForeignPort(t *testing.T) {
 	defer srv.Close()
 
 	port := listener.Addr().(*net.TCPAddr).Port
-	if err := daemon.Ensure(context.Background(), daemon.EnsureOptions{DialHost: "127.0.0.1", Port: port}); err == nil {
+	if err := daemon.Ensure(t.Context(), daemon.EnsureOptions{Dial: localDial(port)}); err == nil {
 		t.Fatal("expected an error for a foreign port")
 	}
 }

@@ -4,6 +4,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -43,9 +44,33 @@ type Probe struct {
 	RequiresToken bool
 }
 
-// apiURL builds a bridge API URL with correct IPv6 bracketing.
-func apiURL(host string, port int, path string) string {
-	return "http://" + net.JoinHostPort(host, strconv.Itoa(port)) + path
+// Dial describes how management clients (probe, stop, token check) reach a
+// bridge daemon: where it is and whether/how to speak TLS to it.
+type Dial struct {
+	Host string
+	Port int
+	// Secure switches the API scheme to https (the daemon serves TLS).
+	Secure bool
+	// TLS optionally customises certificate verification (private CA,
+	// skip-verify); nil means standard verification against system roots.
+	TLS *tls.Config
+}
+
+// URL builds a bridge API URL with correct IPv6 bracketing.
+func (d Dial) URL(path string) string {
+	scheme := "http://"
+	if d.Secure {
+		scheme = "https://"
+	}
+	return scheme + net.JoinHostPort(d.Host, strconv.Itoa(d.Port)) + path
+}
+
+// HTTPClient returns the client to use for bridge API calls.
+func (d Dial) HTTPClient() *http.Client {
+	if d.TLS == nil {
+		return http.DefaultClient
+	}
+	return &http.Client{Transport: &http.Transport{TLSClientConfig: d.TLS.Clone()}}
 }
 
 // PIDFilePath returns the daemon pid file path for a port (env override for tests).
@@ -80,7 +105,7 @@ func readPIDFile(port int) (int, bool) {
 	return pid, true
 }
 
-func getWithTimeout(ctx context.Context, url string, headers map[string]string, timeout time.Duration) (*http.Response, error) {
+func getWithTimeout(ctx context.Context, client *http.Client, url string, headers map[string]string, timeout time.Duration) (*http.Response, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -90,7 +115,7 @@ func getWithTimeout(ctx context.Context, url string, headers map[string]string, 
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -99,8 +124,9 @@ func getWithTimeout(ctx context.Context, url string, headers map[string]string, 
 }
 
 // ProbeBridge identifies what (if anything) is listening on the bridge HTTP port.
-func ProbeBridge(ctx context.Context, host string, port int) Probe {
-	resp, err := getWithTimeout(ctx, apiURL(host, port, "/api/health"), nil, probeTimeout)
+func ProbeBridge(ctx context.Context, dial Dial) Probe {
+	client := dial.HTTPClient()
+	resp, err := getWithTimeout(ctx, client, dial.URL("/api/health"), nil, probeTimeout)
 	if err != nil {
 		return Probe{Status: StatusNone}
 	}
@@ -119,7 +145,7 @@ func ProbeBridge(ctx context.Context, host string, port int) Probe {
 	}
 	if resp.StatusCode == http.StatusNotFound {
 		// Possibly an older bridge without /api/health: fall back to /api/providers.
-		legacy, err := getWithTimeout(ctx, apiURL(host, port, "/api/providers"), nil, probeTimeout)
+		legacy, err := getWithTimeout(ctx, client, dial.URL("/api/providers"), nil, probeTimeout)
 		if err != nil {
 			return Probe{Status: StatusNone}
 		}
@@ -140,8 +166,8 @@ func ProbeBridge(ctx context.Context, host string, port int) Probe {
 	return Probe{Status: StatusForeign}
 }
 
-func tokenAccepted(ctx context.Context, host string, port int, token string) bool {
-	resp, err := getWithTimeout(ctx, apiURL(host, port, "/api/providers"),
+func tokenAccepted(ctx context.Context, dial Dial, token string) bool {
+	resp, err := getWithTimeout(ctx, dial.HTTPClient(), dial.URL("/api/providers"),
 		map[string]string{protocol.TokenHeader: token}, probeTimeout)
 	if err != nil {
 		return false
@@ -152,7 +178,7 @@ func tokenAccepted(ctx context.Context, host string, port int, token string) boo
 
 // AssertCompatibleToken verifies an already-running bridge accepts this
 // agent's token before attaching.
-func AssertCompatibleToken(ctx context.Context, host string, port int, token string, probe Probe) error {
+func AssertCompatibleToken(ctx context.Context, dial Dial, token string, probe Probe) error {
 	if probe.Status != StatusBridge {
 		return nil
 	}
@@ -160,18 +186,18 @@ func AssertCompatibleToken(ctx context.Context, host string, port int, token str
 		if token == "" {
 			return fmt.Errorf(
 				"a bridge is already running on port %d and requires a token; "+
-					"pass --token <secret> (or set MCP_PAGE_BRIDGE_TOKEN) to attach", port)
+					"pass --token <secret> (or set MCP_PAGE_BRIDGE_TOKEN) to attach", dial.Port)
 		}
-		if !tokenAccepted(ctx, host, port, token) {
+		if !tokenAccepted(ctx, dial, token) {
 			return fmt.Errorf(
 				"a bridge is already running on port %d but rejected the provided token; "+
-					"every agent on this port must use the same --token", port)
+					"every agent on this port must use the same --token", dial.Port)
 		}
 		return nil
 	}
 	if token != "" {
 		slog.Info(fmt.Sprintf(
-			"note: a tokenless bridge is already running on port %d; the provided token is ignored for this attach", port))
+			"note: a tokenless bridge is already running on port %d; the provided token is ignored for this attach", dial.Port))
 	}
 	return nil
 }
@@ -180,22 +206,24 @@ func AssertCompatibleToken(ctx context.Context, host string, port int, token str
 type EnsureOptions struct {
 	// BindHost is what the spawned daemon binds (e.g. "0.0.0.0").
 	BindHost string
-	// DialHost is where this process reaches the daemon (e.g. "127.0.0.1").
-	DialHost string
-	Port     int
-	Token    string
+	// Dial is where this process reaches the daemon (host, port, TLS).
+	Dial  Dial
+	Token string
 	// IdleTimeoutSec > 0 makes the daemon exit after that many idle seconds.
 	IdleTimeoutSec float64
+	// TLSCert/TLSKey are forwarded to a spawned daemon so it serves TLS.
+	TLSCert string
+	TLSKey  string
 }
 
 // Ensure attaches to a running bridge or spawns a detached daemon and waits
 // until it is ready.
 func Ensure(ctx context.Context, opts EnsureOptions) error {
-	port := opts.Port
-	existing := ProbeBridge(ctx, opts.DialHost, port)
+	port := opts.Dial.Port
+	existing := ProbeBridge(ctx, opts.Dial)
 	switch existing.Status {
 	case StatusBridge:
-		return AssertCompatibleToken(ctx, opts.DialHost, port, opts.Token, existing)
+		return AssertCompatibleToken(ctx, opts.Dial, opts.Token, existing)
 	case StatusForeign:
 		return fmt.Errorf("port %d is in use by a non-mcp-page-bridge server; choose another port with --port <n>", port)
 	}
@@ -220,6 +248,12 @@ func Ensure(ctx context.Context, opts EnsureOptions) error {
 	if opts.Token != "" {
 		cmd.Env = append(cmd.Env, "MCP_PAGE_BRIDGE_TOKEN="+opts.Token)
 	}
+	if opts.TLSCert != "" && opts.TLSKey != "" {
+		cmd.Env = append(cmd.Env,
+			"MCP_PAGE_BRIDGE_TLS_CERT="+opts.TLSCert,
+			"MCP_PAGE_BRIDGE_TLS_KEY="+opts.TLSKey,
+		)
+	}
 	cmd.SysProcAttr = detachedProcAttr()
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("spawn bridge daemon; %w", err)
@@ -237,7 +271,7 @@ func Ensure(ctx context.Context, opts EnsureOptions) error {
 			return ctx.Err()
 		case <-time.After(readyPollInterval):
 		}
-		if ProbeBridge(ctx, opts.DialHost, port).Status == StatusBridge {
+		if ProbeBridge(ctx, opts.Dial).Status == StatusBridge {
 			slog.Info(fmt.Sprintf("started background bridge daemon on port %d", port))
 			return nil
 		}
@@ -245,9 +279,10 @@ func Ensure(ctx context.Context, opts EnsureOptions) error {
 	return fmt.Errorf("timed out waiting for bridge daemon on port %d", port)
 }
 
-// Stop shuts down a running daemon on the given host/port.
-func Stop(ctx context.Context, host string, port int, token string) error {
-	probe := ProbeBridge(ctx, host, port)
+// Stop shuts down a running daemon at dial.
+func Stop(ctx context.Context, dial Dial, token string) error {
+	port := dial.Port
+	probe := ProbeBridge(ctx, dial)
 	if probe.Status == StatusNone {
 		slog.Info(fmt.Sprintf("no bridge is running on port %d", port))
 		return nil
@@ -262,7 +297,7 @@ func Stop(ctx context.Context, host string, port int, token string) error {
 	reqCtx, cancel := context.WithTimeout(ctx, shutdownTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost,
-		apiURL(host, port, "/api/shutdown"), nil)
+		dial.URL("/api/shutdown"), nil)
 	if err != nil {
 		return err
 	}
@@ -271,7 +306,7 @@ func Stop(ctx context.Context, host string, port int, token string) error {
 		req.Header.Set(protocol.TokenHeader, token)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := dial.HTTPClient().Do(req)
 	if err == nil {
 		defer resp.Body.Close()
 		if resp.StatusCode == http.StatusOK {

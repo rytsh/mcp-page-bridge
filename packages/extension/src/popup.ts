@@ -6,6 +6,16 @@ interface ProviderStatus {
   title?: string;
   open: boolean;
 }
+interface ProfileStatus {
+  id: string;
+  host: string;
+  port: number;
+  token: string;
+  secure: boolean;
+  isDefault: boolean;
+  tabs: number;
+}
+
 interface Status {
   enabled: boolean;
   connected: boolean;
@@ -13,6 +23,13 @@ interface Status {
   host?: string;
   port: number;
   token: string;
+  /** Bridge is dialed with wss:// (TLS). */
+  secure?: boolean;
+  /** True when this tab is pinned to its own bridge profile. */
+  tabBridge?: boolean;
+  profiles?: ProfileStatus[];
+  activeProfileId?: string;
+  tabGroups?: boolean;
   browserControl: boolean;
   coreTools: boolean;
   designTools: boolean;
@@ -55,6 +72,70 @@ function el<T extends HTMLElement>(id: string): T {
   return document.getElementById(id) as T;
 }
 
+// The popup refreshes its status every 1.5s; while the user is editing the
+// connection settings (host/port/token) the periodic render must not clobber
+// the in-progress input. Dirty is set on first keystroke and cleared on save.
+let settingsDirty = false;
+
+/** Latest profile list from getStatus; backs the recent-servers dropdown. */
+let knownProfiles: ProfileStatus[] = [];
+
+function setSettingsInput(id: "host" | "port" | "token", value: string): void {
+  const input = el<HTMLInputElement>(id);
+  if (settingsDirty || document.activeElement === input) return;
+  input.value = value;
+}
+
+function profileOptionLabel(profile: ProfileStatus): string {
+  let label = `${profile.secure ? "wss://" : ""}${profile.host}:${profile.port}`;
+  if (profile.token) label += " \u{1F511}"; // key emoji marks token-protected bridges
+  if (profile.isDefault) label += " · default";
+  if (profile.tabs > 0) label += ` · ${profile.tabs} tab${profile.tabs === 1 ? "" : "s"}`;
+  return label;
+}
+
+function renderRecentServers(status: Status): void {
+  const row = el<HTMLDivElement>("recentRow");
+  const select = el<HTMLSelectElement>("recentServers");
+  knownProfiles = status.profiles ?? [];
+  if (knownProfiles.length < 2) {
+    // With zero/one known bridge a picker adds nothing; keep the popup lean.
+    row.style.display = "none";
+    return;
+  }
+  row.style.display = "";
+  if (settingsDirty || document.activeElement === select) return;
+  const desired = knownProfiles.map((p) => `${p.id}\u0000${profileOptionLabel(p)}`).join("\u0001");
+  if (select.dataset.rendered === desired) {
+    select.value = status.activeProfileId ?? "";
+    return;
+  }
+  select.dataset.rendered = desired;
+  select.innerHTML = "";
+  for (const profile of knownProfiles) {
+    const option = document.createElement("option");
+    option.value = profile.id;
+    option.textContent = profileOptionLabel(profile);
+    select.append(option);
+  }
+  select.value = status.activeProfileId ?? "";
+}
+
+function renderBridgeSummary(status: Status): void {
+  const summary = el<HTMLParagraphElement>("bridgeSummary");
+  if (!status.enabled) {
+    summary.style.display = "none";
+    return;
+  }
+  const active = (status.profiles ?? []).find((p) => p.id === status.activeProfileId);
+  const tabCount = active?.tabs ?? 0;
+  const kind = status.tabBridge ? "custom for this tab" : "default";
+  summary.style.display = "";
+  summary.textContent =
+    `Bridge: ${status.secure ? "wss://" : ""}${status.host ?? "127.0.0.1"}:${status.port} (${kind})` +
+    (tabCount > 1 ? ` — ${tabCount} tabs on this bridge` : "");
+}
+
 async function activeTabId(): Promise<number | undefined> {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   return tab?.id;
@@ -73,9 +154,14 @@ function render(status: Status): void {
     ? "Disable on this tab"
     : "Enable on this tab";
 
-  el<HTMLInputElement>("host").value = status.host ?? "127.0.0.1";
-  el<HTMLInputElement>("port").value = String(status.port);
-  el<HTMLInputElement>("token").value = status.token ?? "";
+  setSettingsInput("host", status.host ?? "127.0.0.1");
+  setSettingsInput("port", String(status.port));
+  setSettingsInput("token", status.token ?? "");
+  if (!settingsDirty) el<HTMLInputElement>("secure").checked = !!status.secure;
+  if (!settingsDirty) el<HTMLInputElement>("tabBridge").checked = !!status.tabBridge;
+  renderRecentServers(status);
+  renderBridgeSummary(status);
+  el<HTMLInputElement>("tabGroups").checked = !!status.tabGroups;
   el<HTMLInputElement>("browserControl").checked = !!status.browserControl;
   el<HTMLInputElement>("coreTools").checked = status.coreTools !== false;
   el<HTMLInputElement>("designTools").checked = !!status.designTools;
@@ -193,6 +279,9 @@ async function main(): Promise<void> {
     const host = el<HTMLInputElement>("host").value.trim() || "127.0.0.1";
     const port = Number(el<HTMLInputElement>("port").value) || 8787;
     const token = el<HTMLInputElement>("token").value.trim();
+    const secure = el<HTMLInputElement>("secure").checked;
+    const tabBridge = el<HTMLInputElement>("tabBridge").checked;
+    const tabGroups = el<HTMLInputElement>("tabGroups").checked;
     const browserControl = el<HTMLInputElement>("browserControl").checked;
     const coreTools = el<HTMLInputElement>("coreTools").checked;
     const designTools = el<HTMLInputElement>("designTools").checked;
@@ -203,11 +292,73 @@ async function main(): Promise<void> {
       el<HTMLInputElement>("cdpTools").checked = false;
       el<HTMLParagraphElement>("cdpHint").textContent = "Debugger permission was not granted; Advanced CDP tools stayed off.";
     }
-    await chrome.runtime.sendMessage({ type: "setSettings", host, port, token, browserControl, coreTools, designTools, automationTools, cdpTools });
+
+    const flags = { browserControl, coreTools, designTools, automationTools, cdpTools, tabGroups };
+    if (tabBridge) {
+      // Pin this tab to its own bridge; flags stay global, the default bridge
+      // is untouched (setSettings without host/port/token keeps it as-is).
+      await chrome.runtime.sendMessage({ type: "setTabBridge", tabId, enabled: true, host, port, token, secure });
+      await chrome.runtime.sendMessage({ type: "setSettings", ...flags });
+    } else {
+      // Back on (and editing) the global default bridge.
+      await chrome.runtime.sendMessage({ type: "setTabBridge", tabId, enabled: false });
+      await chrome.runtime.sendMessage({ type: "setSettings", ...flags, host, port, token, secure });
+    }
+    // Persisted globally / per tab in the service worker; safe to let render()
+    // own the inputs again.
+    settingsDirty = false;
     await refresh();
   }
 
+  // Track edits so the periodic refresh leaves the inputs alone, and save on
+  // Enter or blur so a typed host/port/token sticks without hunting for Save.
+  for (const id of ["host", "port", "token"] as const) {
+    const input = el<HTMLInputElement>(id);
+    input.addEventListener("input", () => {
+      settingsDirty = true;
+    });
+    input.addEventListener("change", () => void saveSettings());
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") void saveSettings();
+    });
+  }
+
+  // Recent servers: picking a profile fills the fields and saves through the
+  // same path (global default, or this tab's bridge when the pin is on).
+  el<HTMLSelectElement>("recentServers").addEventListener("change", () => {
+    const profile = knownProfiles.find((p) => p.id === el<HTMLSelectElement>("recentServers").value);
+    if (!profile) return;
+    settingsDirty = true;
+    el<HTMLInputElement>("host").value = profile.host;
+    el<HTMLInputElement>("port").value = String(profile.port);
+    el<HTMLInputElement>("token").value = profile.token;
+    el<HTMLInputElement>("secure").checked = !!profile.secure;
+    void saveSettings();
+  });
+
+  // Bridge identity checkbox: editing it makes the settings dirty (it is part
+  // of the host/port/token/secure tuple), then saves through the same path.
+  el<HTMLInputElement>("secure").addEventListener("change", () => {
+    settingsDirty = true;
+    void saveSettings();
+  });
+
+  el<HTMLInputElement>("tabBridge").addEventListener("change", async () => {
+    if (el<HTMLInputElement>("tabBridge").checked) {
+      // Pin the tab to whatever is currently in the fields.
+      settingsDirty = true;
+      await saveSettings();
+      return;
+    }
+    // Unpin only: revert to the global default without writing the tab's old
+    // custom values into the default bridge.
+    await chrome.runtime.sendMessage({ type: "setTabBridge", tabId, enabled: false });
+    settingsDirty = false;
+    await refresh();
+  });
+
   el<HTMLButtonElement>("saveSettings").addEventListener("click", saveSettings);
+  el<HTMLInputElement>("tabGroups").addEventListener("change", saveSettings);
   el<HTMLInputElement>("browserControl").addEventListener("change", saveSettings);
   el<HTMLInputElement>("coreTools").addEventListener("change", saveSettings);
   el<HTMLInputElement>("designTools").addEventListener("change", saveSettings);
@@ -225,8 +376,9 @@ async function main(): Promise<void> {
     const host = rawHost.includes(":") && !rawHost.startsWith("[") ? `[${rawHost}]` : rawHost;
     const port = Number(el<HTMLInputElement>("port").value) || 8787;
     const token = el<HTMLInputElement>("token").value.trim();
+    const scheme = el<HTMLInputElement>("secure").checked ? "https" : "http";
     const query = token ? `/?token=${encodeURIComponent(token)}` : "/";
-    await chrome.tabs.create({ url: `http://${host}:${port}${query}` });
+    await chrome.tabs.create({ url: `${scheme}://${host}:${port}${query}` });
   });
 
   async function startPicker(append: boolean): Promise<void> {

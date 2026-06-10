@@ -4,9 +4,12 @@ package config
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 
 	"github.com/rakunlabs/chu"
 	"github.com/rakunlabs/chu/loader/loaderenv"
@@ -26,6 +29,21 @@ type Config struct {
 	Token    string `cfg:"token"     log:"-"`
 	// IdleTimeout is in seconds; 0 disables idle auto-shutdown.
 	IdleTimeout float64 `cfg:"idle_timeout"`
+
+	// TLS switches clients (stdio proxy, stop, probes) to https/wss; it is
+	// implied when TLSCert+TLSKey are set, so it is mainly for attaching to a
+	// remote bridge that already serves TLS.
+	TLS bool `cfg:"tls"`
+	// TLSCert/TLSKey are PEM file paths; when both are set the daemon serves
+	// HTTPS/WSS on its port.
+	TLSCert string `cfg:"tls_cert"`
+	TLSKey  string `cfg:"tls_key"`
+	// TLSCA is an optional PEM CA bundle clients use to verify the bridge
+	// certificate (e.g. a self-signed or private CA).
+	TLSCA string `cfg:"tls_ca"`
+	// TLSInsecureSkipVerify disables client certificate verification.
+	// Testing only — the connection stays encrypted but is not authenticated.
+	TLSInsecureSkipVerify bool `cfg:"tls_insecure_skip_verify"`
 }
 
 // Load resolves configuration from defaults, an optional
@@ -63,6 +81,9 @@ func (c *Config) Validate() error {
 	if c.IdleTimeout < 0 {
 		return fmt.Errorf("invalid idle-timeout %v: expected a non-negative number of seconds", c.IdleTimeout)
 	}
+	if (c.TLSCert == "") != (c.TLSKey == "") {
+		return fmt.Errorf("tls-cert and tls-key must be set together (got cert=%q key=%q)", c.TLSCert, c.TLSKey)
+	}
 	if !c.LoopbackOnly() && c.Token == "" {
 		// Deliberately a warning, not an error: the user may want a
 		// tokenless bridge on a trusted/isolated network.
@@ -70,7 +91,48 @@ func (c *Config) Validate() error {
 			"binding %s without a token: page tools (eval etc.) are exposed to the network; "+
 				"pass --token <secret> (or set MCP_PAGE_BRIDGE_TOKEN) unless this is intentional", c.Host))
 	}
+	if !c.LoopbackOnly() && !c.ServesTLS() {
+		slog.Warn(fmt.Sprintf(
+			"binding %s without TLS: traffic (including the token) crosses the network in cleartext; "+
+				"pass --tls-cert/--tls-key unless this is intentional", c.Host))
+	}
+	if c.TLSInsecureSkipVerify {
+		slog.Warn("tls-insecure is set: the bridge certificate is NOT verified (testing only)")
+	}
 	return nil
+}
+
+// ServesTLS reports whether the daemon should serve HTTPS/WSS.
+func (c *Config) ServesTLS() bool {
+	return c.TLSCert != "" && c.TLSKey != ""
+}
+
+// TLSEnabled reports whether clients should dial the bridge with https/wss.
+func (c *Config) TLSEnabled() bool {
+	return c.TLS || c.ServesTLS()
+}
+
+// ClientTLS builds the client-side TLS configuration (nil when TLS is off).
+func (c *Config) ClientTLS() (*tls.Config, error) {
+	if !c.TLSEnabled() {
+		return nil, nil
+	}
+	tc := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: c.TLSInsecureSkipVerify, //nolint:gosec // explicit opt-in for testing
+	}
+	if c.TLSCA != "" {
+		pem, err := os.ReadFile(c.TLSCA)
+		if err != nil {
+			return nil, fmt.Errorf("read tls-ca %s; %w", c.TLSCA, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("tls-ca %s: no PEM certificates found", c.TLSCA)
+		}
+		tc.RootCAs = pool
+	}
+	return tc, nil
 }
 
 // LoopbackOnly reports whether the configured bind host is loopback-only.

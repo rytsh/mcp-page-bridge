@@ -86,6 +86,7 @@ describe("built-in tools", () => {
       "screenshot",
       "navigate",
       "reload",
+      "take_snapshot",
       "find_by_text",
       "find_by_role",
       "find_by_label",
@@ -191,8 +192,19 @@ describe("built-in tools", () => {
     const on = await setup({ automationTools: true });
     const names = (await on.client.listTools()).tools.map((t) => t.name);
     expect(names).toContain("smart_click");
+    expect(names).toContain("take_snapshot");
     expect(names).toContain("start_network_capture");
     expect(names).toContain("get_storage_state");
+  });
+
+  it("rejects unknown/stale snapshot uids with a re-snapshot hint", async () => {
+    // The uid registry is page-local; a uid that was never handed out by
+    // take_snapshot must fail fast (before any DOM access) and point the agent
+    // back at take_snapshot. This covers the resolveUid error path in Node.
+    const { client } = await setup({ automationTools: true });
+    const result = await client.callTool({ name: "smart_click", arguments: { uid: "1_999" } });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("take_snapshot");
   });
 
   it("can disable only the default core tools", async () => {

@@ -6,11 +6,13 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"strconv"
@@ -22,25 +24,47 @@ import (
 
 const maxLineSize = 64 << 20
 
+// Options configures the stdio proxy connection to the bridge daemon.
+type Options struct {
+	Host  string
+	Port  int
+	Token string
+	// Secure dials wss:// instead of ws:// (the daemon serves TLS).
+	Secure bool
+	// TLS optionally customises certificate verification (private CA,
+	// skip-verify); nil means standard verification against system roots.
+	TLS *tls.Config
+}
+
 // Run connects to the daemon and pumps messages until stdin closes, the
 // WebSocket closes, or ctx is cancelled.
-func Run(ctx context.Context, host string, port int, token string) error {
-	addr := net.JoinHostPort(host, strconv.Itoa(port))
-	target := fmt.Sprintf("ws://%s/agent", addr)
-	if token != "" {
-		target += "?token=" + url.QueryEscape(token)
+func Run(ctx context.Context, opts Options) error {
+	addr := net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port))
+	scheme := "ws"
+	if opts.Secure {
+		scheme = "wss"
+	}
+	target := fmt.Sprintf("%s://%s/agent", scheme, addr)
+	if opts.Token != "" {
+		target += "?token=" + url.QueryEscape(opts.Token)
 	}
 
-	conn, _, err := websocket.Dial(ctx, target, &websocket.DialOptions{
+	dialOpts := &websocket.DialOptions{
 		Subprotocols: []string{protocol.WSSubprotocol},
-	})
+	}
+	if opts.TLS != nil {
+		dialOpts.HTTPClient = &http.Client{
+			Transport: &http.Transport{TLSClientConfig: opts.TLS.Clone()},
+		}
+	}
+	conn, _, err := websocket.Dial(ctx, target, dialOpts)
 	if err != nil {
 		return fmt.Errorf("dial bridge daemon; %w", err)
 	}
 	conn.SetReadLimit(maxLineSize)
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
-	slog.Info(fmt.Sprintf("MCP stdio proxy ready → ws://%s/agent", addr))
+	slog.Info(fmt.Sprintf("MCP stdio proxy ready → %s://%s/agent", scheme, addr))
 
 	done := make(chan error, 2)
 

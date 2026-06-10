@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +32,10 @@ type Options struct {
 	Host  string
 	Port  int
 	Token string
+	// TLSCert/TLSKey are PEM file paths; when both are set the server speaks
+	// HTTPS/WSS on the listener.
+	TLSCert string
+	TLSKey  string
 	// OnShutdown is invoked (async) after POST /api/shutdown is accepted.
 	OnShutdown func()
 	Logger     *slog.Logger
@@ -60,6 +65,19 @@ func Start(ctx context.Context, b *bridge.Bridge, opts Options) (*Server, error)
 	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", host, opts.Port))
 	if err != nil {
 		return nil, fmt.Errorf("listen on %s:%d; %w", host, opts.Port, err)
+	}
+
+	if opts.TLSCert != "" || opts.TLSKey != "" {
+		cert, err := tls.LoadX509KeyPair(opts.TLSCert, opts.TLSKey)
+		if err != nil {
+			_ = listener.Close()
+			return nil, fmt.Errorf("load TLS key pair (cert=%s key=%s); %w", opts.TLSCert, opts.TLSKey, err)
+		}
+		listener = tls.NewListener(listener, &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+			NextProtos:   []string{"h2", "http/1.1"},
+		})
 	}
 
 	s := &Server{

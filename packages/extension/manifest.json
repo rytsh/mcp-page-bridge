@@ -4,7 +4,7 @@
   "version": "0.2.1",
   "description": "Expose a live browser page's MCP tools to a coding agent via the mcp-page-bridge bridge.",
   "minimum_chrome_version": "116",
-  "permissions": ["scripting", "tabs", "activeTab", "storage", "alarms", "downloads"],
+  "permissions": ["scripting", "tabs", "tabGroups", "activeTab", "storage", "alarms", "downloads"],
   "optional_permissions": ["debugger"],
   "host_permissions": [
     "http://*/*",
