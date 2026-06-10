@@ -64,9 +64,11 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid idle-timeout %v: expected a non-negative number of seconds", c.IdleTimeout)
 	}
 	if !c.LoopbackOnly() && c.Token == "" {
-		return fmt.Errorf(
-			"refusing to bind %s without a token: page tools (eval etc.) would be exposed to the network; "+
-				"pass --token <secret> (or set MCP_PAGE_BRIDGE_TOKEN)", c.Host)
+		// Deliberately a warning, not an error: the user may want a
+		// tokenless bridge on a trusted/isolated network.
+		slog.Warn(fmt.Sprintf(
+			"binding %s without a token: page tools (eval etc.) are exposed to the network; "+
+				"pass --token <secret> (or set MCP_PAGE_BRIDGE_TOKEN) unless this is intentional", c.Host))
 	}
 	return nil
 }

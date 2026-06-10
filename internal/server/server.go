@@ -128,6 +128,9 @@ func (s *Server) routes(mux *ada.Mux) {
 	mux.GET("/providers.json", s.handleProviders)
 	mux.POST("/api/shutdown", s.handleShutdown)
 	mux.POST("/api/providers/{label}/{action}", s.handleProviderAction)
+	mux.POST("/mcp", s.handleMCPPost)
+	mux.GET("/mcp", s.handleMCPGet)
+	mux.DELETE("/mcp", s.handleMCPDelete)
 	mux.NotFound(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusNotFound)
@@ -241,10 +244,10 @@ func (s *Server) handleProviderAction(w http.ResponseWriter, r *http.Request) {
 // primary defense against DNS rebinding and cross-origin pages reaching the
 // JSON API.
 //
-// When the bridge is deliberately bound to a non-loopback host (which requires
-// a token), strict authority matching is impossible — the machine may be
-// reachable under many addresses — so the check relaxes to a port match and
-// the token carries the authorization.
+// When the bridge is deliberately bound to a non-loopback host, strict
+// authority matching is impossible — the machine may be reachable under many
+// addresses — so the check relaxes to a port match and the (recommended)
+// token carries the authorization.
 func (s *Server) hostAllowed(r *http.Request) bool {
 	if !config.IsLoopbackHost(s.opts.Host) && s.opts.Host != "" {
 		return s.portMatches(r.Host) && s.originPortMatches(r)

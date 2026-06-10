@@ -111,7 +111,9 @@ pnpm -r build                  # builds protocol + dashboard (Go embed) + extens
 
 `mcp-page-bridge` is a **local (stdio)** MCP server: the agent spawns it, and it accepts
 the browser's WebSocket and re-exposes the page's tools. Add it to your agent's
-MCP config like any other stdio server.
+MCP config like any other stdio server. (The daemon also exposes a
+[Streamable HTTP endpoint](#remote-url--streamable-http) for clients that
+prefer a remote URL.)
 
 > **From a local checkout**, replace `npx -y mcp-page-bridge` everywhere below with
 > the built binary: `go build -o mcp-page-bridge ./cmd/mcp-page-bridge` and use
@@ -122,10 +124,11 @@ Env: `MCP_PAGE_BRIDGE_PORT`, `MCP_PAGE_BRIDGE_TOKEN`, `MCP_PAGE_BRIDGE_HOST`.
 
 > **Remote browser**: to connect a browser on another device (phone/laptop on
 > your LAN), start the bridge with `--host 0.0.0.0 --token <secret>` and set the
-> same host/IP + token in the extension popup. A token is **required** for any
-> non-loopback bind — page tools (`eval` etc.) must never be open to the network
-> unauthenticated. The Host/Origin checks relax to port matching in this mode;
-> the token carries the authorization.
+> same host/IP + token in the extension popup. A token is **strongly
+> recommended** for any non-loopback bind — without one, page tools (`eval`
+> etc.) are open to the network and the bridge only logs a warning. The
+> Host/Origin checks relax to port matching in this mode; the token carries the
+> authorization.
 
 Multiple agents can use the same port. On first use, `mcp-page-bridge` starts a
 detached local bridge daemon that owns the browser WebSocket/dashboard port.
@@ -249,6 +252,49 @@ Windows: `%APPDATA%\Claude\`), then restart the app:
 
 It's a standard stdio MCP server — run `npx -y mcp-page-bridge` (or a standalone
 binary) as the command. `stdout` is the MCP channel; logs go to `stderr`.
+
+### Remote URL — Streamable HTTP
+
+The daemon also serves the MCP **Streamable HTTP** transport at
+`http://<host>:<port>/mcp`, so clients that support remote MCP servers can skip
+the stdio proxy entirely and connect by URL — including to a daemon on another
+machine (start it there with `--host 0.0.0.0 --token <secret>`):
+
+```jsonc
+// opencode
+{
+  "mcp": {
+    "mcp-page-bridge": {
+      "type": "remote",
+      "url": "http://192.168.1.50:8787/mcp",
+      "headers": { "Authorization": "Bearer <secret>" },
+      "enabled": true
+    }
+  }
+}
+```
+
+```bash
+# Claude Code
+claude mcp add --transport http mcp-page-bridge http://192.168.1.50:8787/mcp \
+  --header "Authorization: Bearer <secret>"
+```
+
+Endpoint behaviour:
+
+- `POST /mcp` — JSON-RPC requests. `initialize` opens a session and returns an
+  `Mcp-Session-Id` response header; all later requests must echo that header.
+  Notifications are answered with `202 Accepted`. An unknown/expired session
+  returns `404` (re-initialize). JSON-RPC batching is not supported.
+- `GET /mcp` — optional SSE stream (one per session) carrying server-initiated
+  notifications: `tools/prompts/resources list_changed` and forwarded page
+  `notifications/message` logs.
+- `DELETE /mcp` — ends the session. Sessions also expire after 30 minutes
+  without requests (an open SSE stream keeps them alive), and they count as
+  agent connections for `--idle-timeout` purposes.
+- When a token is configured, every `/mcp` request must carry it as
+  `Authorization: Bearer <secret>`, an `x-mcp-page-bridge-token` header, or a
+  `?token=<secret>` query parameter.
 
 ### Putting it together
 
@@ -410,7 +456,10 @@ agent's permission prompts.
 
 ## Security
 
-- The bridge binds to `127.0.0.1` only.
+- The bridge binds to `127.0.0.1` by default. Binding a non-loopback host
+  (`--host 0.0.0.0`) without a token is allowed but logs a warning — anyone on
+  the network can then reach the connected pages' tools (WebSocket and
+  `/mcp`); only do this on a trusted/isolated network.
 - Optional shared token: run `mcp-page-bridge --token <secret>` (or `MCP_PAGE_BRIDGE_TOKEN=<secret>`)
   and enter the same token in the extension popup. Without it, any local process
   can connect — fine on a trusted machine.

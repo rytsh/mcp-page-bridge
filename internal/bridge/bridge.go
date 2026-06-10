@@ -62,6 +62,7 @@ type Bridge struct {
 	mu               sync.Mutex
 	providers        map[string]*Provider
 	agents           map[*agentSession]struct{}
+	httpSessions     map[string]*HTTPSession
 	labels           *labelStore
 	toolRoutes       map[string]nameRoute
 	promptRoutes     map[string]nameRoute
@@ -72,8 +73,7 @@ type Bridge struct {
 }
 
 type agentSession struct {
-	peer        *mcpwire.Peer
-	initialized bool
+	peer *mcpwire.Peer
 }
 
 // New creates a Bridge. It owns no listener; the HTTP server hands accepted
@@ -88,6 +88,7 @@ func New(opts Options) *Bridge {
 		logger:         logger,
 		providers:      map[string]*Provider{},
 		agents:         map[*agentSession]struct{}{},
+		httpSessions:   map[string]*HTTPSession{},
 		labels:         newLabelStore(),
 		toolRoutes:     map[string]nameRoute{},
 		promptRoutes:   map[string]nameRoute{},
@@ -181,7 +182,7 @@ func (b *Bridge) attachAgent(conn *websocket.Conn) {
 	b.mu.Unlock()
 
 	peer.OnRequest(func(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, *mcpwire.RPCError) {
-		return b.handleAgentRequest(ctx, session, method, params)
+		return b.handleAgentRequest(ctx, method, params)
 	})
 	peer.OnClose(func() {
 		b.mu.Lock()
@@ -195,10 +196,11 @@ func (b *Bridge) attachAgent(conn *websocket.Conn) {
 	peer.Start()
 }
 
-func (b *Bridge) handleAgentRequest(ctx context.Context, session *agentSession, method string, params json.RawMessage) (json.RawMessage, *mcpwire.RPCError) {
+// handleAgentRequest answers one agent-facing MCP request. It is shared by
+// the WebSocket agent sessions and the Streamable HTTP sessions.
+func (b *Bridge) handleAgentRequest(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, *mcpwire.RPCError) {
 	switch method {
 	case "initialize":
-		session.initialized = true
 		return b.initializeResult(params), nil
 	case "tools/list":
 		return marshalResult(map[string]any{"tools": b.exposedTools()})
@@ -483,17 +485,32 @@ var listChangedMethods = map[string]string{
 func (b *Bridge) notifyChanged(kind string) {
 	b.mu.Lock()
 	b.rebuildRoutesLocked()
+	b.mu.Unlock()
+	b.broadcastNotification(listChangedMethods[kind], nil)
+}
+
+// broadcastNotification fans a server-initiated notification out to every
+// agent: WebSocket sessions get it pushed, HTTP sessions get it queued for
+// their SSE stream.
+func (b *Bridge) broadcastNotification(method string, params any) {
+	b.mu.Lock()
 	agents := make([]*agentSession, 0, len(b.agents))
 	for a := range b.agents {
 		agents = append(agents, a)
 	}
+	sessions := make([]*HTTPSession, 0, len(b.httpSessions))
+	for _, s := range b.httpSessions {
+		sessions = append(sessions, s)
+	}
 	b.mu.Unlock()
 
-	method := listChangedMethods[kind]
 	for _, a := range agents {
 		go func(a *agentSession) {
-			_ = a.peer.Notify(method, nil)
+			_ = a.peer.Notify(method, params)
 		}(a)
+	}
+	for _, s := range sessions {
+		s.enqueueNotification(method, params)
 	}
 }
 
@@ -696,18 +713,7 @@ func (b *Bridge) forwardLogging(p *Provider, params json.RawMessage) {
 	}
 	clone := cloneObj(obj)
 	setString(clone, "logger", p.label+"/"+logger)
-
-	b.mu.Lock()
-	agents := make([]*agentSession, 0, len(b.agents))
-	for a := range b.agents {
-		agents = append(agents, a)
-	}
-	b.mu.Unlock()
-	for _, a := range agents {
-		go func(a *agentSession) {
-			_ = a.peer.Notify("notifications/message", clone)
-		}(a)
-	}
+	b.broadcastNotification("notifications/message", clone)
 }
 
 // ---- public API ------------------------------------------------------------------
@@ -863,6 +869,10 @@ func (b *Bridge) Close() {
 	for a := range b.agents {
 		agents = append(agents, a)
 	}
+	sessions := make([]*HTTPSession, 0, len(b.httpSessions))
+	for _, s := range b.httpSessions {
+		sessions = append(sessions, s)
+	}
 	b.mu.Unlock()
 
 	for _, p := range providers {
@@ -870,5 +880,8 @@ func (b *Bridge) Close() {
 	}
 	for _, a := range agents {
 		_ = a.peer.Close()
+	}
+	for _, s := range sessions {
+		s.Close()
 	}
 }

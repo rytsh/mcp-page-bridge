@@ -70,16 +70,12 @@ func TestParseArgsHost(t *testing.T) {
 	}
 }
 
-func TestParseArgsNonLoopbackRequiresToken(t *testing.T) {
-	for _, host := range []string{"0.0.0.0", "192.168.1.5", "::"} {
-		if _, err := parseArgs(baseConfig(), []string{"--host", host}); err == nil {
-			t.Fatalf("expected token requirement error for host %s", host)
-		}
-	}
-	// Loopback variants stay tokenless.
-	for _, host := range []string{"127.0.0.1", "localhost", "::1", "127.1.2.3"} {
+func TestParseArgsTokenlessHosts(t *testing.T) {
+	// Non-loopback binds without a token are allowed (with a logged warning):
+	// the user may deliberately run tokenless on a trusted network.
+	for _, host := range []string{"0.0.0.0", "192.168.1.5", "::", "127.0.0.1", "localhost", "::1", "127.1.2.3"} {
 		if _, err := parseArgs(baseConfig(), []string{"--host", host}); err != nil {
-			t.Fatalf("unexpected error for loopback host %s: %v", host, err)
+			t.Fatalf("unexpected error for host %s: %v", host, err)
 		}
 	}
 }

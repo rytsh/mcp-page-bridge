@@ -225,6 +225,80 @@ For Claude / Cursor and other `mcpServers`-style agents:
 
 </details>
 
+<details><summary>Remote bridge — connect to a daemon on another machine</summary>
+
+The daemon also speaks **MCP Streamable HTTP** at `http://<host>:<port>/mcp`,
+so a daemon running on another machine can be added to your agent as a plain
+remote MCP server URL — no local binary needed.
+
+On the remote machine, start the daemon bound to a non-loopback address
+(a token is strongly recommended; without one the bridge only logs a warning
+and anyone on the network can reach the connected pages' tools):
+
+```bash
+mcp-page-bridge --host 0.0.0.0 --port 8787 --token <secret>
+```
+
+Then add the URL to your agent. For opencode:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "mcp-page-bridge": {
+      "type": "remote",
+      "url": "http://192.168.1.50:8787/mcp",
+      "headers": { "Authorization": "Bearer <secret>" },
+      "enabled": true
+    }
+  }
+}
+```
+
+For Claude Code:
+
+```bash
+claude mcp add --transport http mcp-page-bridge http://192.168.1.50:8787/mcp \
+  --header "Authorization: Bearer <secret>"
+```
+
+For other agents, any of these carries the token:
+
+- `Authorization: Bearer <secret>` header
+- `x-mcp-page-bridge-token: <secret>` header
+- `?token=<secret>` query parameter (`http://192.168.1.50:8787/mcp?token=<secret>`)
+
+**Alternative: stdio proxy to a remote daemon.** If your agent only supports
+stdio servers, run the binary locally pointed at the remote host — it probes
+`host:port`, finds the running daemon, and acts as a thin stdio↔WebSocket
+proxy instead of spawning a new one:
+
+```json
+{
+  "mcpServers": {
+    "mcp-page-bridge": {
+      "command": "npx",
+      "args": ["-y", "mcp-page-bridge", "--host", "192.168.1.50", "--port", "8787", "--token", "<secret>"]
+    }
+  }
+}
+```
+
+The flags can also be supplied as `MCP_PAGE_BRIDGE_HOST`,
+`MCP_PAGE_BRIDGE_PORT`, and `MCP_PAGE_BRIDGE_TOKEN` environment variables.
+
+Notes:
+
+- The same applies on a single machine: if a daemon is already listening on
+  the port, a second one is never spawned — every agent connects to it. The
+  local daemon is reachable at `http://127.0.0.1:8787/mcp` too.
+- The extension popup on the remote browser needs the same host/IP + token.
+- Traffic is plain `http://`/`ws://` — use a token and a trusted network (or
+  an SSH tunnel / reverse proxy with TLS). See
+  [DETAILS.md](DETAILS.md#security) for the security notes.
+
+</details>
+
 ### 3. Use it
 
 1. Start your agent session. The agent should spawn `mcp-page-bridge` from the MCP config.
