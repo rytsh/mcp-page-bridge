@@ -11,7 +11,7 @@ import (
 // Overridden at build time via:
 //
 //	-ldflags "-X github.com/rytsh/mcp-page-bridge/internal/protocol.Version=v0.1.8"
-var Version = "0.2.1"
+var Version = "0.2.2"
 
 const (
 	// WSSubprotocol is negotiated between the browser client and the bridge.
