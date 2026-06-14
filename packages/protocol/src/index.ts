@@ -4,7 +4,7 @@
  * bundled into a service worker / content script as well as Node.
  */
 
-export const MCP_PAGE_BRIDGE_VERSION = "0.2.2";
+export const MCP_PAGE_BRIDGE_VERSION = "0.2.3";
 
 /** WebSocket subprotocol negotiated between the browser client and the bridge. */
 export const WS_SUBPROTOCOL = "mcp";
