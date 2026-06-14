@@ -136,19 +136,20 @@ Env: `MCP_PAGE_BRIDGE_PORT`, `MCP_PAGE_BRIDGE_TOKEN`, `MCP_PAGE_BRIDGE_HOST`,
 
 ### Per-tab bridges, profiles, and tab groups
 
-The extension keeps a small list of **bridge profiles** — one per unique
-`(host, port, token)` triple. Saving settings that point at an
-already-known daemon reuses its profile automatically, so tabs aimed at the
-same daemon are grouped together without any bookkeeping. The popup shows the
-profiles in a **Recent** dropdown (most recently used first, capped at 8 with
-LRU eviction; profiles in use are never evicted).
+A **bridge** is just a `(host, port, token, secure, profileKey)` tuple. The
+extension keeps a small list of these, deduped on that tuple, so two tabs with
+the identical config automatically share one bridge (and one tab group). The
+popup shows them in a **Bridge** dropdown (most recently used first, capped at 8
+with LRU eviction; bridges in use are never evicted). Token-protected bridges
+are marked with 🔑 and profile-scoped ones with 👤 (the secrets are never shown).
 
-By default every tab follows the **global default profile**. Turn on **"Use a
-custom bridge for this tab"** in the popup to pin the active tab to a different
-daemon — e.g. tab A on `:8787` for one agent and tab B on `:8788` for another.
-Pins live for the browser session (and the tab's lifetime); changing a bridge
-bounces only the affected tabs' sockets. The opt-in **"Browser control"**
-provider always connects to the default profile.
+The bridge is **per-tab and automatic** — there is no "custom bridge" toggle.
+Whatever you set in the popup (host/port/token/secure/profile key) becomes the
+active tab's bridge; if it differs from another tab's, they are simply different
+bridges. The most recently configured bridge is the one **new/unconfigured tabs
+inherit**, so the common "one daemon for everything" case needs no per-tab
+setup. Changing a tab's bridge bounces only that tab's sockets. The opt-in
+**"Browser control"** provider connects on the most-recent (default) bridge.
 
 The optional **"Group tabs by bridge"** switch (off by default) mirrors the
 grouping visually: enabled tabs are placed into Chrome tab groups named

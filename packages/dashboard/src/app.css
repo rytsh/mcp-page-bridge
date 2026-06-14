@@ -167,6 +167,16 @@ h1 { margin: 1px 0 0; font-size: clamp(22px, 3vw, 32px); line-height: 1; letter-
   font-size: 13px;
 }
 .ghost-btn:hover { border-color: var(--line-strong); color: var(--fg); }
+.link-btn {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--brand);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
 .stats {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -359,6 +369,7 @@ pre { margin: 0; padding: 12px; overflow: auto; border-top: 1px solid var(--line
   text-align: center;
 }
 .empty.small { min-height: 96px; border: 1px dashed var(--line); border-radius: 5px; background: var(--panel-2); }
+.empty p { margin: 0; max-width: 46ch; line-height: 1.5; }
 .placeholder { color: var(--muted); }
 code { border: 1px solid var(--line); background: var(--panel-2); padding: 1px 5px; border-radius: 3px; font-family: var(--mono); }
 .search {

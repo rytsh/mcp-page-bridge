@@ -233,7 +233,7 @@
 
     <div id="settings" class="settings">
       <div class="field" id="recentRow" style="display: none">
-        <label for="recentServers">Recent</label>
+        <label for="recentServers">Bridge</label>
         <select id="recentServers"></select>
       </div>
       <div class="field">
@@ -252,15 +252,14 @@
         <label for="profileKey">Profile key</label>
         <input id="profileKey" type="password" placeholder="(optional · only your tabs)" autocomplete="off" />
       </div>
+      <p class="muted" style="margin-top: 0">
+        Part of the bridge identity: only agents using this same key see these
+        tabs. Tabs sharing it are grouped together.
+      </p>
       <label class="switch-row" style="margin-top: 0">
         <span>Secure connection (TLS / wss)</span>
         <input id="secure" type="checkbox" />
       </label>
-      <label class="switch-row" style="margin-top: 0">
-        <span>Use a custom bridge for this tab</span>
-        <input id="tabBridge" type="checkbox" />
-      </label>
-      <button id="saveSettings" class="full">Save settings</button>
     </div>
 
     <div class="row">

@@ -1093,7 +1093,6 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
         token: effective.token,
         secure: effective.secure,
         profileKey: effective.profileKey,
-        tabBridge: tabBridgeOverrides.has(tabId),
         profiles: sortProfiles(bridgeProfiles).map((p) => ({
           id: p.id,
           host: p.host,
@@ -1293,30 +1292,7 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
     }
 
     if (req?.type === "setSettings") {
-      const prevDefault = defaultBridgeProfile();
-      // Bridge fields are optional: the popup omits them while a per-tab
-      // custom bridge is active so toolset toggles don't clobber the default.
-      if (
-        req.host !== undefined ||
-        req.port !== undefined ||
-        req.token !== undefined ||
-        req.secure !== undefined ||
-        req.profileKey !== undefined
-      ) {
-        const result = upsertProfile(
-          bridgeProfiles,
-          {
-            host: req.host as string | undefined,
-            port: req.port as number | undefined,
-            token: req.token as string | undefined,
-            secure: req.secure === true,
-            profileKey: req.profileKey as string | undefined,
-          },
-          inUseProfileIds(),
-        );
-        bridgeProfiles = result.profiles;
-        defaultProfileId = result.profile.id;
-      }
+      // Global toolset flags only — the bridge identity is per-tab (setTabBridge).
       browserControl = !!req.browserControl;
       const prevCoreTools = coreTools;
       const prevDesignTools = designTools;
@@ -1327,18 +1303,10 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
       automationTools = !!req.automationTools;
       cdpTools = !!req.cdpTools && (await hasDebuggerPermission());
       if (req.tabGroups !== undefined) tabGroupsEnabled = !!req.tabGroups;
-      await chrome.storage.local.set({ bridgeProfiles, defaultProfileId, browserControl, coreTools, designTools, automationTools, cdpTools, tabGroups: tabGroupsEnabled });
+      await chrome.storage.local.set({ browserControl, coreTools, designTools, automationTools, cdpTools, tabGroups: tabGroupsEnabled });
       if (browserControl) browserProvider.restart();
       else browserProvider.stop();
       if (prevCdpTools && !cdpTools) await detachAllCdp();
-      // When the default bridge changed, bounce only the tabs that follow the
-      // default — tabs pinned to their own profile keep their connection.
-      const newDefault = defaultBridgeProfile();
-      if (!sameBridge(prevDefault, newDefault)) {
-        for (const state of tabs.values()) {
-          if (!tabBridgeOverrides.has(state.tabId)) bounceTabSockets(state);
-        }
-      }
       // Re-apply opt-in toolset settings to already-enabled tabs so the
       // built-in catalog updates live (the page rebuilds its embedded server).
       if (coreTools !== prevCoreTools || designTools !== prevDesignTools || automationTools !== prevAutomationTools || cdpTools !== prevCdpTools) {
@@ -1347,39 +1315,37 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
         }
       }
       void syncTabGroups();
-      sendResponse({ ok: true, host: newDefault.host, port: newDefault.port, hasToken: !!newDefault.token, secure: newDefault.secure, browserControl, coreTools, designTools, automationTools, cdpTools, tabGroups: tabGroupsEnabled });
+      sendResponse({ ok: true, browserControl, coreTools, designTools, automationTools, cdpTools, tabGroups: tabGroupsEnabled });
       return;
     }
 
     if (req?.type === "setTabBridge") {
-      // Pin (or unpin) one tab to its own bridge profile. The profile is
-      // auto-grouped: an existing (host, port, token) triple is reused.
+      // Set THIS tab's bridge. A bridge is just (host, port, token, secure,
+      // profileKey); identical configs auto-group (one profile). The most
+      // recently configured bridge also becomes the default new tabs inherit.
       const tabId = req.tabId as number;
       const before = bridgeConfigFor(tabId);
-      if (req.enabled) {
-        const result = upsertProfile(
-          bridgeProfiles,
-          {
-            host: req.host as string | undefined,
-            port: req.port as number | undefined,
-            token: req.token as string | undefined,
-            secure: req.secure === true,
-            profileKey: req.profileKey as string | undefined,
-          },
-          inUseProfileIds(),
-        );
-        bridgeProfiles = result.profiles;
-        tabBridgeOverrides.set(tabId, result.profile.id);
-        await persistProfiles();
-      } else {
-        tabBridgeOverrides.delete(tabId);
-      }
+      const result = upsertProfile(
+        bridgeProfiles,
+        {
+          host: req.host as string | undefined,
+          port: req.port as number | undefined,
+          token: req.token as string | undefined,
+          secure: req.secure === true,
+          profileKey: req.profileKey as string | undefined,
+        },
+        inUseProfileIds(),
+      );
+      bridgeProfiles = result.profiles;
+      tabBridgeOverrides.set(tabId, result.profile.id);
+      defaultProfileId = result.profile.id; // new/unconfigured tabs inherit this
+      await persistProfiles();
       await persistTabOverrides();
       const after = bridgeConfigFor(tabId);
       const state = tabs.get(tabId);
       if (state && !sameBridge(before, after)) bounceTabSockets(state);
       void syncTabGroups();
-      sendResponse({ ok: true, host: after.host, port: after.port, hasToken: !!after.token, secure: after.secure, tabBridge: tabBridgeOverrides.has(tabId) });
+      sendResponse({ ok: true, host: after.host, port: after.port, hasToken: !!after.token, secure: after.secure, profileKey: after.profileKey });
       return;
     }
 

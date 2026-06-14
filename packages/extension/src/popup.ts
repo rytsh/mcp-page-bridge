@@ -28,8 +28,6 @@ interface Status {
   profileKey?: string;
   /** Bridge is dialed with wss:// (TLS). */
   secure?: boolean;
-  /** True when this tab is pinned to its own bridge profile. */
-  tabBridge?: boolean;
   profiles?: ProfileStatus[];
   activeProfileId?: string;
   tabGroups?: boolean;
@@ -92,6 +90,7 @@ function setSettingsInput(id: "host" | "port" | "token" | "profileKey", value: s
 function profileOptionLabel(profile: ProfileStatus): string {
   let label = `${profile.secure ? "wss://" : ""}${profile.host}:${profile.port}`;
   if (profile.token) label += " \u{1F511}"; // key emoji marks token-protected bridges
+  if (profile.profileKey) label += " \u{1F464}"; // bust = profile-scoped (per-user) bridge
   if (profile.isDefault) label += " · default";
   if (profile.tabs > 0) label += ` · ${profile.tabs} tab${profile.tabs === 1 ? "" : "s"}`;
   return label;
@@ -132,12 +131,11 @@ function renderBridgeSummary(status: Status): void {
   }
   const active = (status.profiles ?? []).find((p) => p.id === status.activeProfileId);
   const tabCount = active?.tabs ?? 0;
-  const kind = status.tabBridge ? "custom for this tab" : "default";
-  const profile = status.profileKey ? "profile ✓ (isolated)" : "no profile (default/shared)";
+  const profile = status.profileKey ? "profile ✓ (isolated)" : "no profile (shared)";
   summary.style.display = "";
   summary.textContent =
-    `Bridge: ${status.secure ? "wss://" : ""}${status.host ?? "127.0.0.1"}:${status.port} (${kind}) — ${profile}` +
-    (tabCount > 1 ? ` · ${tabCount} tabs on this bridge` : "");
+    `Bridge: ${status.secure ? "wss://" : ""}${status.host ?? "127.0.0.1"}:${status.port} — ${profile}` +
+    (tabCount > 1 ? ` · ${tabCount} tabs here` : "");
 }
 
 async function activeTabId(): Promise<number | undefined> {
@@ -163,7 +161,6 @@ function render(status: Status): void {
   setSettingsInput("token", status.token ?? "");
   setSettingsInput("profileKey", status.profileKey ?? "");
   if (!settingsDirty) el<HTMLInputElement>("secure").checked = !!status.secure;
-  if (!settingsDirty) el<HTMLInputElement>("tabBridge").checked = !!status.tabBridge;
   renderRecentServers(status);
   renderBridgeSummary(status);
   el<HTMLInputElement>("tabGroups").checked = !!status.tabGroups;
@@ -280,57 +277,61 @@ async function main(): Promise<void> {
     await refresh();
   });
 
-  async function saveSettings(): Promise<void> {
-    const host = el<HTMLInputElement>("host").value.trim() || "127.0.0.1";
-    const port = Number(el<HTMLInputElement>("port").value) || 8787;
-    const token = el<HTMLInputElement>("token").value.trim();
-    const profileKey = el<HTMLInputElement>("profileKey").value.trim();
-    const secure = el<HTMLInputElement>("secure").checked;
-    const tabBridge = el<HTMLInputElement>("tabBridge").checked;
-    const tabGroups = el<HTMLInputElement>("tabGroups").checked;
+  function readBridge(): { host: string; port: number; token: string; profileKey: string; secure: boolean } {
+    return {
+      host: el<HTMLInputElement>("host").value.trim() || "127.0.0.1",
+      port: Number(el<HTMLInputElement>("port").value) || 8787,
+      token: el<HTMLInputElement>("token").value.trim(),
+      profileKey: el<HTMLInputElement>("profileKey").value.trim(),
+      secure: el<HTMLInputElement>("secure").checked,
+    };
+  }
+
+  async function readFlags(): Promise<Record<string, boolean>> {
     const browserControl = el<HTMLInputElement>("browserControl").checked;
     const coreTools = el<HTMLInputElement>("coreTools").checked;
     const designTools = el<HTMLInputElement>("designTools").checked;
     const automationTools = el<HTMLInputElement>("automationTools").checked;
+    const tabGroups = el<HTMLInputElement>("tabGroups").checked;
     let cdpTools = el<HTMLInputElement>("cdpTools").checked;
     if (cdpTools && !(await ensureDebuggerPermission())) {
       cdpTools = false;
       el<HTMLInputElement>("cdpTools").checked = false;
       el<HTMLParagraphElement>("cdpHint").textContent = "Debugger permission was not granted; Advanced CDP tools stayed off.";
     }
+    return { browserControl, coreTools, designTools, automationTools, cdpTools, tabGroups };
+  }
 
-    const flags = { browserControl, coreTools, designTools, automationTools, cdpTools, tabGroups };
-    if (tabBridge) {
-      // Pin this tab to its own bridge; flags stay global, the default bridge
-      // is untouched (setSettings without host/port/token keeps it as-is).
-      await chrome.runtime.sendMessage({ type: "setTabBridge", tabId, enabled: true, host, port, token, profileKey, secure });
-      await chrome.runtime.sendMessage({ type: "setSettings", ...flags });
-    } else {
-      // Back on (and editing) the global default bridge.
-      await chrome.runtime.sendMessage({ type: "setTabBridge", tabId, enabled: false });
-      await chrome.runtime.sendMessage({ type: "setSettings", ...flags, host, port, token, profileKey, secure });
-    }
-    // Persisted globally / per tab in the service worker; safe to let render()
-    // own the inputs again.
+  // The bridge identity (host, port, token, secure, profileKey) is per-tab.
+  // Identical configs auto-group into one bridge; the most recent one becomes
+  // the default new tabs inherit. No manual "custom bridge" toggle needed.
+  async function saveBridge(): Promise<void> {
+    await chrome.runtime.sendMessage({ type: "setTabBridge", tabId, ...readBridge() });
     settingsDirty = false;
     await refresh();
   }
 
+  // Toolset flags are global (not tied to a tab or bridge).
+  async function saveFlags(): Promise<void> {
+    await chrome.runtime.sendMessage({ type: "setSettings", ...(await readFlags()) });
+    await refresh();
+  }
+
   // Track edits so the periodic refresh leaves the inputs alone, and save on
-  // Enter or blur so a typed host/port/token sticks without hunting for Save.
+  // Enter or blur so a typed host/port/token/profile sticks automatically.
   for (const id of ["host", "port", "token", "profileKey"] as const) {
     const input = el<HTMLInputElement>(id);
     input.addEventListener("input", () => {
       settingsDirty = true;
     });
-    input.addEventListener("change", () => void saveSettings());
+    input.addEventListener("change", () => void saveBridge());
     input.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") void saveSettings();
+      if (event.key === "Enter") void saveBridge();
     });
   }
 
-  // Recent servers: picking a profile fills the fields and saves through the
-  // same path (global default, or this tab's bridge when the pin is on).
+  // Bridge dropdown: picking a saved bridge fills the fields and applies it to
+  // this tab. Identical bridges are one entry; profiled ones are marked.
   el<HTMLSelectElement>("recentServers").addEventListener("change", () => {
     const profile = knownProfiles.find((p) => p.id === el<HTMLSelectElement>("recentServers").value);
     if (!profile) return;
@@ -340,37 +341,21 @@ async function main(): Promise<void> {
     el<HTMLInputElement>("token").value = profile.token;
     el<HTMLInputElement>("profileKey").value = profile.profileKey;
     el<HTMLInputElement>("secure").checked = !!profile.secure;
-    void saveSettings();
+    void saveBridge();
   });
 
-  // Bridge identity checkbox: editing it makes the settings dirty (it is part
-  // of the host/port/token/secure tuple), then saves through the same path.
+  // Secure is part of the bridge identity.
   el<HTMLInputElement>("secure").addEventListener("change", () => {
     settingsDirty = true;
-    void saveSettings();
+    void saveBridge();
   });
 
-  el<HTMLInputElement>("tabBridge").addEventListener("change", async () => {
-    if (el<HTMLInputElement>("tabBridge").checked) {
-      // Pin the tab to whatever is currently in the fields.
-      settingsDirty = true;
-      await saveSettings();
-      return;
-    }
-    // Unpin only: revert to the global default without writing the tab's old
-    // custom values into the default bridge.
-    await chrome.runtime.sendMessage({ type: "setTabBridge", tabId, enabled: false });
-    settingsDirty = false;
-    await refresh();
-  });
-
-  el<HTMLButtonElement>("saveSettings").addEventListener("click", saveSettings);
-  el<HTMLInputElement>("tabGroups").addEventListener("change", saveSettings);
-  el<HTMLInputElement>("browserControl").addEventListener("change", saveSettings);
-  el<HTMLInputElement>("coreTools").addEventListener("change", saveSettings);
-  el<HTMLInputElement>("designTools").addEventListener("change", saveSettings);
-  el<HTMLInputElement>("automationTools").addEventListener("change", saveSettings);
-  el<HTMLInputElement>("cdpTools").addEventListener("change", saveSettings);
+  el<HTMLInputElement>("tabGroups").addEventListener("change", () => void saveFlags());
+  el<HTMLInputElement>("browserControl").addEventListener("change", () => void saveFlags());
+  el<HTMLInputElement>("coreTools").addEventListener("change", () => void saveFlags());
+  el<HTMLInputElement>("designTools").addEventListener("change", () => void saveFlags());
+  el<HTMLInputElement>("automationTools").addEventListener("change", () => void saveFlags());
+  el<HTMLInputElement>("cdpTools").addEventListener("change", () => void saveFlags());
 
   el<HTMLInputElement>("viewSelection").addEventListener("change", async () => {
     const visible = el<HTMLInputElement>("viewSelection").checked;
@@ -383,9 +368,13 @@ async function main(): Promise<void> {
     const host = rawHost.includes(":") && !rawHost.startsWith("[") ? `[${rawHost}]` : rawHost;
     const port = Number(el<HTMLInputElement>("port").value) || 8787;
     const token = el<HTMLInputElement>("token").value.trim();
+    const profileKey = el<HTMLInputElement>("profileKey").value.trim();
     const scheme = el<HTMLInputElement>("secure").checked ? "https" : "http";
-    const query = token ? `/?token=${encodeURIComponent(token)}` : "/";
-    await chrome.tabs.create({ url: `${scheme}://${host}:${port}${query}` });
+    const params = new URLSearchParams();
+    if (token) params.set("token", token);
+    if (profileKey) params.set("profile", profileKey); // dashboard hashes it locally
+    const query = params.toString();
+    await chrome.tabs.create({ url: `${scheme}://${host}:${port}/${query ? `?${query}` : ""}` });
   });
 
   async function startPicker(append: boolean): Promise<void> {

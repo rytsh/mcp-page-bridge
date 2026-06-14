@@ -308,7 +308,16 @@
         {:else if !data.providers.length}
           <div class="card">
             <div class="empty">
-              No browsers connected yet.<br />Enable the mcp-page-bridge extension on a tab.
+              {#if appliedProfile.trim()}
+                <p>
+                  No tabs in this partition. A tab only shows here when its
+                  <strong>Profile key</strong> in the extension popup matches this one exactly.
+                  If you didn't set a profile key on the tab, it's in the default partition —
+                  <button class="link-btn" type="button" onclick={logout}>view the default</button>.
+                </p>
+              {:else}
+                <p>No browsers connected yet. Enable the mcp-page-bridge extension on a tab.</p>
+              {/if}
             </div>
           </div>
         {:else if !visibleProviders.length}

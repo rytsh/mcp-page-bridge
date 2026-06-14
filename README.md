@@ -387,10 +387,11 @@ Use **Shutdown bridge** there when you want to stop the background daemon.
 > extension popup. A token is strongly recommended for any non-loopback bind.
 > See [DETAILS.md](DETAILS.md) for the security notes.
 
-> **Multiple daemons?** Each tab can use its own bridge: enable **"Use a
-> custom bridge for this tab"** in the popup (with a **Recent** servers
-> dropdown for known daemons), and optionally **"Group tabs by bridge"** to
-> mirror it as Chrome tab groups. See
+> **Multiple daemons?** Each tab's bridge is just its
+> `(host, port, token, secure, profile key)` — set it in the popup and tabs with
+> the same config auto-group; new tabs inherit the most recent. Pick a known one
+> from the **Bridge** dropdown, and optionally enable **"Group tabs by bridge"**
+> to mirror it as Chrome tab groups. See
 > [DETAILS.md](DETAILS.md#per-tab-bridges-profiles-and-tab-groups).
 
 ## Expose your page's own tools — `window.mcp`
