@@ -17,6 +17,7 @@ import {
 } from "mcp-page-bridge-protocol";
 import { BrowserProvider } from "./browser-provider.js";
 import {
+  hashProfile,
   parseProfiles,
   profileLabel,
   sameBridge,
@@ -98,9 +99,12 @@ function urlHost(host: string): string {
   return h.includes(":") && !h.startsWith("[") ? `[${h}]` : h;
 }
 
-function wsUrl(cfg: BridgeConfig, meta: Record<string, string | number | undefined> = {}): string {
+async function wsUrl(cfg: BridgeConfig, meta: Record<string, string | number | undefined> = {}): Promise<string> {
   const url = new URL(`${cfg.secure ? "wss" : "ws"}://${urlHost(cfg.host)}:${cfg.port}`);
   if (cfg.token) url.searchParams.set("token", cfg.token);
+  // The profile secret is hashed locally; only the digest is sent.
+  const profile = await hashProfile(cfg.profileKey);
+  if (profile) url.searchParams.set("profile", profile);
   for (const [key, value] of Object.entries(meta)) {
     if (value !== undefined) url.searchParams.set(key, String(value));
   }
@@ -570,45 +574,58 @@ function connectSocket(state: TabState, providerId: string): void {
   const entry = state.sockets.get(providerId);
   if (!entry || !entry.wantOpen || entry.ws) return;
 
-  let ws: WebSocket;
-  try {
-    ws = new WebSocket(wsUrl(bridgeConfigFor(state.tabId), { tabId: state.tabId, providerId }), "mcp");
-  } catch {
-    scheduleReconnect(state, providerId);
-    return;
-  }
-  entry.ws = ws;
-
-  ws.addEventListener("open", () => {
-    entry.attempts = 0;
-    for (const data of entry.outbuf) ws.send(data);
-    entry.outbuf.length = 0;
-  });
-  ws.addEventListener("message", (ev: MessageEvent) => {
-    const raw = typeof ev.data === "string" ? ev.data : "";
-    let payload: unknown;
+  void (async () => {
+    let url: string;
     try {
-      payload = JSON.parse(raw);
+      url = await wsUrl(bridgeConfigFor(state.tabId), { tabId: state.tabId, providerId });
     } catch {
+      scheduleReconnect(state, providerId);
       return;
     }
-    if (isDashboardRpc(payload)) {
-      void handleDashboardRpc(state, ws, payload);
+    // The async hash leaves a gap; re-validate before claiming the socket slot
+    // so a concurrent dial/teardown isn't clobbered.
+    if (state.sockets.get(providerId) !== entry || !entry.wantOpen || entry.ws) return;
+
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(url, "mcp");
+    } catch {
+      scheduleReconnect(state, providerId);
       return;
     }
-    downRpc(state, providerId, payload);
-  });
-  ws.addEventListener("close", () => {
-    entry.ws = undefined;
-    // The bridge re-runs `initialize` on the next socket, so any backlog queued
-    // against this dead session is stale; drop it to avoid replaying old RPCs
-    // (responses to defunct request ids, half-sent batches) onto a fresh session.
-    entry.outbuf.length = 0;
-    if (entry.wantOpen) scheduleReconnect(state, providerId); // bridge down/restarting
-  });
-  ws.addEventListener("error", () => {
-    // 'close' fires next; reconnect handled there.
-  });
+    entry.ws = ws;
+
+    ws.addEventListener("open", () => {
+      entry.attempts = 0;
+      for (const data of entry.outbuf) ws.send(data);
+      entry.outbuf.length = 0;
+    });
+    ws.addEventListener("message", (ev: MessageEvent) => {
+      const raw = typeof ev.data === "string" ? ev.data : "";
+      let payload: unknown;
+      try {
+        payload = JSON.parse(raw);
+      } catch {
+        return;
+      }
+      if (isDashboardRpc(payload)) {
+        void handleDashboardRpc(state, ws, payload);
+        return;
+      }
+      downRpc(state, providerId, payload);
+    });
+    ws.addEventListener("close", () => {
+      entry.ws = undefined;
+      // The bridge re-runs `initialize` on the next socket, so any backlog queued
+      // against this dead session is stale; drop it to avoid replaying old RPCs
+      // (responses to defunct request ids, half-sent batches) onto a fresh session.
+      entry.outbuf.length = 0;
+      if (entry.wantOpen) scheduleReconnect(state, providerId); // bridge down/restarting
+    });
+    ws.addEventListener("error", () => {
+      // 'close' fires next; reconnect handled there.
+    });
+  })();
 }
 
 function scheduleReconnect(state: TabState, providerId: string): void {
@@ -1075,6 +1092,7 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
         port: effective.port,
         token: effective.token,
         secure: effective.secure,
+        profileKey: effective.profileKey,
         tabBridge: tabBridgeOverrides.has(tabId),
         profiles: sortProfiles(bridgeProfiles).map((p) => ({
           id: p.id,
@@ -1082,6 +1100,7 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
           port: p.port,
           token: p.token,
           secure: p.secure,
+          profileKey: p.profileKey,
           isDefault: p.id === defaultProfileId,
           tabs: tabCounts.get(p.id) ?? 0,
         })),
@@ -1277,7 +1296,13 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
       const prevDefault = defaultBridgeProfile();
       // Bridge fields are optional: the popup omits them while a per-tab
       // custom bridge is active so toolset toggles don't clobber the default.
-      if (req.host !== undefined || req.port !== undefined || req.token !== undefined || req.secure !== undefined) {
+      if (
+        req.host !== undefined ||
+        req.port !== undefined ||
+        req.token !== undefined ||
+        req.secure !== undefined ||
+        req.profileKey !== undefined
+      ) {
         const result = upsertProfile(
           bridgeProfiles,
           {
@@ -1285,6 +1310,7 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
             port: req.port as number | undefined,
             token: req.token as string | undefined,
             secure: req.secure === true,
+            profileKey: req.profileKey as string | undefined,
           },
           inUseProfileIds(),
         );
@@ -1338,6 +1364,7 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
             port: req.port as number | undefined,
             token: req.token as string | undefined,
             secure: req.secure === true,
+            profileKey: req.profileKey as string | undefined,
           },
           inUseProfileIds(),
         );

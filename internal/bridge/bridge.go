@@ -49,6 +49,10 @@ type Options struct {
 	// IdleTimeout > 0 shuts the bridge down after that duration with no
 	// connected providers AND no agent connections.
 	IdleTimeout time.Duration
+	// RequireProfile, when set, rejects any provider or agent that connects
+	// without a profile key (multi-user mode). Off by default so a local
+	// single-user bridge works with zero configuration.
+	RequireProfile bool
 	// OnIdleShutdown is invoked after an idle-triggered shutdown completes.
 	OnIdleShutdown func()
 	Logger         *slog.Logger
@@ -74,6 +78,9 @@ type Bridge struct {
 
 type agentSession struct {
 	peer *mcpwire.Peer
+	// profileKey is the (already hashed) partition this agent connected with.
+	// Empty means the default, unpartitioned partition.
+	profileKey string
 }
 
 // New creates a Bridge. It owns no listener; the HTTP server hands accepted
@@ -138,6 +145,11 @@ func (b *Bridge) HandleWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing or invalid token", http.StatusUnauthorized)
 		return
 	}
+	profileKey := r.URL.Query().Get(protocol.ProfileQueryParam)
+	if b.opts.RequireProfile && profileKey == "" {
+		http.Error(w, "this bridge requires a profile key", http.StatusUnauthorized)
+		return
+	}
 
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		Subprotocols: []string{protocol.WSSubprotocol},
@@ -158,17 +170,17 @@ func (b *Bridge) HandleWS(w http.ResponseWriter, r *http.Request) {
 	conn.SetReadLimit(readLimit)
 
 	if r.URL.Path == "/agent" {
-		b.attachAgent(conn)
+		b.attachAgent(conn, profileKey)
 		return
 	}
-	go b.attachProvider(conn, r.URL)
+	go b.attachProvider(conn, r.URL, profileKey)
 }
 
 // ---- agent sessions ---------------------------------------------------------
 
-func (b *Bridge) attachAgent(conn *websocket.Conn) {
+func (b *Bridge) attachAgent(conn *websocket.Conn, profileKey string) {
 	peer := mcpwire.NewPeer(conn, b.logger)
-	session := &agentSession{peer: peer}
+	session := &agentSession{peer: peer, profileKey: profileKey}
 
 	b.mu.Lock()
 	if b.closed {
@@ -182,7 +194,7 @@ func (b *Bridge) attachAgent(conn *websocket.Conn) {
 	b.mu.Unlock()
 
 	peer.OnRequest(func(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, *mcpwire.RPCError) {
-		return b.handleAgentRequest(ctx, method, params)
+		return b.handleAgentRequest(ctx, session.profileKey, method, params)
 	})
 	peer.OnClose(func() {
 		b.mu.Lock()
@@ -198,22 +210,22 @@ func (b *Bridge) attachAgent(conn *websocket.Conn) {
 
 // handleAgentRequest answers one agent-facing MCP request. It is shared by
 // the WebSocket agent sessions and the Streamable HTTP sessions.
-func (b *Bridge) handleAgentRequest(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, *mcpwire.RPCError) {
+func (b *Bridge) handleAgentRequest(ctx context.Context, profileKey, method string, params json.RawMessage) (json.RawMessage, *mcpwire.RPCError) {
 	switch method {
 	case "initialize":
 		return b.initializeResult(params), nil
 	case "tools/list":
-		return marshalResult(map[string]any{"tools": b.exposedTools()})
+		return marshalResult(map[string]any{"tools": b.exposedTools(profileKey)})
 	case "tools/call":
-		return b.callTool(ctx, params)
+		return b.callTool(ctx, profileKey, params)
 	case "prompts/list":
-		return marshalResult(map[string]any{"prompts": b.exposedPrompts()})
+		return marshalResult(map[string]any{"prompts": b.exposedPrompts(profileKey)})
 	case "prompts/get":
-		return b.getPrompt(ctx, params)
+		return b.getPrompt(ctx, profileKey, params)
 	case "resources/list":
-		return marshalResult(map[string]any{"resources": b.exposedResources()})
+		return marshalResult(map[string]any{"resources": b.exposedResources(profileKey)})
 	case "resources/read":
-		return b.readResource(ctx, params)
+		return b.readResource(ctx, profileKey, params)
 	default:
 		return nil, &mcpwire.RPCError{Code: mcpwire.CodeMethodNotFound, Message: fmt.Sprintf("method not found: %s", method)}
 	}
@@ -284,11 +296,14 @@ func providerContext(p *Provider) string {
 	return ctx
 }
 
-func (b *Bridge) exposedTools() []rawObj {
+func (b *Bridge) exposedTools(profileKey string) []rawObj {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	out := metaTools()
 	for _, p := range b.providers {
+		if p.profileKey != profileKey {
+			continue
+		}
 		ctx := providerContext(p)
 		for _, t := range p.tools {
 			name := objString(t, "name")
@@ -310,11 +325,14 @@ func (b *Bridge) exposedTools() []rawObj {
 	return out
 }
 
-func (b *Bridge) exposedPrompts() []rawObj {
+func (b *Bridge) exposedPrompts(profileKey string) []rawObj {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	out := []rawObj{}
 	for _, p := range b.providers {
+		if p.profileKey != profileKey {
+			continue
+		}
 		ctx := providerContext(p)
 		for _, pr := range p.prompts {
 			name := objString(pr, "name")
@@ -331,12 +349,15 @@ func (b *Bridge) exposedPrompts() []rawObj {
 	return out
 }
 
-func (b *Bridge) exposedResources() []rawObj {
+func (b *Bridge) exposedResources(profileKey string) []rawObj {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	out := []rawObj{}
 	seen := map[string]bool{}
 	for _, p := range b.providers {
+		if p.profileKey != profileKey {
+			continue
+		}
 		for _, r := range p.resources {
 			uri := objString(r, "uri")
 			if seen[uri] {
@@ -357,7 +378,7 @@ func (b *Bridge) exposedResources() []rawObj {
 
 // ---- agent request forwarding ------------------------------------------------
 
-func (b *Bridge) callTool(ctx context.Context, params json.RawMessage) (json.RawMessage, *mcpwire.RPCError) {
+func (b *Bridge) callTool(ctx context.Context, profileKey string, params json.RawMessage) (json.RawMessage, *mcpwire.RPCError) {
 	var req struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -367,14 +388,14 @@ func (b *Bridge) callTool(ctx context.Context, params json.RawMessage) (json.Raw
 	}
 
 	if req.Name == metaListClients {
-		summary, _ := json.MarshalIndent(b.ProviderSummary(), "", "  ")
+		summary, _ := json.MarshalIndent(b.ProviderSummary(profileKey), "", "  ")
 		return marshalResult(map[string]any{
 			"content": []map[string]any{{"type": "text", "text": string(summary)}},
 		})
 	}
 
 	b.mu.Lock()
-	route, ok := b.toolRoutes[req.Name]
+	route, ok := b.toolRoutes[routeKey(profileKey, req.Name)]
 	provider := b.providers[route.providerID]
 	b.mu.Unlock()
 	if !ok || provider == nil {
@@ -400,7 +421,7 @@ func toolError(text string) (json.RawMessage, *mcpwire.RPCError) {
 	})
 }
 
-func (b *Bridge) getPrompt(ctx context.Context, params json.RawMessage) (json.RawMessage, *mcpwire.RPCError) {
+func (b *Bridge) getPrompt(ctx context.Context, profileKey string, params json.RawMessage) (json.RawMessage, *mcpwire.RPCError) {
 	var req struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -410,7 +431,7 @@ func (b *Bridge) getPrompt(ctx context.Context, params json.RawMessage) (json.Ra
 	}
 
 	b.mu.Lock()
-	route, ok := b.promptRoutes[req.Name]
+	route, ok := b.promptRoutes[routeKey(profileKey, req.Name)]
 	provider := b.providers[route.providerID]
 	b.mu.Unlock()
 	if !ok || provider == nil {
@@ -428,7 +449,7 @@ func (b *Bridge) getPrompt(ctx context.Context, params json.RawMessage) (json.Ra
 	return result, nil
 }
 
-func (b *Bridge) readResource(ctx context.Context, params json.RawMessage) (json.RawMessage, *mcpwire.RPCError) {
+func (b *Bridge) readResource(ctx context.Context, profileKey string, params json.RawMessage) (json.RawMessage, *mcpwire.RPCError) {
 	var req struct {
 		URI string `json:"uri"`
 	}
@@ -437,7 +458,7 @@ func (b *Bridge) readResource(ctx context.Context, params json.RawMessage) (json
 	}
 
 	b.mu.Lock()
-	providerID, ok := b.resourceRoutes[req.URI]
+	providerID, ok := b.resourceRoutes[routeKey(profileKey, req.URI)]
 	provider := b.providers[providerID]
 	b.mu.Unlock()
 	if !ok || provider == nil {
@@ -461,16 +482,19 @@ func (b *Bridge) rebuildRoutesLocked() {
 	for _, p := range b.providers {
 		for _, t := range p.tools {
 			name := objString(t, "name")
-			b.toolRoutes[protocol.NamespaceName(p.label, name)] = nameRoute{providerID: p.id, originalName: name}
+			key := routeKey(p.profileKey, protocol.NamespaceName(p.label, name))
+			b.toolRoutes[key] = nameRoute{providerID: p.id, originalName: name}
 		}
 		for _, pr := range p.prompts {
 			name := objString(pr, "name")
-			b.promptRoutes[protocol.NamespaceName(p.label, name)] = nameRoute{providerID: p.id, originalName: name}
+			key := routeKey(p.profileKey, protocol.NamespaceName(p.label, name))
+			b.promptRoutes[key] = nameRoute{providerID: p.id, originalName: name}
 		}
 		for _, r := range p.resources {
 			uri := objString(r, "uri")
-			if _, exists := b.resourceRoutes[uri]; !exists {
-				b.resourceRoutes[uri] = p.id
+			key := routeKey(p.profileKey, uri)
+			if _, exists := b.resourceRoutes[key]; !exists {
+				b.resourceRoutes[key] = p.id
 			}
 		}
 	}
@@ -482,25 +506,30 @@ var listChangedMethods = map[string]string{
 	"resources": "notifications/resources/list_changed",
 }
 
-func (b *Bridge) notifyChanged(kind string) {
+func (b *Bridge) notifyChanged(profileKey, kind string) {
 	b.mu.Lock()
 	b.rebuildRoutesLocked()
 	b.mu.Unlock()
-	b.broadcastNotification(listChangedMethods[kind], nil)
+	b.broadcastNotification(profileKey, listChangedMethods[kind], nil)
 }
 
 // broadcastNotification fans a server-initiated notification out to every
-// agent: WebSocket sessions get it pushed, HTTP sessions get it queued for
-// their SSE stream.
-func (b *Bridge) broadcastNotification(method string, params any) {
+// agent in the given partition (profileKey): WebSocket sessions get it pushed,
+// HTTP sessions get it queued for their SSE stream. Agents in other partitions
+// never observe another partition's activity.
+func (b *Bridge) broadcastNotification(profileKey, method string, params any) {
 	b.mu.Lock()
 	agents := make([]*agentSession, 0, len(b.agents))
 	for a := range b.agents {
-		agents = append(agents, a)
+		if a.profileKey == profileKey {
+			agents = append(agents, a)
+		}
 	}
 	sessions := make([]*HTTPSession, 0, len(b.httpSessions))
 	for _, s := range b.httpSessions {
-		sessions = append(sessions, s)
+		if s.profileKey == profileKey {
+			sessions = append(sessions, s)
+		}
 	}
 	b.mu.Unlock()
 
@@ -526,7 +555,7 @@ func parseRequestMeta(u *url.URL) (tabID *int, providerID string) {
 	return tabID, q.Get("providerId")
 }
 
-func (b *Bridge) attachProvider(conn *websocket.Conn, reqURL *url.URL) {
+func (b *Bridge) attachProvider(conn *websocket.Conn, reqURL *url.URL, profileKey string) {
 	peer := mcpwire.NewPeer(conn, b.logger)
 	peer.Start()
 
@@ -589,6 +618,7 @@ func (b *Bridge) attachProvider(conn *websocket.Conn, reqURL *url.URL) {
 		version:     version,
 		peer:        peer,
 		meta:        meta,
+		profileKey:  profileKey,
 		connectedAt: time.Now(),
 		caps: capabilities{
 			tools:                init.Capabilities.Tools != nil,
@@ -642,9 +672,9 @@ func (b *Bridge) attachProvider(conn *websocket.Conn, reqURL *url.URL) {
 		}
 		b.mu.Unlock()
 		if existed {
-			b.notifyChanged("tools")
-			b.notifyChanged("prompts")
-			b.notifyChanged("resources")
+			b.notifyChanged(provider.profileKey, "tools")
+			b.notifyChanged(provider.profileKey, "prompts")
+			b.notifyChanged(provider.profileKey, "resources")
 		}
 	})
 
@@ -661,7 +691,7 @@ func (b *Bridge) refreshTools(p *Provider) {
 	b.mu.Lock()
 	p.tools = tools
 	b.mu.Unlock()
-	b.notifyChanged("tools")
+	b.notifyChanged(p.profileKey, "tools")
 }
 
 func (b *Bridge) refreshPrompts(p *Provider) {
@@ -672,7 +702,7 @@ func (b *Bridge) refreshPrompts(p *Provider) {
 	b.mu.Lock()
 	p.prompts = prompts
 	b.mu.Unlock()
-	b.notifyChanged("prompts")
+	b.notifyChanged(p.profileKey, "prompts")
 }
 
 func (b *Bridge) refreshResources(p *Provider) {
@@ -683,7 +713,7 @@ func (b *Bridge) refreshResources(p *Provider) {
 	b.mu.Lock()
 	p.resources = resources
 	b.mu.Unlock()
-	b.notifyChanged("resources")
+	b.notifyChanged(p.profileKey, "resources")
 }
 
 func (b *Bridge) fetchCatalog(p *Provider, method, key string) []rawObj {
@@ -713,7 +743,7 @@ func (b *Bridge) forwardLogging(p *Provider, params json.RawMessage) {
 	}
 	clone := cloneObj(obj)
 	setString(clone, "logger", p.label+"/"+logger)
-	b.broadcastNotification("notifications/message", clone)
+	b.broadcastNotification(p.profileKey, "notifications/message", clone)
 }
 
 // ---- public API ------------------------------------------------------------------
@@ -752,12 +782,17 @@ type ProviderSummaryEntry struct {
 	ConnectedAt string            `json:"connectedAt"`
 }
 
-// ProviderSummary lists connected providers with their namespaced catalogs.
-func (b *Bridge) ProviderSummary() []ProviderSummaryEntry {
+// ProviderSummary lists connected providers with their namespaced catalogs,
+// restricted to the given partition (profileKey). Empty profileKey lists the
+// default, unpartitioned providers only.
+func (b *Bridge) ProviderSummary(profileKey string) []ProviderSummaryEntry {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	out := []ProviderSummaryEntry{}
 	for _, p := range b.providers {
+		if p.profileKey != profileKey {
+			continue
+		}
 		entry := ProviderSummaryEntry{
 			Label:       p.label,
 			Name:        p.rawName,
@@ -804,11 +839,13 @@ func (b *Bridge) ProviderSummary() []ProviderSummaryEntry {
 }
 
 // DashboardAction asks a provider's extension to activate or close its tab.
-func (b *Bridge) DashboardAction(label, action string) error {
+// The action is scoped to the given partition (profileKey) so a dashboard for
+// one profile can never act on another profile's tabs.
+func (b *Bridge) DashboardAction(label, action, profileKey string) error {
 	b.mu.Lock()
 	var provider *Provider
 	for _, p := range b.providers {
-		if p.label == label {
+		if p.profileKey == profileKey && p.label == label {
 			provider = p
 			break
 		}
@@ -845,6 +882,10 @@ func (e *NoTabError) Error() string { return "provider is not attached to a brow
 
 // HasToken reports whether a shared token is required.
 func (b *Bridge) HasToken() bool { return b.opts.Token != "" }
+
+// RequiresProfile reports whether the bridge rejects connections without a
+// profile key (multi-user mode).
+func (b *Bridge) RequiresProfile() bool { return b.opts.RequireProfile }
 
 // TokenMatches checks a presented token.
 func (b *Bridge) TokenMatches(token string) bool { return token == b.opts.Token }

@@ -3,6 +3,8 @@
 package protocol
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"regexp"
 	"strings"
 )
@@ -32,6 +34,20 @@ const (
 
 	// TokenHeader carries the shared token on HTTP API requests when set.
 	TokenHeader = "x-mcp-page-bridge-token"
+
+	// ProfileQueryParam carries the (already hashed) profile partition key on
+	// WebSocket connects and dashboard/API requests.
+	ProfileQueryParam = "profile"
+
+	// ProfileHeader carries the (already hashed) profile partition key on
+	// Streamable HTTP (/mcp) requests for clients that connect by URL.
+	ProfileHeader = "x-mcp-page-bridge-profile"
+
+	// ProfileHashPrefix is the domain-separation prefix mixed into the profile
+	// secret before hashing. It keeps the resulting digest from matching a bare
+	// SHA-256 of the same password (e.g. a leaked hash database). The extension
+	// (Web Crypto) and the stdio proxy MUST compute the identical value.
+	ProfileHashPrefix = "mcp-page-bridge:profile:v1:"
 
 	// ServiceID is the stable identifier returned by /api/health and
 	// /api/providers so clients can verify a real bridge owns the port.
@@ -69,4 +85,17 @@ func SanitizeLabel(input string) string {
 // NamespaceName builds the agent-facing namespaced tool name.
 func NamespaceName(label, name string) string {
 	return label + NamespaceSep + name
+}
+
+// HashProfile derives the opaque partition key from a profile secret. The
+// secret itself never crosses the wire: clients (the extension and the stdio
+// proxy) hash it locally and send only this digest. An empty secret yields an
+// empty key (the default, unpartitioned bridge). Keep this in sync with the
+// extension's hashProfile() helper.
+func HashProfile(secret string) string {
+	if secret == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(ProfileHashPrefix + secret))
+	return hex.EncodeToString(sum[:])
 }

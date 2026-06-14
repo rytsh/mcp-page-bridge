@@ -35,6 +35,10 @@ type HTTPSession struct {
 	id string
 	b  *Bridge
 
+	// profileKey is the (already hashed) partition this session connected
+	// with. Empty means the default, unpartitioned partition.
+	profileKey string
+
 	events chan json.RawMessage
 	done   chan struct{}
 
@@ -44,15 +48,16 @@ type HTTPSession struct {
 	closed    bool
 }
 
-// OpenHTTPSession registers a new Streamable HTTP agent session. The session
-// counts as an agent connection for idle-shutdown purposes until it is
-// closed (DELETE) or expires.
-func (b *Bridge) OpenHTTPSession() (*HTTPSession, error) {
+// OpenHTTPSession registers a new Streamable HTTP agent session in the given
+// partition (profileKey). The session counts as an agent connection for
+// idle-shutdown purposes until it is closed (DELETE) or expires.
+func (b *Bridge) OpenHTTPSession(profileKey string) (*HTTPSession, error) {
 	s := &HTTPSession{
-		id:     uuid.NewString(),
-		b:      b,
-		events: make(chan json.RawMessage, httpSessionEventBuffer),
-		done:   make(chan struct{}),
+		id:         uuid.NewString(),
+		b:          b,
+		profileKey: profileKey,
+		events:     make(chan json.RawMessage, httpSessionEventBuffer),
+		done:       make(chan struct{}),
 	}
 
 	b.mu.Lock()
@@ -97,7 +102,7 @@ func (s *HTTPSession) HandleMessage(ctx context.Context, msg *mcpwire.Message) *
 	if msg.Method == "ping" {
 		return &mcpwire.Message{JSONRPC: "2.0", ID: msg.ID, Result: mcpwire.EmptyResult}
 	}
-	result, rpcErr := s.b.handleAgentRequest(ctx, msg.Method, msg.Params)
+	result, rpcErr := s.b.handleAgentRequest(ctx, s.profileKey, msg.Method, msg.Params)
 	if rpcErr != nil {
 		return &mcpwire.Message{JSONRPC: "2.0", ID: msg.ID, Error: rpcErr}
 	}

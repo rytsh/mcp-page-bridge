@@ -16,7 +16,7 @@ export class BrowserProvider {
   /** Incremented on every (re)connect/teardown so stale socket events are ignored. */
   private generation = 0;
 
-  constructor(private readonly urlFn: () => string) {}
+  constructor(private readonly urlFn: () => Promise<string>) {}
 
   get active(): boolean {
     return this.want;
@@ -26,7 +26,7 @@ export class BrowserProvider {
     if (this.want) return;
     this.want = true;
     this.attempts = 0;
-    this.connect();
+    void this.connect();
   }
 
   stop(): void {
@@ -40,7 +40,7 @@ export class BrowserProvider {
     if (!this.want) return;
     this.teardown();
     this.attempts = 0;
-    this.connect();
+    void this.connect();
   }
 
   private teardown(): void {
@@ -57,15 +57,25 @@ export class BrowserProvider {
     this.server = undefined;
   }
 
-  private connect(): void {
+  private async connect(): Promise<void> {
     if (!this.want || this.ws) return;
 
     const gen = ++this.generation;
     const isCurrent = (): boolean => this.want && this.generation === gen;
 
+    let url: string;
+    try {
+      url = await this.urlFn();
+    } catch {
+      this.schedule();
+      return;
+    }
+    // The async URL (profile hashing) leaves a gap; re-check before claiming.
+    if (!isCurrent() || this.ws) return;
+
     let ws: WebSocket;
     try {
-      ws = new WebSocket(this.urlFn(), "mcp");
+      ws = new WebSocket(url, "mcp");
     } catch {
       this.schedule();
       return;
@@ -134,6 +144,6 @@ export class BrowserProvider {
     this.attempts += 1;
     const delay = Math.min(500 * 2 ** Math.min(this.attempts, 4), 5000);
     if (this.timer) clearTimeout(this.timer);
-    this.timer = setTimeout(() => this.connect(), delay);
+    this.timer = setTimeout(() => void this.connect(), delay);
   }
 }

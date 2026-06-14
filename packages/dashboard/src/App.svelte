@@ -1,6 +1,18 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { fetchProviders, providerAction, shutdownBridge } from "./lib/api";
+  import {
+    ApiError,
+    clearCredentials,
+    fetchHealth,
+    fetchProviders,
+    providerAction,
+    shutdownBridge,
+    setProfileSecret,
+    setToken,
+    INITIAL_PROFILE,
+    INITIAL_TOKEN,
+    type Health,
+  } from "./lib/api";
   import type { ProvidersResponse, Selected } from "./lib/types";
   import { groupsFor } from "./lib/util";
   import ProviderCard from "./lib/ProviderCard.svelte";
@@ -15,6 +27,69 @@
   let selected = $state<Selected | null>(null);
   let openProviders = $state<Record<string, boolean>>({});
   let openGroups = $state<Record<string, boolean>>({});
+
+  // ---- auth / profile gate ----
+  let health = $state<Health | null>(null);
+  let booting = $state(true);
+  let locked = $state(false);
+  let authError = $state("");
+  // Form fields for the login card (separate from the applied values).
+  let tokenInput = $state(INITIAL_TOKEN);
+  let profileInput = $state(INITIAL_PROFILE);
+  // The credentials currently applied to requests (for the header chip / logout).
+  let appliedProfile = $state(INITIAL_PROFILE);
+  let appliedToken = $state(INITIAL_TOKEN);
+  const hasCredentials = $derived(!!(appliedProfile.trim() || appliedToken.trim()));
+
+  let timer: ReturnType<typeof setInterval> | undefined;
+  function startPolling() {
+    if (timer) return;
+    void tick();
+    timer = setInterval(() => void tick(), 1500);
+  }
+  function stopPolling() {
+    if (timer) clearInterval(timer);
+    timer = undefined;
+  }
+
+  function lock(message = "") {
+    authError = message;
+    locked = true;
+    stopPolling();
+  }
+
+  async function applyCredentials() {
+    setToken(tokenInput.trim());
+    setProfileSecret(profileInput.trim());
+    appliedProfile = profileInput.trim();
+    appliedToken = tokenInput.trim();
+    authError = "";
+    try {
+      const next = await fetchProviders();
+      data = next;
+      online = true;
+      locked = false;
+      startPolling();
+    } catch (error) {
+      online = false;
+      authError =
+        error instanceof ApiError && error.status === 401
+          ? "Invalid token or profile key."
+          : "Could not reach the bridge.";
+    }
+  }
+
+  function logout() {
+    clearCredentials();
+    tokenInput = "";
+    profileInput = "";
+    appliedProfile = "";
+    appliedToken = "";
+    selected = null;
+    online = false;
+    data = { version: "", port: 8787, providers: [] };
+    lock("");
+  }
 
   const totals = $derived({
     providers: data.providers.length,
@@ -47,17 +122,36 @@
       }
       online = true;
       data = next;
-    } catch {
+    } catch (error) {
       online = false;
       selected = null;
       data = { version: "", port: 8787, providers: [] };
+      // The token/profile became invalid (e.g. daemon restarted): re-lock.
+      if (error instanceof ApiError && error.status === 401) {
+        lock("Session expired — re-enter your credentials.");
+      }
     }
   }
 
+  async function boot() {
+    try {
+      health = await fetchHealth();
+    } catch {
+      health = null;
+    }
+    booting = false;
+    const needToken = !!health?.requiresToken && !tokenInput.trim();
+    const needProfile = !!health?.requiresProfile && !profileInput.trim();
+    if (needToken || needProfile) {
+      locked = true;
+      return;
+    }
+    startPolling();
+  }
+
   onMount(() => {
-    void tick();
-    const timer = setInterval(() => void tick(), 1500);
-    return () => clearInterval(timer);
+    void boot();
+    return () => stopPolling();
   });
 
   async function handleAction(label: string, action: "activate" | "close") {
@@ -102,7 +196,9 @@
     <div class="endpoint">
       <span class="chip">v{data.version || "0.0.0"}</span>
       <span class="chip">ws://{location.hostname || "127.0.0.1"}:{data.port}</span>
-      <span class="chip">GET /api/providers</span>
+      <span class="chip" class:profiled={appliedProfile.trim()}>
+        {appliedProfile.trim() ? "partition: profiled" : "partition: default"}
+      </span>
     </div>
   </header>
 
@@ -113,6 +209,15 @@
     </div>
     <div class="status-actions">
       <div class="refresh">auto refresh: 1.5s</div>
+      {#if hasCredentials}
+        <button class="profile-btn" type="button" disabled={booting} onclick={logout} title="Forget the token and profile key">
+          Log out
+        </button>
+      {:else}
+        <button class="profile-btn" type="button" disabled={booting} onclick={() => lock()} title="Enter a profile key / token">
+          Profile…
+        </button>
+      {/if}
       <button
         class="shutdown-btn"
         type="button"
@@ -124,6 +229,53 @@
     </div>
   </div>
 
+  {#if locked}
+    <main class="login">
+      <form
+        class="card login-card"
+        onsubmit={(event) => {
+          event.preventDefault();
+          void applyCredentials();
+        }}
+      >
+        <h2>Unlock the dashboard</h2>
+        <p class="muted">
+          {health?.requiresProfile
+            ? "This bridge is in multi-user mode. Enter your profile key to see only your tabs."
+            : "Enter a profile key to view that partition (leave empty for the default/shared view)."}
+        </p>
+        {#if health?.requiresToken}
+          <label class="login-field">
+            <span>Token</span>
+            <input type="password" autocomplete="off" bind:value={tokenInput} placeholder="shared bridge token" />
+          </label>
+        {/if}
+        <label class="login-field">
+          <span>Profile key</span>
+          <!-- svelte-ignore a11y_autofocus -->
+          <input type="password" autocomplete="off" autofocus bind:value={profileInput} placeholder="your profile secret" />
+        </label>
+        {#if authError}
+          <div class="login-error">{authError}</div>
+        {/if}
+        <div class="login-actions">
+          {#if !health?.requiresProfile}
+            <button
+              type="button"
+              class="ghost-btn"
+              onclick={() => {
+                profileInput = "";
+                void applyCredentials();
+              }}
+            >
+              View default
+            </button>
+          {/if}
+          <button type="submit" class="primary-btn">Open dashboard</button>
+        </div>
+      </form>
+    </main>
+  {:else}
   <section class="stats" aria-label="Connected provider summary">
     <div class="stat"><span>Providers</span><strong>{totals.providers}</strong></div>
     <div class="stat"><span>Tools</span><strong>{totals.tools}</strong></div>
@@ -180,4 +332,5 @@
     </section>
     <DetailPanel {online} {selected} providers={data.providers} />
   </main>
+  {/if}
 </div>

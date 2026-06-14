@@ -27,6 +27,13 @@ type Config struct {
 	Host     string `cfg:"host"      default:"127.0.0.1"`
 	Port     int    `cfg:"port"      default:"8787"`
 	Token    string `cfg:"token"     log:"-"`
+	// Profile is the per-user secret this agent connects with. It partitions
+	// the bridge: the agent only sees browser tabs sharing the same profile.
+	// The secret is hashed locally and never sent in the clear.
+	Profile string `cfg:"profile" log:"-"`
+	// RequireProfile (daemon side) rejects any connection without a profile
+	// key — multi-user mode. Off by default.
+	RequireProfile bool `cfg:"require_profile"`
 	// IdleTimeout is in seconds; 0 disables idle auto-shutdown.
 	IdleTimeout float64 `cfg:"idle_timeout"`
 

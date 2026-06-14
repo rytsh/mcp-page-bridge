@@ -69,6 +69,11 @@ type Provider struct {
 	meta        Meta
 	connectedAt time.Time
 
+	// profileKey is the (already hashed) partition key this provider belongs
+	// to. Empty means the default, unpartitioned partition. Agents only see
+	// providers whose profileKey matches their own.
+	profileKey string
+
 	// catalogs (guarded by Bridge.mu)
 	tools     []rawObj
 	prompts   []rawObj
@@ -78,4 +83,12 @@ type Provider struct {
 type nameRoute struct {
 	providerID   string
 	originalName string
+}
+
+// routeKey namespaces a routing-table key by partition so identical
+// tool/prompt names or resource URIs in different partitions never collide or
+// cross-route. Within a partition the key is unique already (labels are
+// globally reserved).
+func routeKey(profileKey, name string) string {
+	return profileKey + "\x00" + name
 }

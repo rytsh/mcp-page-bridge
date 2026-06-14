@@ -12,6 +12,7 @@ interface ProfileStatus {
   port: number;
   token: string;
   secure: boolean;
+  profileKey: string;
   isDefault: boolean;
   tabs: number;
 }
@@ -23,6 +24,8 @@ interface Status {
   host?: string;
   port: number;
   token: string;
+  /** Per-user profile secret partitioning the bridge (multi-user). */
+  profileKey?: string;
   /** Bridge is dialed with wss:// (TLS). */
   secure?: boolean;
   /** True when this tab is pinned to its own bridge profile. */
@@ -80,7 +83,7 @@ let settingsDirty = false;
 /** Latest profile list from getStatus; backs the recent-servers dropdown. */
 let knownProfiles: ProfileStatus[] = [];
 
-function setSettingsInput(id: "host" | "port" | "token", value: string): void {
+function setSettingsInput(id: "host" | "port" | "token" | "profileKey", value: string): void {
   const input = el<HTMLInputElement>(id);
   if (settingsDirty || document.activeElement === input) return;
   input.value = value;
@@ -130,10 +133,11 @@ function renderBridgeSummary(status: Status): void {
   const active = (status.profiles ?? []).find((p) => p.id === status.activeProfileId);
   const tabCount = active?.tabs ?? 0;
   const kind = status.tabBridge ? "custom for this tab" : "default";
+  const profile = status.profileKey ? "profile ✓ (isolated)" : "no profile (default/shared)";
   summary.style.display = "";
   summary.textContent =
-    `Bridge: ${status.secure ? "wss://" : ""}${status.host ?? "127.0.0.1"}:${status.port} (${kind})` +
-    (tabCount > 1 ? ` — ${tabCount} tabs on this bridge` : "");
+    `Bridge: ${status.secure ? "wss://" : ""}${status.host ?? "127.0.0.1"}:${status.port} (${kind}) — ${profile}` +
+    (tabCount > 1 ? ` · ${tabCount} tabs on this bridge` : "");
 }
 
 async function activeTabId(): Promise<number | undefined> {
@@ -157,6 +161,7 @@ function render(status: Status): void {
   setSettingsInput("host", status.host ?? "127.0.0.1");
   setSettingsInput("port", String(status.port));
   setSettingsInput("token", status.token ?? "");
+  setSettingsInput("profileKey", status.profileKey ?? "");
   if (!settingsDirty) el<HTMLInputElement>("secure").checked = !!status.secure;
   if (!settingsDirty) el<HTMLInputElement>("tabBridge").checked = !!status.tabBridge;
   renderRecentServers(status);
@@ -279,6 +284,7 @@ async function main(): Promise<void> {
     const host = el<HTMLInputElement>("host").value.trim() || "127.0.0.1";
     const port = Number(el<HTMLInputElement>("port").value) || 8787;
     const token = el<HTMLInputElement>("token").value.trim();
+    const profileKey = el<HTMLInputElement>("profileKey").value.trim();
     const secure = el<HTMLInputElement>("secure").checked;
     const tabBridge = el<HTMLInputElement>("tabBridge").checked;
     const tabGroups = el<HTMLInputElement>("tabGroups").checked;
@@ -297,12 +303,12 @@ async function main(): Promise<void> {
     if (tabBridge) {
       // Pin this tab to its own bridge; flags stay global, the default bridge
       // is untouched (setSettings without host/port/token keeps it as-is).
-      await chrome.runtime.sendMessage({ type: "setTabBridge", tabId, enabled: true, host, port, token, secure });
+      await chrome.runtime.sendMessage({ type: "setTabBridge", tabId, enabled: true, host, port, token, profileKey, secure });
       await chrome.runtime.sendMessage({ type: "setSettings", ...flags });
     } else {
       // Back on (and editing) the global default bridge.
       await chrome.runtime.sendMessage({ type: "setTabBridge", tabId, enabled: false });
-      await chrome.runtime.sendMessage({ type: "setSettings", ...flags, host, port, token, secure });
+      await chrome.runtime.sendMessage({ type: "setSettings", ...flags, host, port, token, profileKey, secure });
     }
     // Persisted globally / per tab in the service worker; safe to let render()
     // own the inputs again.
@@ -312,7 +318,7 @@ async function main(): Promise<void> {
 
   // Track edits so the periodic refresh leaves the inputs alone, and save on
   // Enter or blur so a typed host/port/token sticks without hunting for Save.
-  for (const id of ["host", "port", "token"] as const) {
+  for (const id of ["host", "port", "token", "profileKey"] as const) {
     const input = el<HTMLInputElement>(id);
     input.addEventListener("input", () => {
       settingsDirty = true;
@@ -332,6 +338,7 @@ async function main(): Promise<void> {
     el<HTMLInputElement>("host").value = profile.host;
     el<HTMLInputElement>("port").value = String(profile.port);
     el<HTMLInputElement>("token").value = profile.token;
+    el<HTMLInputElement>("profileKey").value = profile.profileKey;
     el<HTMLInputElement>("secure").checked = !!profile.secure;
     void saveSettings();
   });

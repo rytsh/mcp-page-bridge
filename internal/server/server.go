@@ -178,10 +178,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, http.StatusOK, map[string]any{
-		"service":       protocol.ServiceID,
-		"version":       protocol.Version,
-		"requiresToken": s.opts.Token != "",
-		"port":          s.port,
+		"service":         protocol.ServiceID,
+		"version":         protocol.Version,
+		"requiresToken":   s.opts.Token != "",
+		"requiresProfile": s.bridge.RequiresProfile(),
+		"port":            s.port,
 	})
 }
 
@@ -198,7 +199,7 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 		"service":   protocol.ServiceID,
 		"version":   protocol.Version,
 		"port":      s.port,
-		"providers": s.bridge.ProviderSummary(),
+		"providers": s.bridge.ProviderSummary(r.URL.Query().Get(protocol.ProfileQueryParam)),
 	})
 }
 
@@ -240,7 +241,8 @@ func (s *Server) handleProviderAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.bridge.DashboardAction(label, action); err != nil {
+	profile := r.URL.Query().Get(protocol.ProfileQueryParam)
+	if err := s.bridge.DashboardAction(label, action, profile); err != nil {
 		var nf *bridge.NotFoundError
 		var nt *bridge.NoTabError
 		switch {

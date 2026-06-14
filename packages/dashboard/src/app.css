@@ -81,6 +81,10 @@ h1 { margin: 1px 0 0; font-size: clamp(22px, 3vw, 32px); line-height: 1; letter-
   border-radius: 4px;
   padding: 5px 8px;
 }
+.chip.profiled {
+  border-color: #2e9b4e;
+  color: #2e9b4e;
+}
 .status-row {
   display: flex;
   align-items: center;
@@ -106,6 +110,63 @@ h1 { margin: 1px 0 0; font-size: clamp(22px, 3vw, 32px); line-height: 1; letter-
 }
 .shutdown-btn:hover { border-color: var(--brand); }
 .shutdown-btn:disabled { opacity: 0.58; cursor: wait; }
+.profile-btn {
+  appearance: none;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--panel-2);
+  color: var(--fg);
+  padding: 6px 9px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+.profile-btn:hover { border-color: var(--brand); }
+.profile-btn:disabled { opacity: 0.58; cursor: wait; }
+
+/* ---- login / profile gate ---- */
+.login { display: flex; justify-content: center; padding: 32px 0; }
+.login-card { width: 100%; max-width: 420px; padding: 22px; }
+.login-card h2 { margin: 0 0 6px; font-size: 16px; }
+.login-card .muted { margin: 0 0 16px; color: var(--muted); font-size: 13px; }
+.login-field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
+.login-field span { font-size: 12px; color: var(--muted); font-family: var(--mono); }
+.login-field input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--fg);
+  padding: 9px 10px;
+  font-size: 13px;
+}
+.login-field input:focus { outline: none; border-color: var(--line-strong); }
+.login-error { color: var(--brand); font-size: 12px; margin-bottom: 12px; }
+.login-actions { display: flex; gap: 10px; justify-content: flex-end; }
+.primary-btn {
+  appearance: none;
+  border: 1px solid color-mix(in srgb, var(--brand) 42%, var(--line));
+  border-radius: 6px;
+  background: var(--brand-soft);
+  color: var(--brand);
+  padding: 8px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+}
+.primary-btn:hover { border-color: var(--brand); }
+.ghost-btn {
+  appearance: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  padding: 8px 14px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.ghost-btn:hover { border-color: var(--line-strong); color: var(--fg); }
 .stats {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

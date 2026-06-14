@@ -460,7 +460,7 @@ func TestListClientsReportsProviders(t *testing.T) {
 	dialProvider(t, tb, fakeProviderOpts{name: "demo", query: "?tabId=7&providerId=p1", tools: echoTool("eval")})
 	agent := dialAgent(t, tb, "")
 	waitFor(t, "provider registered with tools", func() bool {
-		summary := tb.b.ProviderSummary()
+		summary := tb.b.ProviderSummary("")
 		return len(summary) == 1 && len(summary[0].Tools) == 1
 	})
 
@@ -498,12 +498,12 @@ func TestProviderDisconnectRemovesTools(t *testing.T) {
 func TestLabelCollisionDisambiguation(t *testing.T) {
 	tb := startBridge(t, bridge.Options{}, server.Options{})
 	dialProvider(t, tb, fakeProviderOpts{name: "demo", query: "?tabId=1", tools: echoTool("a")})
-	waitFor(t, "first provider", func() bool { return len(tb.b.ProviderSummary()) == 1 })
+	waitFor(t, "first provider", func() bool { return len(tb.b.ProviderSummary("")) == 1 })
 	dialProvider(t, tb, fakeProviderOpts{name: "demo", query: "?tabId=2", tools: echoTool("b")})
-	waitFor(t, "second provider", func() bool { return len(tb.b.ProviderSummary()) == 2 })
+	waitFor(t, "second provider", func() bool { return len(tb.b.ProviderSummary("")) == 2 })
 
 	labels := map[string]bool{}
-	for _, p := range tb.b.ProviderSummary() {
+	for _, p := range tb.b.ProviderSummary("") {
 		labels[p.Label] = true
 	}
 	if !labels["demo"] || !labels["demo-2"] {
@@ -515,26 +515,26 @@ func TestLabelStableAcrossReconnect(t *testing.T) {
 	tb := startBridge(t, bridge.Options{}, server.Options{})
 
 	p1 := dialProvider(t, tb, fakeProviderOpts{name: "demo", query: "?tabId=1&providerId=x", tools: echoTool("a")})
-	waitFor(t, "first provider", func() bool { return len(tb.b.ProviderSummary()) == 1 })
+	waitFor(t, "first provider", func() bool { return len(tb.b.ProviderSummary("")) == 1 })
 	p2 := dialProvider(t, tb, fakeProviderOpts{name: "demo", query: "?tabId=2&providerId=y", tools: echoTool("b")})
-	waitFor(t, "second provider", func() bool { return len(tb.b.ProviderSummary()) == 2 })
+	waitFor(t, "second provider", func() bool { return len(tb.b.ProviderSummary("")) == 2 })
 
 	labelByTab := map[int]string{}
-	for _, p := range tb.b.ProviderSummary() {
+	for _, p := range tb.b.ProviderSummary("") {
 		labelByTab[*p.TabID] = p.Label
 	}
 
 	_ = p1.Close()
 	_ = p2.Close()
-	waitFor(t, "providers gone", func() bool { return len(tb.b.ProviderSummary()) == 0 })
+	waitFor(t, "providers gone", func() bool { return len(tb.b.ProviderSummary("")) == 0 })
 
 	// Reconnect in reverse order; labels must follow the tab identity.
 	dialProvider(t, tb, fakeProviderOpts{name: "demo", query: "?tabId=2&providerId=y", tools: echoTool("b")})
-	waitFor(t, "tab2 back", func() bool { return len(tb.b.ProviderSummary()) == 1 })
+	waitFor(t, "tab2 back", func() bool { return len(tb.b.ProviderSummary("")) == 1 })
 	dialProvider(t, tb, fakeProviderOpts{name: "demo", query: "?tabId=1&providerId=x", tools: echoTool("a")})
-	waitFor(t, "tab1 back", func() bool { return len(tb.b.ProviderSummary()) == 2 })
+	waitFor(t, "tab1 back", func() bool { return len(tb.b.ProviderSummary("")) == 2 })
 
-	for _, p := range tb.b.ProviderSummary() {
+	for _, p := range tb.b.ProviderSummary("") {
 		if labelByTab[*p.TabID] != p.Label {
 			t.Fatalf("label for tab %d changed: was %s now %s", *p.TabID, labelByTab[*p.TabID], p.Label)
 		}

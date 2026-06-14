@@ -13,6 +13,13 @@ export interface BridgeProfile {
   token: string;
   /** Connect with wss:// (the daemon serves TLS). */
   secure: boolean;
+  /**
+   * Per-user profile secret (plaintext, stored locally). It partitions the
+   * bridge: an agent only sees tabs sharing the same profile. The secret is
+   * hashed (hashProfile) before it ever leaves the browser. Empty = the
+   * default, unpartitioned bridge.
+   */
+  profileKey: string;
   lastUsedAt: number;
 }
 
@@ -22,6 +29,8 @@ export interface BridgeConfig {
   token: string;
   /** Connect with wss:// (the daemon serves TLS). */
   secure: boolean;
+  /** Per-user profile secret (plaintext); see BridgeProfile.profileKey. */
+  profileKey: string;
 }
 
 export const MAX_PROFILES = 8;
@@ -35,12 +44,19 @@ export function normalizeBridge(input: Partial<BridgeConfig> | undefined): Bridg
   const port = Number.isInteger(rawPort) && rawPort >= 1 && rawPort <= 65535 ? rawPort : FALLBACK_PORT;
   const token = typeof input?.token === "string" ? input.token.trim() : "";
   const secure = input?.secure === true;
-  return { host, port, token, secure };
+  const profileKey = typeof input?.profileKey === "string" ? input.profileKey.trim() : "";
+  return { host, port, token, secure, profileKey };
 }
 
-/** Two configs identify the same daemon (and therefore the same group). */
+/** Two configs identify the same daemon + partition (and therefore group). */
 export function sameBridge(a: BridgeConfig, b: BridgeConfig): boolean {
-  return a.host === b.host && a.port === b.port && a.token === b.token && a.secure === b.secure;
+  return (
+    a.host === b.host &&
+    a.port === b.port &&
+    a.token === b.token &&
+    a.secure === b.secure &&
+    a.profileKey === b.profileKey
+  );
 }
 
 function newProfileId(): string {
@@ -123,4 +139,24 @@ export function tabGroupColor(profileId: string): (typeof TAB_GROUP_COLORS)[numb
 /** Short human label for a profile (popup dropdown / tab-group title). */
 export function profileLabel(config: BridgeConfig): string {
   return `${config.secure ? "wss://" : ""}${config.host}:${config.port}`;
+}
+
+/**
+ * Domain-separation prefix mixed into the profile secret before hashing. Must
+ * match the Go side (protocol.ProfileHashPrefix) byte-for-byte.
+ */
+export const PROFILE_HASH_PREFIX = "mcp-page-bridge:profile:v1:";
+
+/**
+ * Hash a profile secret into the opaque partition key sent on the wire. The
+ * plaintext secret never leaves the browser. Mirrors Go's
+ * protocol.HashProfile (SHA-256 of PREFIX+secret, lowercase hex). An empty
+ * secret yields "" (the default, unpartitioned bridge).
+ */
+export async function hashProfile(secret: string): Promise<string> {
+  const trimmed = secret.trim();
+  if (!trimmed) return "";
+  const data = new TextEncoder().encode(PROFILE_HASH_PREFIX + trimmed);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }

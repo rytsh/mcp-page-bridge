@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/rytsh/mcp-page-bridge/internal/mcpwire"
+	"github.com/rytsh/mcp-page-bridge/internal/protocol"
 )
 
 const (
@@ -47,6 +48,16 @@ func (s *Server) mcpGate(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	return true
+}
+
+// mcpProfile reads the (already hashed) profile partition key from the
+// x-mcp-page-bridge-profile header or a ?profile= query parameter. Clients
+// hash the secret locally; the bridge only ever sees this opaque digest.
+func mcpProfile(r *http.Request) string {
+	if v := r.Header.Get(protocol.ProfileHeader); v != "" {
+		return v
+	}
+	return r.URL.Query().Get(protocol.ProfileQueryParam)
 }
 
 // mcpTokenOK accepts the shared token via `Authorization: Bearer <token>`,
@@ -88,7 +99,12 @@ func (s *Server) handleMCPPost(w http.ResponseWriter, r *http.Request) {
 
 	// initialize opens a fresh session; everything else needs Mcp-Session-Id.
 	if msg.IsRequest() && msg.Method == "initialize" {
-		session, err := s.bridge.OpenHTTPSession()
+		profile := mcpProfile(r)
+		if s.bridge.RequiresProfile() && profile == "" {
+			s.mcpError(w, http.StatusUnauthorized, codeInvalidRequest, "this bridge requires a profile key")
+			return
+		}
+		session, err := s.bridge.OpenHTTPSession(profile)
 		if err != nil {
 			s.mcpError(w, http.StatusServiceUnavailable, mcpwire.CodeInternalError, err.Error())
 			return

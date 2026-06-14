@@ -209,6 +209,9 @@ type EnsureOptions struct {
 	// Dial is where this process reaches the daemon (host, port, TLS).
 	Dial  Dial
 	Token string
+	// RequireProfile is forwarded to a spawned daemon so it runs in
+	// multi-user mode (rejects connections without a profile key).
+	RequireProfile bool
 	// IdleTimeoutSec > 0 makes the daemon exit after that many idle seconds.
 	IdleTimeoutSec float64
 	// TLSCert/TLSKey are forwarded to a spawned daemon so it serves TLS.
@@ -238,6 +241,9 @@ func Ensure(ctx context.Context, opts EnsureOptions) error {
 	}
 	if opts.IdleTimeoutSec > 0 {
 		args = append(args, "--idle-timeout", strconv.FormatFloat(opts.IdleTimeoutSec, 'f', -1, 64))
+	}
+	if opts.RequireProfile {
+		args = append(args, "--require-profile")
 	}
 
 	cmd := exec.Command(executable, args...)

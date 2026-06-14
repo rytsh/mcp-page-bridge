@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  hashProfile,
   MAX_PROFILES,
   normalizeBridge,
   parseProfiles,
@@ -17,9 +18,9 @@ function profile(host: string, port: number, token = "", lastUsedAt = 0): Bridge
 
 describe("bridge profiles", () => {
   it("normalizes raw input to a canonical config", () => {
-    expect(normalizeBridge({ host: "  10.0.0.5 ", port: 9000, token: " s " })).toEqual({ host: "10.0.0.5", port: 9000, token: "s", secure: false });
-    expect(normalizeBridge({ host: "", port: Number.NaN, token: undefined })).toEqual({ host: "127.0.0.1", port: 8787, token: "", secure: false });
-    expect(normalizeBridge(undefined)).toEqual({ host: "127.0.0.1", port: 8787, token: "", secure: false });
+    expect(normalizeBridge({ host: "  10.0.0.5 ", port: 9000, token: " s ", profileKey: " p " })).toEqual({ host: "10.0.0.5", port: 9000, token: "s", secure: false, profileKey: "p" });
+    expect(normalizeBridge({ host: "", port: Number.NaN, token: undefined })).toEqual({ host: "127.0.0.1", port: 8787, token: "", secure: false, profileKey: "" });
+    expect(normalizeBridge(undefined)).toEqual({ host: "127.0.0.1", port: 8787, token: "", secure: false, profileKey: "" });
     expect(normalizeBridge({ port: 70000 }).port).toBe(8787);
     expect(normalizeBridge({ secure: true }).secure).toBe(true);
   });
@@ -44,6 +45,17 @@ describe("bridge profiles", () => {
     const tls = upsertProfile(plain.profiles, { host: "10.0.0.5", port: 8787, token: "a", secure: true }, new Set(), 200);
     expect(tls.profiles).toHaveLength(2);
     expect(sameBridge(plain.profile, tls.profile)).toBe(false);
+  });
+
+  it("a different profile key is a different group (partition)", () => {
+    const alice = upsertProfile([], { host: "10.0.0.5", port: 8787, token: "a", profileKey: "alice" }, new Set(), 100);
+    const bob = upsertProfile(alice.profiles, { host: "10.0.0.5", port: 8787, token: "a", profileKey: "bob" }, new Set(), 200);
+    expect(bob.profiles).toHaveLength(2);
+    expect(sameBridge(alice.profile, bob.profile)).toBe(false);
+    // Same daemon, same profile key → same group.
+    const aliceAgain = upsertProfile(bob.profiles, { host: "10.0.0.5", port: 8787, token: "a", profileKey: "alice" }, new Set(), 300);
+    expect(aliceAgain.profiles).toHaveLength(2);
+    expect(aliceAgain.profile.id).toBe(alice.profile.id);
   });
 
   it("evicts least-recently-used profiles beyond the cap, sparing in-use ids", () => {
@@ -84,9 +96,20 @@ describe("bridge profiles", () => {
   });
 
   it("derives stable labels and colors", () => {
-    expect(profileLabel({ host: "10.0.0.5", port: 8788, token: "s", secure: false })).toBe("10.0.0.5:8788");
-    expect(profileLabel({ host: "bridge.example.com", port: 443, token: "s", secure: true })).toBe("wss://bridge.example.com:443");
+    expect(profileLabel({ host: "10.0.0.5", port: 8788, token: "s", secure: false, profileKey: "" })).toBe("10.0.0.5:8788");
+    expect(profileLabel({ host: "bridge.example.com", port: 443, token: "s", secure: true, profileKey: "x" })).toBe("wss://bridge.example.com:443");
     const color = tabGroupColor("some-profile-id");
     expect(tabGroupColor("some-profile-id")).toBe(color); // deterministic
+  });
+
+  it("hashes a profile secret matching the Go side, never sending plaintext", async () => {
+    // Must equal protocol.HashProfile("mysecret") in Go (cross-checked vector).
+    expect(await hashProfile("mysecret")).toBe("825d9eb0b5484e0a22a70ec854790e2d8daaa9171edd03b0bfbc98e276f20e94");
+    // Whitespace is trimmed; empty stays empty (default, unpartitioned).
+    expect(await hashProfile("  mysecret  ")).toBe(await hashProfile("mysecret"));
+    expect(await hashProfile("")).toBe("");
+    expect(await hashProfile("   ")).toBe("");
+    // The digest does not contain the plaintext.
+    expect(await hashProfile("mysecret")).not.toContain("mysecret");
   });
 });

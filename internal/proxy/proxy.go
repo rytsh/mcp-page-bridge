@@ -29,6 +29,9 @@ type Options struct {
 	Host  string
 	Port  int
 	Token string
+	// Profile is the per-user secret (plaintext). The proxy hashes it locally
+	// and sends only the digest as the ?profile= partition key.
+	Profile string
 	// Secure dials wss:// instead of ws:// (the daemon serves TLS).
 	Secure bool
 	// TLS optionally customises certificate verification (private CA,
@@ -45,8 +48,15 @@ func Run(ctx context.Context, opts Options) error {
 		scheme = "wss"
 	}
 	target := fmt.Sprintf("%s://%s/agent", scheme, addr)
+	params := url.Values{}
 	if opts.Token != "" {
-		target += "?token=" + url.QueryEscape(opts.Token)
+		params.Set("token", opts.Token)
+	}
+	if hash := protocol.HashProfile(opts.Profile); hash != "" {
+		params.Set(protocol.ProfileQueryParam, hash)
+	}
+	if len(params) > 0 {
+		target += "?" + params.Encode()
 	}
 
 	dialOpts := &websocket.DialOptions{

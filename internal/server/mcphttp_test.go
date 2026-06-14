@@ -87,7 +87,7 @@ func TestMCPHTTPSessionLifecycle(t *testing.T) {
 	tb := startBridge(t, bridge.Options{}, server.Options{})
 	dialProvider(t, tb, fakeProviderOpts{name: "shop", tools: echoTool("getCart")})
 	waitFor(t, "tool registered", func() bool {
-		summary := tb.b.ProviderSummary()
+		summary := tb.b.ProviderSummary("")
 		return len(summary) == 1 && len(summary[0].Tools) == 1
 	})
 

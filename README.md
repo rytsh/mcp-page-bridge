@@ -328,6 +328,46 @@ plain-HTTP bridge works as before.
 
 </details>
 
+### Profiles — multi-user isolation
+
+A **profile key** is a per-user secret that *partitions* a bridge: a browser tab
+shared under key `X` is only visible to an agent that connects with the same key
+`X`. Use it when several people share one daemon (e.g. a remote bridge) and each
+must only see their own tabs.
+
+- **Extension**: set a **Profile key** in the popup (it becomes part of the
+  bridge profile alongside host/port/token). Leave it empty for the normal
+  single-user/local flow.
+- **Agent (stdio)**: pass `--profile <secret>` (or `MCP_PAGE_BRIDGE_PROFILE`).
+- **Agent (remote `/mcp`)**: the secret is hashed locally, so send the *hash* as
+  the `x-mcp-page-bridge-profile` header (or `?profile=<hash>`). Generate it with
+  `mcp-page-bridge profile-hash <secret>`.
+- **Daemon (operator)**: add `--require-profile` to reject any connection without
+  a profile key (true multi-user mode). Off by default so local use needs no
+  configuration.
+- **Dashboard**: under `--require-profile` it locks behind a login — enter your
+  profile key (and token) to see only your tabs. Locally, the **Profile…** button
+  lets you switch partitions on demand.
+
+Security: the profile secret is **hashed in the browser/agent and never sent in
+the clear** — the daemon (and its operator) only ever sees the digest. Matching
+is on the full digest, so other users can't enumerate or reach your tabs. The
+hash is still a bearer credential on the wire, so use `--token` + TLS for any
+remote/shared daemon, and pick a strong secret. Tabs/agents with **no** profile
+form a separate default partition and never see profiled ones (and vice-versa).
+
+```bash
+# operator: shared remote daemon, every connection must carry a profile
+mcp-page-bridge --host 0.0.0.0 --token <secret> --require-profile \
+  --tls-cert /path/fullchain.pem --tls-key /path/privkey.pem
+
+# your agent (stdio proxy): only your tabs
+mcp-page-bridge --host bridge.example.com --port 8787 --token <secret> \
+  --tls --profile "my-strong-passphrase"
+```
+
+See [DETAILS.md](DETAILS.md#profiles-multi-user-isolation) for the full model.
+
 ### 3. Use it
 
 1. Start your agent session. The agent should spawn `mcp-page-bridge` from the MCP config.
