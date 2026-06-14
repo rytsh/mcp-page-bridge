@@ -97,6 +97,12 @@
         flex: 1;
         min-width: 0;
       }
+      .field .reveal {
+        flex: 0 0 auto;
+        padding: 4px 7px;
+        line-height: 1;
+        font-size: 13px;
+      }
       button.full {
         width: 100%;
       }
@@ -246,11 +252,13 @@
       </div>
       <div class="field">
         <label for="token">Token</label>
-        <input id="token" type="text" placeholder="(optional)" />
+        <input id="token" type="password" placeholder="(optional)" autocomplete="off" />
+        <button type="button" class="reveal" data-reveal="token" title="Show / hide" aria-label="Show or hide token">👁</button>
       </div>
       <div class="field">
         <label for="profileKey">Profile key</label>
         <input id="profileKey" type="password" placeholder="(optional · only your tabs)" autocomplete="off" />
+        <button type="button" class="reveal" data-reveal="profileKey" title="Show / hide" aria-label="Show or hide profile key">👁</button>
       </div>
       <p class="muted" style="margin-top: 0">
         Part of the bridge identity: only agents using this same key see these

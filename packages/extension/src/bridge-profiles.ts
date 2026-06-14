@@ -14,10 +14,9 @@ export interface BridgeProfile {
   /** Connect with wss:// (the daemon serves TLS). */
   secure: boolean;
   /**
-   * Per-user profile secret (plaintext, stored locally). It partitions the
-   * bridge: an agent only sees tabs sharing the same profile. The secret is
-   * hashed (hashProfile) before it ever leaves the browser. Empty = the
-   * default, unpartitioned bridge.
+   * Per-user profile secret. It partitions the bridge: an agent only sees tabs
+   * sharing the same profile. Sent raw on connect (like the token); the daemon
+   * hashes it into the partition key. Empty = the default, unpartitioned bridge.
    */
   profileKey: string;
   lastUsedAt: number;
@@ -139,24 +138,4 @@ export function tabGroupColor(profileId: string): (typeof TAB_GROUP_COLORS)[numb
 /** Short human label for a profile (popup dropdown / tab-group title). */
 export function profileLabel(config: BridgeConfig): string {
   return `${config.secure ? "wss://" : ""}${config.host}:${config.port}`;
-}
-
-/**
- * Domain-separation prefix mixed into the profile secret before hashing. Must
- * match the Go side (protocol.ProfileHashPrefix) byte-for-byte.
- */
-export const PROFILE_HASH_PREFIX = "mcp-page-bridge:profile:v1:";
-
-/**
- * Hash a profile secret into the opaque partition key sent on the wire. The
- * plaintext secret never leaves the browser. Mirrors Go's
- * protocol.HashProfile (SHA-256 of PREFIX+secret, lowercase hex). An empty
- * secret yields "" (the default, unpartitioned bridge).
- */
-export async function hashProfile(secret: string): Promise<string> {
-  const trimmed = secret.trim();
-  if (!trimmed) return "";
-  const data = new TextEncoder().encode(PROFILE_HASH_PREFIX + trimmed);
-  const digest = await crypto.subtle.digest("SHA-256", data);
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }

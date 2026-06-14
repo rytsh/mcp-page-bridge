@@ -339,9 +339,9 @@ must only see their own tabs.
   bridge profile alongside host/port/token). Leave it empty for the normal
   single-user/local flow.
 - **Agent (stdio)**: pass `--profile <secret>` (or `MCP_PAGE_BRIDGE_PROFILE`).
-- **Agent (remote `/mcp`)**: the secret is hashed locally, so send the *hash* as
-  the `x-mcp-page-bridge-profile` header (or `?profile=<hash>`). Generate it with
-  `mcp-page-bridge profile-hash <secret>`.
+- **Agent (remote `/mcp`)**: send the secret as the `x-mcp-page-bridge-profile`
+  header or a `?profile=<secret>` query parameter — the same secret value you use
+  everywhere else.
 - **Daemon (operator)**: add `--require-profile` to reject any connection without
   a profile key (true multi-user mode). Off by default so local use needs no
   configuration.
@@ -349,12 +349,13 @@ must only see their own tabs.
   profile key (and token) to see only your tabs. Locally, the **Profile…** button
   lets you switch partitions on demand.
 
-Security: the profile secret is **hashed in the browser/agent and never sent in
-the clear** — the daemon (and its operator) only ever sees the digest. Matching
-is on the full digest, so other users can't enumerate or reach your tabs. The
-hash is still a bearer credential on the wire, so use `--token` + TLS for any
-remote/shared daemon, and pick a strong secret. Tabs/agents with **no** profile
-form a separate default partition and never see profiled ones (and vice-versa).
+Security: the profile secret is sent like the token (the daemon hashes it into an
+opaque partition key), so the **same value works everywhere** — extension, stdio
+proxy, remote `/mcp` URL, and dashboard. Matching is on the full hash, so other
+users can't enumerate or reach your tabs, but the secret is a bearer credential
+on the wire: use `--token` + TLS for any remote/shared daemon and pick a strong
+secret. Tabs/agents with **no** profile form a separate default partition and
+never see profiled ones (and vice-versa).
 
 ```bash
 # operator: shared remote daemon, every connection must carry a profile

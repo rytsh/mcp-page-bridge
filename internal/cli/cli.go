@@ -51,10 +51,8 @@ func Run(ctx context.Context, argv []string) error {
 	switch {
 	case args.command == "stop":
 		return daemon.Stop(ctx, dial, cfg.Token)
-	case args.command == "profile-hash":
-		return runProfileHash(args.positional, cfg.Profile)
 	case args.command != "":
-		return fmt.Errorf("unknown command %q (expected: stop, profile-hash)", args.command)
+		return fmt.Errorf("unknown command %q (expected: stop)", args.command)
 	case args.daemon:
 		return runDaemon(ctx, cfg)
 	default:
@@ -62,7 +60,9 @@ func Run(ctx context.Context, argv []string) error {
 			BindHost:       cfg.Host,
 			Dial:           dial,
 			Token:          cfg.Token,
+			Profile:        cfg.Profile,
 			RequireProfile: cfg.RequireProfile,
+			AllowedHosts:   cfg.AllowedHosts,
 			IdleTimeoutSec: cfg.IdleTimeout,
 			TLSCert:        cfg.TLSCert,
 			TLSKey:         cfg.TLSKey,
@@ -80,19 +80,16 @@ func Run(ctx context.Context, argv []string) error {
 	}
 }
 
-// runProfileHash prints the partition key for a profile secret so it can be
-// pasted into a remote /mcp client's x-mcp-page-bridge-profile header (the
-// stdio proxy and the extension compute it for you).
-func runProfileHash(positional, flagProfile string) error {
-	secret := positional
-	if secret == "" {
-		secret = flagProfile
+// splitList parses a comma-separated flag/env value into trimmed, non-empty
+// entries.
+func splitList(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
 	}
-	if secret == "" {
-		return fmt.Errorf("usage: mcp-page-bridge profile-hash <secret>  (or pass --profile <secret>)")
-	}
-	fmt.Println(protocol.HashProfile(secret))
-	return nil
+	return out
 }
 
 // runDaemon hosts the bridge until ctx is cancelled (signal), an idle timeout
@@ -111,12 +108,13 @@ func runDaemon(ctx context.Context, cfg *config.Config) error {
 	})
 
 	srv, err := server.Start(ctx, b, server.Options{
-		Host:       cfg.Host,
-		Port:       cfg.Port,
-		Token:      cfg.Token,
-		TLSCert:    cfg.TLSCert,
-		TLSKey:     cfg.TLSKey,
-		OnShutdown: into.CtxCancel,
+		Host:         cfg.Host,
+		Port:         cfg.Port,
+		Token:        cfg.Token,
+		AllowedHosts: splitList(cfg.AllowedHosts),
+		TLSCert:      cfg.TLSCert,
+		TLSKey:       cfg.TLSKey,
+		OnShutdown:   into.CtxCancel,
 	})
 	if err != nil {
 		return fmt.Errorf("start bridge server; %w", err)
@@ -154,9 +152,8 @@ func runDaemon(ctx context.Context, cfg *config.Config) error {
 // ---- flag handling -------------------------------------------------------------
 
 type cliArgs struct {
-	command    string
-	positional string
-	daemon     bool
+	command string
+	daemon  bool
 }
 
 // parseArgs reads an optional leading subcommand, then parses flags with the
@@ -178,6 +175,8 @@ func parseArgs(cfg *config.Config, argv []string) (cliArgs, error) {
 		"per-user profile secret; only see tabs sharing it, hashed locally (env MCP_PAGE_BRIDGE_PROFILE)")
 	fs.BoolVar(&cfg.RequireProfile, "require-profile", cfg.RequireProfile,
 		"daemon: reject connections without a profile key — multi-user mode (env MCP_PAGE_BRIDGE_REQUIRE_PROFILE)")
+	fs.StringVar(&cfg.AllowedHosts, "allowed-host", cfg.AllowedHosts,
+		"comma-separated extra Host/Origin names for the dashboard/API, e.g. a DNS name for a non-loopback bind (env MCP_PAGE_BRIDGE_ALLOWED_HOSTS)")
 	fs.Float64Var(&cfg.IdleTimeout, "idle-timeout", cfg.IdleTimeout,
 		"shut the daemon down after this many idle seconds; 0 disables (env MCP_PAGE_BRIDGE_IDLE_TIMEOUT)")
 	fs.BoolVar(&cfg.TLS, "tls", cfg.TLS,
@@ -195,12 +194,7 @@ func parseArgs(cfg *config.Config, argv []string) (cliArgs, error) {
 		return args, err
 	}
 	if fs.NArg() > 0 {
-		// `profile-hash <secret>` takes a single positional secret.
-		if args.command == "profile-hash" && fs.NArg() == 1 {
-			args.positional = fs.Arg(0)
-		} else {
-			return args, fmt.Errorf("unexpected argument %q", fs.Arg(0))
-		}
+		return args, fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
 	return args, cfg.Validate()
 }

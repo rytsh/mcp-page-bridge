@@ -52,8 +52,9 @@ func Run(ctx context.Context, opts Options) error {
 	if opts.Token != "" {
 		params.Set("token", opts.Token)
 	}
-	if hash := protocol.HashProfile(opts.Profile); hash != "" {
-		params.Set(protocol.ProfileQueryParam, hash)
+	if opts.Profile != "" {
+		// The raw secret is hashed by the daemon into the partition key.
+		params.Set(protocol.ProfileQueryParam, opts.Profile)
 	}
 	if len(params) > 0 {
 		target += "?" + params.Encode()

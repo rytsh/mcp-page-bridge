@@ -40,8 +40,9 @@ const (
 
 // Probe is the result of inspecting the bridge port.
 type Probe struct {
-	Status        ProbeStatus
-	RequiresToken bool
+	Status          ProbeStatus
+	RequiresToken   bool
+	RequiresProfile bool
 }
 
 // Dial describes how management clients (probe, stop, token check) reach a
@@ -134,12 +135,13 @@ func ProbeBridge(ctx context.Context, dial Dial) Probe {
 
 	if resp.StatusCode == http.StatusOK {
 		var body struct {
-			Service       string `json:"service"`
-			RequiresToken bool   `json:"requiresToken"`
+			Service         string `json:"service"`
+			RequiresToken   bool   `json:"requiresToken"`
+			RequiresProfile bool   `json:"requiresProfile"`
 		}
 		_ = json.NewDecoder(resp.Body).Decode(&body)
 		if body.Service == protocol.ServiceID {
-			return Probe{Status: StatusBridge, RequiresToken: body.RequiresToken}
+			return Probe{Status: StatusBridge, RequiresToken: body.RequiresToken, RequiresProfile: body.RequiresProfile}
 		}
 		return Probe{Status: StatusForeign}
 	}
@@ -209,9 +211,15 @@ type EnsureOptions struct {
 	// Dial is where this process reaches the daemon (host, port, TLS).
 	Dial  Dial
 	Token string
+	// Profile is this agent's own profile secret (empty if none). It is used
+	// to verify the agent can actually attach to a profile-gated daemon.
+	Profile string
 	// RequireProfile is forwarded to a spawned daemon so it runs in
 	// multi-user mode (rejects connections without a profile key).
 	RequireProfile bool
+	// AllowedHosts (comma-separated) is forwarded to a spawned daemon so its
+	// dashboard/API accepts the given Host/Origin names.
+	AllowedHosts string
 	// IdleTimeoutSec > 0 makes the daemon exit after that many idle seconds.
 	IdleTimeoutSec float64
 	// TLSCert/TLSKey are forwarded to a spawned daemon so it serves TLS.
@@ -226,9 +234,27 @@ func Ensure(ctx context.Context, opts EnsureOptions) error {
 	existing := ProbeBridge(ctx, opts.Dial)
 	switch existing.Status {
 	case StatusBridge:
-		return AssertCompatibleToken(ctx, opts.Dial, opts.Token, existing)
+		if err := AssertCompatibleToken(ctx, opts.Dial, opts.Token, existing); err != nil {
+			return err
+		}
+		if existing.RequiresProfile && opts.Profile == "" {
+			return fmt.Errorf(
+				"a bridge is already running on port %d and requires a profile key; "+
+					"pass --profile <secret> (or set MCP_PAGE_BRIDGE_PROFILE) to attach", port)
+		}
+		return nil
 	case StatusForeign:
 		return fmt.Errorf("port %d is in use by a non-mcp-page-bridge server; choose another port with --port <n>", port)
+	}
+
+	// About to spawn a daemon. A --require-profile daemon rejects profile-less
+	// connections, so this same agent must also carry a profile or it could
+	// never attach to the daemon it is about to start.
+	if opts.RequireProfile && opts.Profile == "" {
+		return fmt.Errorf(
+			"--require-profile starts a daemon that rejects connections without a profile key, "+
+				"but this agent has none; also pass --profile <secret>, or run the daemon on its own "+
+				"with: mcp-page-bridge --daemon --require-profile")
 	}
 
 	executable, err := os.Executable()
@@ -244,6 +270,9 @@ func Ensure(ctx context.Context, opts EnsureOptions) error {
 	}
 	if opts.RequireProfile {
 		args = append(args, "--require-profile")
+	}
+	if opts.AllowedHosts != "" {
+		args = append(args, "--allowed-host", opts.AllowedHosts)
 	}
 
 	cmd := exec.Command(executable, args...)

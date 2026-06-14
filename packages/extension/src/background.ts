@@ -17,7 +17,6 @@ import {
 } from "mcp-page-bridge-protocol";
 import { BrowserProvider } from "./browser-provider.js";
 import {
-  hashProfile,
   parseProfiles,
   profileLabel,
   sameBridge,
@@ -102,9 +101,10 @@ function urlHost(host: string): string {
 async function wsUrl(cfg: BridgeConfig, meta: Record<string, string | number | undefined> = {}): Promise<string> {
   const url = new URL(`${cfg.secure ? "wss" : "ws"}://${urlHost(cfg.host)}:${cfg.port}`);
   if (cfg.token) url.searchParams.set("token", cfg.token);
-  // The profile secret is hashed locally; only the digest is sent.
-  const profile = await hashProfile(cfg.profileKey);
-  if (profile) url.searchParams.set("profile", profile);
+  // The raw profile secret is sent (like the token); the daemon hashes it into
+  // the partition key, so the same value works for the extension, the stdio
+  // proxy, and a hand-written remote /mcp URL.
+  if (cfg.profileKey) url.searchParams.set("profile", cfg.profileKey);
   for (const [key, value] of Object.entries(meta)) {
     if (value !== undefined) url.searchParams.set(key, String(value));
   }

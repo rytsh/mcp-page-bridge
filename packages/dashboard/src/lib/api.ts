@@ -44,21 +44,8 @@ export const INITIAL_PROFILE = urlProfile || readStore(STORE_PROFILE);
 if (urlToken) writeStore(STORE_TOKEN, urlToken);
 if (urlProfile) writeStore(STORE_PROFILE, urlProfile);
 
-// Domain-separation prefix — must match Go protocol.ProfileHashPrefix and the
-// extension's hashProfile().
-const PROFILE_HASH_PREFIX = "mcp-page-bridge:profile:v1:";
-
-async function hashProfile(secret: string): Promise<string> {
-  const trimmed = secret.trim();
-  if (!trimmed) return "";
-  const data = new TextEncoder().encode(PROFILE_HASH_PREFIX + trimmed);
-  const digest = await crypto.subtle.digest("SHA-256", data);
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
 let currentToken = INITIAL_TOKEN;
 let currentProfileSecret = INITIAL_PROFILE;
-let profileHashPromise: Promise<string> | undefined;
 
 /** Set the shared token used for all requests (multi-user / remote daemons). */
 export function setToken(token: string): void {
@@ -69,23 +56,15 @@ export function setToken(token: string): void {
 /** Switch the partition the dashboard views (empty = the default partition). */
 export function setProfileSecret(secret: string): void {
   writeStore(STORE_PROFILE, secret);
-  if (secret === currentProfileSecret) return;
   currentProfileSecret = secret;
-  profileHashPromise = undefined; // recompute on next request
 }
 
 /** Forget the token and profile (log out): clears them from sessionStorage. */
 export function clearCredentials(): void {
   currentToken = "";
   currentProfileSecret = "";
-  profileHashPromise = undefined;
   writeStore(STORE_TOKEN, "");
   writeStore(STORE_PROFILE, "");
-}
-
-function profileKey(): Promise<string> {
-  if (!profileHashPromise) profileHashPromise = hashProfile(currentProfileSecret);
-  return profileHashPromise;
 }
 
 function authHeaders(extra?: Record<string, string>): Record<string, string> {
@@ -94,12 +73,11 @@ function authHeaders(extra?: Record<string, string>): Record<string, string> {
   return headers;
 }
 
-/** Append the token and the (hashed) profile partition key to a path. */
+/** Append the token and the raw profile secret (daemon hashes it) to a path. */
 async function withAuth(path: string): Promise<string> {
   const sp = new URLSearchParams();
   if (currentToken) sp.set("token", currentToken);
-  const hash = await profileKey();
-  if (hash) sp.set("profile", hash);
+  if (currentProfileSecret.trim()) sp.set("profile", currentProfileSecret.trim());
   const qs = sp.toString();
   if (!qs) return path;
   return path + (path.includes("?") ? "&" : "?") + qs;

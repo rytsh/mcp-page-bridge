@@ -87,11 +87,10 @@ func NamespaceName(label, name string) string {
 	return label + NamespaceSep + name
 }
 
-// HashProfile derives the opaque partition key from a profile secret. The
-// secret itself never crosses the wire: clients (the extension and the stdio
-// proxy) hash it locally and send only this digest. An empty secret yields an
-// empty key (the default, unpartitioned bridge). Keep this in sync with the
-// extension's hashProfile() helper.
+// HashProfile derives the opaque partition key from a profile secret. Clients
+// send the raw secret on connect (like the token); the daemon calls this to
+// hash it into the partition key used for grouping/routing. An empty secret
+// yields an empty key (the default, unpartitioned bridge).
 func HashProfile(secret string) string {
 	if secret == "" {
 		return ""

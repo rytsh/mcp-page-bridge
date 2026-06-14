@@ -145,7 +145,10 @@ func (b *Bridge) HandleWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing or invalid token", http.StatusUnauthorized)
 		return
 	}
-	profileKey := r.URL.Query().Get(protocol.ProfileQueryParam)
+	// Clients send the raw profile secret; the bridge hashes it into the
+	// opaque partition key (so the wire value works the same everywhere — the
+	// extension, the stdio proxy, and a hand-written /mcp URL).
+	profileKey := protocol.HashProfile(r.URL.Query().Get(protocol.ProfileQueryParam))
 	if b.opts.RequireProfile && profileKey == "" {
 		http.Error(w, "this bridge requires a profile key", http.StatusUnauthorized)
 		return

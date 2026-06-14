@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  hashProfile,
   MAX_PROFILES,
   normalizeBridge,
   parseProfiles,
@@ -100,16 +99,5 @@ describe("bridge profiles", () => {
     expect(profileLabel({ host: "bridge.example.com", port: 443, token: "s", secure: true, profileKey: "x" })).toBe("wss://bridge.example.com:443");
     const color = tabGroupColor("some-profile-id");
     expect(tabGroupColor("some-profile-id")).toBe(color); // deterministic
-  });
-
-  it("hashes a profile secret matching the Go side, never sending plaintext", async () => {
-    // Must equal protocol.HashProfile("mysecret") in Go (cross-checked vector).
-    expect(await hashProfile("mysecret")).toBe("825d9eb0b5484e0a22a70ec854790e2d8daaa9171edd03b0bfbc98e276f20e94");
-    // Whitespace is trimmed; empty stays empty (default, unpartitioned).
-    expect(await hashProfile("  mysecret  ")).toBe(await hashProfile("mysecret"));
-    expect(await hashProfile("")).toBe("");
-    expect(await hashProfile("   ")).toBe("");
-    // The digest does not contain the plaintext.
-    expect(await hashProfile("mysecret")).not.toContain("mysecret");
   });
 });

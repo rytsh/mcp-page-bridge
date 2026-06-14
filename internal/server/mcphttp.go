@@ -104,7 +104,8 @@ func (s *Server) handleMCPPost(w http.ResponseWriter, r *http.Request) {
 			s.mcpError(w, http.StatusUnauthorized, codeInvalidRequest, "this bridge requires a profile key")
 			return
 		}
-		session, err := s.bridge.OpenHTTPSession(profile)
+		// The raw secret is hashed into the partition key (server-side).
+		session, err := s.bridge.OpenHTTPSession(protocol.HashProfile(profile))
 		if err != nil {
 			s.mcpError(w, http.StatusServiceUnavailable, mcpwire.CodeInternalError, err.Error())
 			return

@@ -34,6 +34,11 @@ type Config struct {
 	// RequireProfile (daemon side) rejects any connection without a profile
 	// key — multi-user mode. Off by default.
 	RequireProfile bool `cfg:"require_profile"`
+	// AllowedHosts is a comma-separated list of extra Host/Origin names the
+	// dashboard/JSON API accepts (e.g. a DNS name in front of a non-loopback
+	// bind, or behind a reverse proxy). The built-in loopback/port checks still
+	// apply on top of this.
+	AllowedHosts string `cfg:"allowed_hosts"`
 	// IdleTimeout is in seconds; 0 disables idle auto-shutdown.
 	IdleTimeout float64 `cfg:"idle_timeout"`
 

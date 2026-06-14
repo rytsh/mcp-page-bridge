@@ -350,6 +350,17 @@ async function main(): Promise<void> {
     void saveBridge();
   });
 
+  // Show/hide toggles for the masked secret inputs (token, profile key).
+  for (const button of document.querySelectorAll<HTMLButtonElement>("button[data-reveal]")) {
+    button.addEventListener("click", () => {
+      const input = el<HTMLInputElement>(button.dataset.reveal ?? "");
+      const reveal = input.type === "password";
+      input.type = reveal ? "text" : "password";
+      button.textContent = reveal ? "🙈" : "👁";
+      button.setAttribute("aria-pressed", String(reveal));
+    });
+  }
+
   el<HTMLInputElement>("tabGroups").addEventListener("change", () => void saveFlags());
   el<HTMLInputElement>("browserControl").addEventListener("change", () => void saveFlags());
   el<HTMLInputElement>("coreTools").addEventListener("change", () => void saveFlags());
@@ -364,7 +375,12 @@ async function main(): Promise<void> {
   });
 
   el<HTMLButtonElement>("openDashboard").addEventListener("click", async () => {
-    const rawHost = el<HTMLInputElement>("host").value.trim() || "127.0.0.1";
+    let rawHost = el<HTMLInputElement>("host").value.trim() || "127.0.0.1";
+    // 0.0.0.0 / :: are bind addresses, not browsable hosts, and the dashboard's
+    // Host check only accepts loopback names — open such daemons at localhost.
+    if (rawHost === "0.0.0.0" || rawHost === "::" || rawHost === "[::]" || rawHost === "") {
+      rawHost = "127.0.0.1";
+    }
     const host = rawHost.includes(":") && !rawHost.startsWith("[") ? `[${rawHost}]` : rawHost;
     const port = Number(el<HTMLInputElement>("port").value) || 8787;
     const token = el<HTMLInputElement>("token").value.trim();

@@ -121,10 +121,10 @@ prefer a remote URL.)
 
 Flags: `--port <n>` (default 8787), `--token <secret>`, `--host <addr>` (default `127.0.0.1`),
 `--profile <secret>` (agent: only see tabs sharing it), `--require-profile`
-(daemon: reject connections without a profile key). The `profile-hash <secret>`
-subcommand prints the digest for remote `/mcp` clients.
+(daemon: reject connections without a profile key), `--allowed-host <names>`
+(extra Host/Origin names for the dashboard/API).
 Env: `MCP_PAGE_BRIDGE_PORT`, `MCP_PAGE_BRIDGE_TOKEN`, `MCP_PAGE_BRIDGE_HOST`,
-`MCP_PAGE_BRIDGE_PROFILE`, `MCP_PAGE_BRIDGE_REQUIRE_PROFILE`.
+`MCP_PAGE_BRIDGE_PROFILE`, `MCP_PAGE_BRIDGE_REQUIRE_PROFILE`, `MCP_PAGE_BRIDGE_ALLOWED_HOSTS`.
 
 > **Remote browser**: to connect a browser on another device (phone/laptop on
 > your LAN), start the bridge with `--host 0.0.0.0 --token <secret>` and set the
@@ -133,6 +133,14 @@ Env: `MCP_PAGE_BRIDGE_PORT`, `MCP_PAGE_BRIDGE_TOKEN`, `MCP_PAGE_BRIDGE_HOST`,
 > etc.) are open to the network and the bridge only logs a warning. The
 > Host/Origin checks relax to port matching in this mode; the token carries the
 > authorization.
+>
+> **Reaching it by DNS name / reverse proxy**: the relaxed check still matches on
+> port, so a hostname accessed without the matching `:port` (e.g.
+> `https://bridge.example.com` behind a proxy) is rejected with
+> `request is not local (bad Host/Origin)`. Allow it explicitly with
+> `--allowed-host bridge.example.com` (comma-separated for several, env
+> `MCP_PAGE_BRIDGE_ALLOWED_HOSTS`). The Origin, when present, must match an
+> allowed name too, so cross-origin pages are still blocked.
 
 ### Per-tab bridges, profiles, and tab groups
 
@@ -493,19 +501,19 @@ so an agent only ever sees the tabs that share its profile key. This is the
 multi-user feature: many people can share a single (e.g. remote) daemon while
 each only sees their own pages.
 
-**How it works on the wire.** The secret is **hashed locally** (SHA-256 over a
-fixed domain-separation prefix; see `protocol.HashProfile`) by the extension and
-the stdio proxy. Only that hex digest crosses the WebSocket as `?profile=<hash>`
-(or, for the Streamable HTTP transport, the `x-mcp-page-bridge-profile` header or
-`?profile=<hash>`). The daemon never receives the plaintext — it uses the opaque
-digest as a partition key and matches on the full digest (no per-character
-compare, so there is no timing oracle and no way to enumerate other partitions).
+**How it works on the wire.** Clients send the **raw secret** (like the token):
+the extension and stdio proxy as `?profile=<secret>`, the Streamable HTTP
+transport as the `x-mcp-page-bridge-profile` header or `?profile=<secret>`. The
+daemon hashes it (SHA-256 over a fixed domain-separation prefix; see
+`protocol.HashProfile`) into the opaque partition key and matches on the full
+digest — so there is no timing oracle and no way to enumerate other partitions,
+and the **same secret value works on every transport**.
 
 **What is partitioned.** Everything an agent can observe is scoped to its
 profile: `tools/list`, `prompts/list`, `resources/list`, `tools/call` /
 `prompts/get` / `resources/read` routing, the `mcp_page_bridge_list_clients`
 summary, the `*/list_changed` and logging notifications, the dashboard JSON
-(`/api/providers?profile=<hash>`), and tab activate/close actions. A call that
+(`/api/providers?profile=<secret>`), and tab activate/close actions. A call that
 names another partition's namespaced tool is rejected as "unknown", exactly as
 if it did not exist.
 
@@ -519,11 +527,9 @@ change anything for the rest.
 - Extension: the popup's **Profile key** field. It is part of the bridge profile
   tuple `(host, port, token, secure, profileKey)`, so a different key is treated
   as a different daemon "group" (its tabs reconnect when you change it).
-- stdio proxy / agent: `--profile <secret>` (or `MCP_PAGE_BRIDGE_PROFILE`). The
-  proxy hashes it before dialing `/agent`.
-- Remote `/mcp` clients (no proxy): they cannot hash for you, so pass the
-  precomputed digest in the `x-mcp-page-bridge-profile` header. Generate it with
-  `mcp-page-bridge profile-hash <secret>`.
+- stdio proxy / agent: `--profile <secret>` (or `MCP_PAGE_BRIDGE_PROFILE`).
+- Remote `/mcp` clients (no proxy): pass the same secret in the
+  `x-mcp-page-bridge-profile` header or `?profile=<secret>` on the URL.
 - Dashboard: open `…/?token=<secret>&profile=<secret>`, or just open `/` and use
   the **Profile…** button to enter the key. When the daemon runs with
   `--require-profile` (or needs a token), the dashboard **locks** and shows a
@@ -538,12 +544,12 @@ profile key — a true multi-user daemon with no anonymous default partition. It
 off by default. A daemon spawned implicitly by a stdio agent inherits this flag
 from that agent.
 
-**Security notes.** The hash is still a *bearer credential* on the wire — anyone
-who observes it can replay it. So for any non-loopback/shared daemon keep using
-`--token` (network gate) **and** TLS (transport secrecy), and choose a strong,
-high-entropy profile secret. The profile key is independent of `--token`: the
-token controls who may reach the daemon at all; the profile controls which tabs
-they can see once connected.
+**Security notes.** The profile secret is a *bearer credential* on the wire (it
+travels raw, like the token, and the daemon sees it before hashing). So for any
+non-loopback/shared daemon keep using `--token` (network gate) **and** TLS
+(transport secrecy), and choose a strong, high-entropy profile secret. The
+profile key is independent of `--token`: the token controls who may reach the
+daemon at all; the profile controls which tabs they can see once connected.
 
 ## Security
 

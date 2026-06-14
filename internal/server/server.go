@@ -32,6 +32,11 @@ type Options struct {
 	Host  string
 	Port  int
 	Token string
+	// AllowedHosts are extra Host/Origin authority names accepted by the
+	// dashboard/JSON API in addition to the loopback/port checks (e.g. a DNS
+	// name for a non-loopback bind). Each entry is a hostname (any port) or an
+	// explicit host:port.
+	AllowedHosts []string
 	// TLSCert/TLSKey are PEM file paths; when both are set the server speaks
 	// HTTPS/WSS on the listener.
 	TLSCert string
@@ -199,7 +204,7 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 		"service":   protocol.ServiceID,
 		"version":   protocol.Version,
 		"port":      s.port,
-		"providers": s.bridge.ProviderSummary(r.URL.Query().Get(protocol.ProfileQueryParam)),
+		"providers": s.bridge.ProviderSummary(protocol.HashProfile(r.URL.Query().Get(protocol.ProfileQueryParam))),
 	})
 }
 
@@ -241,7 +246,7 @@ func (s *Server) handleProviderAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	profile := r.URL.Query().Get(protocol.ProfileQueryParam)
+	profile := protocol.HashProfile(r.URL.Query().Get(protocol.ProfileQueryParam))
 	if err := s.bridge.DashboardAction(label, action, profile); err != nil {
 		var nf *bridge.NotFoundError
 		var nt *bridge.NoTabError
@@ -269,6 +274,20 @@ func (s *Server) handleProviderAction(w http.ResponseWriter, r *http.Request) {
 // addresses — so the check relaxes to a port match and the (recommended)
 // token carries the authorization.
 func (s *Server) hostAllowed(r *http.Request) bool {
+	// An explicit allow-list (DNS names / reverse proxies) wins. The Origin,
+	// when present, must also be allow-listed so a cross-origin page cannot
+	// ride on an allowed Host.
+	if s.hostInAllowList(r.Host) {
+		origin := r.Header.Get("Origin")
+		if origin == "" || origin == "null" {
+			return true
+		}
+		if u, err := url.Parse(origin); err == nil && s.hostInAllowList(u.Host) {
+			return true
+		}
+		return false
+	}
+
 	if !config.IsLoopbackHost(s.opts.Host) && s.opts.Host != "" {
 		return s.portMatches(r.Host) && s.originPortMatches(r)
 	}
@@ -277,6 +296,12 @@ func (s *Server) hostAllowed(r *http.Request) bool {
 		fmt.Sprintf("127.0.0.1:%d", s.port): true,
 		fmt.Sprintf("localhost:%d", s.port): true,
 		fmt.Sprintf("[::1]:%d", s.port):     true,
+		// 0.0.0.0 / :: are bind addresses that on most systems route to
+		// loopback when used as a destination. They are not registrable
+		// domains, so accepting them as a Host alias is not a DNS-rebinding
+		// vector (a cross-origin page still fails the Origin check below).
+		fmt.Sprintf("0.0.0.0:%d", s.port): true,
+		fmt.Sprintf("[::]:%d", s.port):    true,
 	}
 	if r.Host == "" || !allowed[r.Host] {
 		return false
@@ -294,6 +319,32 @@ func (s *Server) hostAllowed(r *http.Request) bool {
 func (s *Server) portMatches(authority string) bool {
 	_, port, err := net.SplitHostPort(authority)
 	return err == nil && port == strconv.Itoa(s.port)
+}
+
+// hostInAllowList reports whether an authority (host or host:port) matches a
+// configured allowed host. An allow-list entry matches either the full
+// authority or just its hostname (any port).
+func (s *Server) hostInAllowList(authority string) bool {
+	if authority == "" || len(s.opts.AllowedHosts) == 0 {
+		return false
+	}
+	host := authority
+	if h, _, err := net.SplitHostPort(authority); err == nil {
+		host = h
+	}
+	for _, entry := range s.opts.AllowedHosts {
+		if entry == authority {
+			return true
+		}
+		eh := entry
+		if h, _, err := net.SplitHostPort(entry); err == nil {
+			eh = h
+		}
+		if eh == host {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) originPortMatches(r *http.Request) bool {

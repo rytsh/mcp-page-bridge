@@ -90,7 +90,7 @@ func TestProfileListClientsScoped(t *testing.T) {
 	dialProvider(t, tb, fakeProviderOpts{name: "alice", query: "?profile=alicekey", tools: echoTool("eval")})
 	dialProvider(t, tb, fakeProviderOpts{name: "bob", query: "?profile=bobkey", tools: echoTool("ping")})
 	agentAlice := dialAgent(t, tb, "?profile=alicekey")
-	waitFor(t, "alice provider registered", func() bool { return len(tb.b.ProviderSummary("alicekey")) == 1 })
+	waitFor(t, "alice provider registered", func() bool { return len(tb.b.ProviderSummary(protocol.HashProfile("alicekey"))) == 1 })
 
 	result := call(t, agentAlice, "tools/call", map[string]any{"name": "mcp_page_bridge_list_clients"})
 	text := string(result)
@@ -109,7 +109,7 @@ func TestProfileMCPHTTPScoped(t *testing.T) {
 	dialProvider(t, tb, fakeProviderOpts{name: "alice", query: "?profile=alicekey", tools: echoTool("eval")})
 	dialProvider(t, tb, fakeProviderOpts{name: "bob", query: "?profile=bobkey", tools: echoTool("ping")})
 	waitFor(t, "providers registered", func() bool {
-		return len(tb.b.ProviderSummary("alicekey")) == 1 && len(tb.b.ProviderSummary("bobkey")) == 1
+		return len(tb.b.ProviderSummary(protocol.HashProfile("alicekey"))) == 1 && len(tb.b.ProviderSummary(protocol.HashProfile("bobkey"))) == 1
 	})
 
 	// initialize carries the profile via the header; the session stores it.
@@ -158,7 +158,7 @@ func TestProfileRequiredRejectsConnections(t *testing.T) {
 func TestProfileProvidersAPIScoped(t *testing.T) {
 	tb := startBridge(t, bridge.Options{}, server.Options{})
 	dialProvider(t, tb, fakeProviderOpts{name: "alice", query: "?profile=alicekey", tools: echoTool("eval")})
-	waitFor(t, "registered", func() bool { return len(tb.b.ProviderSummary("alicekey")) == 1 })
+	waitFor(t, "registered", func() bool { return len(tb.b.ProviderSummary(protocol.HashProfile("alicekey"))) == 1 })
 
 	count := func(query string) int {
 		resp, err := http.Get(tb.url("/api/providers" + query))
