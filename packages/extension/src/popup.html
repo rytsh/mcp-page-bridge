@@ -283,6 +283,13 @@
     </div>
 
     <div class="row">
+      <label><input id="trustedInput" type="checkbox" /> Trusted input (real key/mouse events)</label>
+    </div>
+    <p id="trustedInputHint" class="muted">
+      Sends click/type_text/press_key through the debugger as real events, for pages that ignore synthetic ones.
+    </p>
+
+    <div class="row">
       <label><input id="cdpTools" type="checkbox" /> Advanced CDP tools (optional debugger)</label>
     </div>
     <p id="cdpHint" class="muted">CDP tools require an optional debugger permission.</p>

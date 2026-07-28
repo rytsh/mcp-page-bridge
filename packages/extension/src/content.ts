@@ -8,10 +8,26 @@
  * already-open tabs) share this ISOLATED world. The versioned key lets a freshly
  * reloaded extension recover from stale content scripts left in an open tab.
  */
-import type { ChannelMessage } from "mcp-page-bridge-protocol";
+import { EXTENSION_MARK_ATTRIBUTE, MCP_PAGE_BRIDGE_VERSION, type ChannelMessage } from "mcp-page-bridge-protocol";
 
 const CONTENT_GUARD_KEY = "__mcpPageBridgeContentV2";
 const guard = window as unknown as Record<string, unknown>;
+
+/**
+ * Let the bridge dashboard know the extension is installed (it otherwise has no
+ * way to tell "no tabs connected" from "extension missing"). Only loopback
+ * origins are marked, so this never becomes a fingerprinting signal for ordinary
+ * websites.
+ */
+function markExtensionForDashboard(): void {
+  const host = location.hostname;
+  if (host !== "127.0.0.1" && host !== "localhost" && host !== "[::1]") return;
+  const apply = (): void => document.documentElement?.setAttribute(EXTENSION_MARK_ATTRIBUTE, MCP_PAGE_BRIDGE_VERSION);
+  apply();
+  if (!document.documentElement) document.addEventListener("DOMContentLoaded", apply, { once: true });
+}
+
+markExtensionForDashboard();
 
 if (!guard[CONTENT_GUARD_KEY]) {
   guard[CONTENT_GUARD_KEY] = true;

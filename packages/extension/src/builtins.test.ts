@@ -10,12 +10,29 @@ import { registerBuiltins } from "./builtins.js";
  * (reads the buffer), and the SW-delegated tools (screenshot/navigate/reload)
  * via a mock extCall. DOM tools require a browser and are exercised manually.
  */
-async function setup(opts: { includeEval?: boolean; coreTools?: boolean; designTools?: boolean; automationTools?: boolean; cdpTools?: boolean } = {}) {
+async function setup(
+  opts: {
+    includeEval?: boolean;
+    coreTools?: boolean;
+    designTools?: boolean;
+    automationTools?: boolean;
+    cdpTools?: boolean;
+    trustedInput?: boolean;
+    failInput?: boolean;
+  } = {},
+) {
   const calls: Array<[string, unknown]> = [];
   const server = new EmbeddedMcpServer({ name: "builtins", version: "1.0.0" });
   registerBuiltins(server, {
     extCall: async (action, args) => {
       calls.push([action, args]);
+      if (action === "input") {
+        if (opts.failInput) throw new Error("debugger permission missing");
+        return { ok: true, via: "cdp" };
+      }
+      if (action === "frameAct") return { clicked: { selector: "#inner" }, via: "js" };
+      if (action === "frameOverlay") return { markers: 7 };
+      if (action === "frameSnapshot") return { text: "Page snapshot — top\n\niframe f1 — https://embed.test\n  e1 button", frames: 2 };
       if (action === "screenshot") {
         const download = !!(args as { download?: boolean } | undefined)?.download;
         const filename = (args as { filename?: string } | undefined)?.filename;
@@ -35,12 +52,19 @@ async function setup(opts: { includeEval?: boolean; coreTools?: boolean; designT
     designTools: opts.designTools !== false,
     automationTools: opts.automationTools !== false,
     cdpTools: opts.cdpTools !== false,
+    trustedInput: opts.trustedInput === true,
   });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   await server.connect(st as unknown as MinimalTransport);
   const client = new Client({ name: "t", version: "0" }, { capabilities: {} });
   await client.connect(ct);
   return { client, calls };
+}
+
+/** The action payload is always the first content block; observations follow. */
+function payloadOf(r: unknown): Record<string, unknown> {
+  const content = (r as { content?: Array<{ type: string; text?: string }> }).content ?? [];
+  return JSON.parse(content[0]?.text ?? "{}") as Record<string, unknown>;
 }
 
 function textOf(r: unknown): string {
@@ -93,12 +117,8 @@ describe("built-in tools", () => {
       "find_by_test_id",
       "locator_snapshot",
       "locator_count",
-      "smart_click",
       "hover",
       "double_click",
-      "type_text",
-      "press_key",
-      "clear_value",
       "select_option",
       "check",
       "uncheck",
@@ -162,6 +182,7 @@ describe("built-in tools", () => {
     const names = (await client.listTools()).tools.map((t) => t.name).sort();
     expect(names).toEqual(
       [
+        "clear_value",
         "click",
         "console_logs",
         "dom_query",
@@ -169,10 +190,13 @@ describe("built-in tools", () => {
         "get_html",
         "get_page_info",
         "navigate",
+        "press_key",
         "reload",
         "screenshot",
         "scroll",
         "set_value",
+        "take_snapshot",
+        "type_text",
         "wait_for",
       ].sort(),
     );
@@ -180,19 +204,18 @@ describe("built-in tools", () => {
     expect(names).not.toContain("apply_css");
     expect(names).not.toContain("get_selected_element");
     expect(names).not.toContain("capture_design_baseline");
-    expect(names).not.toContain("smart_click");
+    expect(names).not.toContain("find_by_text");
     expect(names).not.toContain("start_network_capture");
     expect(names).not.toContain("cdp_attach");
   });
 
   it("registers automation tools only when enabled", async () => {
     const off = await setup({ automationTools: false });
-    expect((await off.client.listTools()).tools.map((t) => t.name)).not.toContain("smart_click");
+    expect((await off.client.listTools()).tools.map((t) => t.name)).not.toContain("find_by_text");
 
     const on = await setup({ automationTools: true });
     const names = (await on.client.listTools()).tools.map((t) => t.name);
-    expect(names).toContain("smart_click");
-    expect(names).toContain("take_snapshot");
+    expect(names).toContain("find_by_text");
     expect(names).toContain("start_network_capture");
     expect(names).toContain("get_storage_state");
   });
@@ -202,7 +225,7 @@ describe("built-in tools", () => {
     // take_snapshot must fail fast (before any DOM access) and point the agent
     // back at take_snapshot. This covers the resolveUid error path in Node.
     const { client } = await setup({ automationTools: true });
-    const result = await client.callTool({ name: "smart_click", arguments: { uid: "1_999" } });
+    const result = await client.callTool({ name: "click", arguments: { uid: "1_999" } });
     expect(result.isError).toBe(true);
     expect(textOf(result)).toContain("take_snapshot");
   });
@@ -210,11 +233,110 @@ describe("built-in tools", () => {
   it("can disable only the default core tools", async () => {
     const { client } = await setup({ coreTools: false, designTools: false, automationTools: true, cdpTools: false });
     const names = (await client.listTools()).tools.map((t) => t.name);
-    expect(names).toContain("smart_click");
+    expect(names).toContain("find_by_text");
+    // Input primitives stay available even with the core toolset off.
+    expect(names).toContain("take_snapshot");
+    expect(names).toContain("click");
+    expect(names).toContain("type_text");
+    expect(names).toContain("press_key");
     expect(names).not.toContain("eval");
     expect(names).not.toContain("dom_query");
     expect(names).not.toContain("screenshot");
     expect(names).not.toContain("console_logs");
+  });
+
+  it("routes input through CDP when trusted input is on", async () => {
+    const { client, calls } = await setup({ trustedInput: true });
+
+    const clicked = await client.callTool({ name: "click", arguments: { x: 40, y: 60, observe: "none" } });
+    expect(payloadOf(clicked)).toMatchObject({ via: "cdp", clickCount: 1 });
+    expect(calls).toContainEqual(["input", { kind: "click", x: 40, y: 60, clickCount: 1 }]);
+
+    const pressed = await client.callTool({ name: "press_key", arguments: { keys: "Meta+A Backspace", observe: "none" } });
+    expect(payloadOf(pressed)).toMatchObject({ via: "cdp", pressed: 2 });
+    const keyCall = calls.find(([action, args]) => action === "input" && (args as { kind?: string }).kind === "keys");
+    expect(keyCall).toBeDefined();
+    const keys = (keyCall![1] as { keys: Array<Record<string, unknown>> }).keys;
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).toMatchObject({ key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8, text: "" });
+  });
+
+  it("appends an observation to actions unless observe:none", async () => {
+    // Without a DOM the snapshot can't be rendered, but the contract still
+    // holds: the action payload comes first, the observation is appended and
+    // never turns the call into an error.
+    const { client, calls } = await setup({ trustedInput: true });
+
+    const observed = await client.callTool({ name: "click", arguments: { x: 1, y: 2 } });
+    const blocks = (observed as { content: Array<{ type: string; text?: string }> }).content;
+    expect(payloadOf(observed)).toMatchObject({ via: "cdp" });
+    expect(blocks.length).toBeGreaterThan(1);
+    expect(observed.isError).toBeFalsy();
+
+    const withShot = await client.callTool({ name: "click", arguments: { x: 1, y: 2, observe: "screenshot" } });
+    const shotBlocks = (withShot as { content: Array<{ type: string; data?: string }> }).content;
+    expect(shotBlocks.some((b) => b.type === "image")).toBe(true);
+    expect(calls.some(([action]) => action === "screenshot")).toBe(true);
+
+    const quiet = await client.callTool({ name: "click", arguments: { x: 1, y: 2, observe: "none" } });
+    expect((quiet as { content: unknown[] }).content).toHaveLength(1);
+  });
+
+  it("routes sub-frame uids to the owning frame", async () => {
+    const { client, calls } = await setup({ trustedInput: true });
+
+    const res = await client.callTool({ name: "click", arguments: { uid: "f2e5", observe: "none" } });
+    expect(payloadOf(res)).toMatchObject({ frame: "f2", via: "js" });
+    expect(calls).toContainEqual(["frameAct", { uid: "f2e5", clickCount: 1, timeoutMs: undefined, kind: "click" }]);
+    // A frame target must never go through the trusted (top-frame) input path.
+    expect(calls.some(([action]) => action === "input")).toBe(false);
+  });
+
+  it("take_snapshot stitches frames through the service worker", async () => {
+    const { client, calls } = await setup();
+    const res = await client.callTool({ name: "take_snapshot", arguments: {} });
+    expect(textOf(res)).toContain("iframe f1");
+    expect(calls).toContainEqual(["frameSnapshot", { maxNodes: 400, includeHidden: false }]);
+  });
+
+  it("never calls the trusted input path when the switch is off", async () => {
+    const { client, calls } = await setup({ trustedInput: false });
+    await client.callTool({ name: "press_key", arguments: { keys: "Enter" } }).catch(() => undefined);
+    expect(calls.some(([action]) => action === "input")).toBe(false);
+  });
+
+  it("falls back to synthetic events when the trusted path fails", async () => {
+    // Minimal DOM so the synthetic fallback can actually run in Node: the
+    // engine only needs an element to dispatch on plus the HTML*Element globals
+    // its instanceof checks look at.
+    const dispatched: string[] = [];
+    const target = { dispatchEvent: (e: { type: string }) => (dispatched.push(e.type), true), isConnected: true };
+    const globals = globalThis as unknown as Record<string, unknown>;
+    const saved = { ...globals };
+    globals.document = { activeElement: target, body: target };
+    globals.KeyboardEvent = class {
+      type: string;
+      constructor(type: string) {
+        this.type = type;
+      }
+    };
+    for (const name of ["HTMLElement", "HTMLInputElement", "HTMLTextAreaElement", "HTMLSelectElement", "HTMLButtonElement", "HTMLOptionElement", "SVGElement"]) {
+      if (globals[name] === undefined) globals[name] = class {};
+    }
+
+    try {
+      const { client } = await setup({ trustedInput: true, failInput: true });
+      const res = await client.callTool({ name: "press_key", arguments: { keys: "Escape", observe: "none" } });
+      const payload = payloadOf(res) as { via: string; trustedError: string };
+      expect(payload.via).toBe("js");
+      expect(payload.trustedError).toContain("debugger permission missing");
+      expect(dispatched).toEqual(["keydown", "keyup"]);
+    } finally {
+      for (const key of ["document", "KeyboardEvent", "HTMLElement", "HTMLInputElement", "HTMLTextAreaElement", "HTMLSelectElement", "HTMLButtonElement", "HTMLOptionElement", "SVGElement"]) {
+        if (key in saved) globals[key] = saved[key];
+        else delete globals[key];
+      }
+    }
   });
 
   it("registers CDP tools only when enabled", async () => {
@@ -275,6 +397,18 @@ describe("built-in tools", () => {
     expect(block.type).toBe("image");
     expect(block.mimeType).toBe("image/png");
     expect(block.data).toBe("QUJD");
+  });
+
+  it("screenshot draws and removes uid labels when refs:true", async () => {
+    const { client, calls } = await setup();
+    const res = await client.callTool({ name: "screenshot", arguments: { refs: true, fullPage: true } });
+    expect(textOf(res)).toContain("7 uid label(s)");
+    expect(calls).toContainEqual(["frameOverlay", { show: true }]);
+    expect(calls).toContainEqual(["frameOverlay", { show: false }]);
+    expect(calls).toContainEqual([
+      "screenshot",
+      { download: false, filename: undefined, fullPage: true },
+    ]);
   });
 
   it("screenshot with download:true returns a saved-as note", async () => {

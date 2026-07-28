@@ -61,6 +61,7 @@ let coreToolsEnabled = true;
 let designToolsEnabled = false;
 let automationToolsEnabled = false;
 let cdpToolsEnabled = false;
+let trustedInputEnabled = false;
 let label = sanitizeLabel(location.host || document.title || "browser");
 
 let embedded: EmbeddedMcpServer | undefined;
@@ -128,6 +129,7 @@ function embeddedServer(): EmbeddedMcpServer {
         designTools: designToolsEnabled,
         automationTools: automationToolsEnabled,
         cdpTools: cdpToolsEnabled,
+        trustedInput: trustedInputEnabled,
       });
     }
   }
@@ -558,13 +560,20 @@ if (!globalWin.__mcpPageBridgeReadyV2) {
           const wantDesign = payload?.designTools === true;
           const wantAutomation = payload?.automationTools === true;
           const wantCdp = payload?.cdpTools === true;
-          const changed = wantCore !== coreToolsEnabled || wantDesign !== designToolsEnabled || wantAutomation !== automationToolsEnabled || wantCdp !== cdpToolsEnabled;
+          const wantTrustedInput = payload?.trustedInput === true;
+          const changed =
+            wantCore !== coreToolsEnabled ||
+            wantDesign !== designToolsEnabled ||
+            wantAutomation !== automationToolsEnabled ||
+            wantCdp !== cdpToolsEnabled ||
+            wantTrustedInput !== trustedInputEnabled;
           // Turning automation off must restore the page patches it installed.
           if (automationToolsEnabled && !wantAutomation) teardownAutomationTools();
           coreToolsEnabled = wantCore;
           designToolsEnabled = wantDesign;
           automationToolsEnabled = wantAutomation;
           cdpToolsEnabled = wantCdp;
+          trustedInputEnabled = wantTrustedInput;
           if (activated && changed) rebuildEmbeddedForToolset();
           else activateAll();
         } else if (action === "deactivate") {

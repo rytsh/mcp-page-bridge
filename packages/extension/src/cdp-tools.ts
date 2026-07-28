@@ -1,11 +1,12 @@
 /** Optional Chrome DevTools Protocol tools, delegated to the service worker. */
 import type { ContentBlock, EmbeddedMcpServer, ToolResult } from "./embedded-server.js";
+import { clampToolText } from "./dom-core.js";
 import { safeSerialize } from "./serialize.js";
 
 type ExtCall = (action: string, args?: Record<string, unknown>) => Promise<any>;
 
 function text(value: string): ToolResult {
-  return { content: [{ type: "text", text: value }] };
+  return { content: [{ type: "text", text: clampToolText(value) }] };
 }
 
 function json(value: unknown): ToolResult {

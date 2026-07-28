@@ -1,19 +1,35 @@
-/** Playwright-like opt-in automation tools for a live page. */
+/**
+ * Playwright-like opt-in automation tools for a live page.
+ *
+ * Locators, the uid snapshot registry, and the synthetic input engine live in
+ * dom-core.ts so the always-on core tools (click/type_text/press_key) and these
+ * opt-in tools resolve elements and dispatch events exactly the same way.
+ */
 import type { EmbeddedMcpServer, ToolResult } from "./embedded-server.js";
-import { safeSerialize, toLogString } from "./serialize.js";
+import {
+  actionabilityFor,
+  clearSnapshotRefs,
+  clickElement,
+  dispatchMouseLike,
+  dispatchPointerLike,
+  el,
+  inputEvents,
+  json,
+  locatorMatches,
+  locatorSummary,
+  numberArg,
+  selectorFor,
+  setCheckedValue,
+  setTextValue,
+  sleep,
+  snapshotElement,
+  stringArg,
+  text,
+  waitForLocator,
+} from "./dom-core.js";
+import { toLogString } from "./serialize.js";
 
 type ExtCall = (action: string, args?: Record<string, unknown>) => Promise<any>;
-
-interface ElementSnapshot {
-  selector: string;
-  tag: string;
-  id?: string;
-  classes?: string[];
-  text?: string;
-  attributes: Record<string, string>;
-  rect: { x: number; y: number; top: number; right: number; bottom: number; left: number; width: number; height: number };
-  pickedAt?: string;
-}
 
 interface NetworkEntry {
   id: string;
@@ -66,516 +82,6 @@ let dialogSeq = 0;
 let dialogOriginals: DialogOriginals | undefined;
 let dialogMode: "native" | "accept" | "dismiss" = "native";
 let dialogPromptText = "";
-
-function text(value: string): ToolResult {
-  return { content: [{ type: "text", text: value }] };
-}
-
-function json(value: unknown): ToolResult {
-  return text(JSON.stringify(safeSerialize(value), null, 2));
-}
-
-function el(selector: string): Element {
-  const found = document.querySelector(selector);
-  if (!found) throw new Error(`No element matches selector: ${selector}`);
-  return found;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function numberArg(value: unknown, fallback: number, min = Number.NEGATIVE_INFINITY, max = Number.POSITIVE_INFINITY): number {
-  const n = Number(value ?? fallback);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, n));
-}
-
-function stringArg(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function normalizeText(value: string): string {
-  return value.trim().replace(/\s+/g, " ");
-}
-
-function textMatches(value: string, query: unknown, exact: unknown): boolean {
-  const needle = normalizeText(String(query ?? ""));
-  if (!needle) return false;
-  const haystack = normalizeText(value);
-  return exact === true ? haystack === needle : haystack.toLowerCase().includes(needle.toLowerCase());
-}
-
-function escapeSelectorPart(value: string): string {
-  const css = (globalThis as { CSS?: { escape?: (v: string) => string } }).CSS;
-  if (css?.escape) return css.escape(value);
-  return value.replace(/[^a-zA-Z0-9_-]/g, (ch) => `\\${ch}`);
-}
-
-function selectorLiteral(value: string): string {
-  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-}
-
-function queryCount(selector: string): number {
-  try {
-    return document.querySelectorAll(selector).length;
-  } catch {
-    return 0;
-  }
-}
-
-function selectorFor(element: Element): string {
-  if (element.id) return `#${escapeSelectorPart(element.id)}`;
-
-  const parts: string[] = [];
-  for (let node: Element | null = element; node && node !== document.documentElement; node = node.parentElement) {
-    const tag = node.tagName.toLowerCase();
-    const classes = [...node.classList].filter(Boolean).slice(0, 3);
-    let part = tag;
-    if (classes.length) {
-      const classSelector = `${tag}.${classes.map(escapeSelectorPart).join(".")}`;
-      if (queryCount(classSelector) <= 5) part = classSelector;
-    }
-
-    const parent = node.parentElement;
-    if (parent) {
-      const siblings = [...parent.children].filter((child) => child.tagName === node.tagName);
-      if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(node) + 1})`;
-    }
-
-    parts.unshift(part);
-    const candidate = parts.join(" > ");
-    if (queryCount(candidate) === 1) return candidate;
-  }
-
-  return parts.join(" > ") || element.tagName.toLowerCase();
-}
-
-function elementText(element: Element): string {
-  return normalizeText(element.textContent ?? "");
-}
-
-function snapshotElement(element: Element): ElementSnapshot {
-  const rect = element.getBoundingClientRect();
-  return {
-    selector: selectorFor(element),
-    tag: element.tagName.toLowerCase(),
-    id: element.id || undefined,
-    classes: [...element.classList].filter(Boolean),
-    text: elementText(element).slice(0, 300) || undefined,
-    attributes: Object.fromEntries([...element.attributes].slice(0, 30).map((a) => [a.name, a.value])),
-    rect: { x: rect.x, y: rect.y, top: rect.top, right: rect.right, bottom: rect.bottom, left: rect.left, width: rect.width, height: rect.height },
-    pickedAt: new Date().toISOString(),
-  };
-}
-
-function labelTextForInput(element: Element): string {
-  if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement)) return "";
-  return "labels" in element ? [...(element.labels ?? [])].map(elementText).join(" ").trim() : "";
-}
-
-function accessibleName(element: Element): string {
-  const ariaLabel = element.getAttribute("aria-label")?.trim();
-  if (ariaLabel) return ariaLabel;
-  const labelledBy = element.getAttribute("aria-labelledby")?.trim();
-  if (labelledBy) {
-    const labelledText = labelledBy
-      .split(/\s+/)
-      .map((id) => document.getElementById(id)?.textContent?.trim() ?? "")
-      .filter(Boolean)
-      .join(" ");
-    if (labelledText) return labelledText;
-  }
-  if (element instanceof HTMLImageElement) return element.alt.trim();
-  if (element instanceof HTMLInputElement) {
-    const label = labelTextForInput(element);
-    if (label) return label;
-    if (["button", "submit", "reset"].includes(element.type)) return element.value.trim();
-    return element.placeholder.trim();
-  }
-  return elementText(element);
-}
-
-function isVisibleElement(element: Element): boolean {
-  const style = getComputedStyle(element);
-  return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity || 1) > 0 && element.getClientRects().length > 0;
-}
-
-function isDisabledElement(element: Element): boolean {
-  if (element.getAttribute("aria-disabled") === "true") return true;
-  if (element instanceof HTMLButtonElement || element instanceof HTMLInputElement || element instanceof HTMLSelectElement || element instanceof HTMLTextAreaElement || element instanceof HTMLOptionElement) {
-    return element.disabled;
-  }
-  return false;
-}
-
-function isEditableElement(element: Element): boolean {
-  if (element instanceof HTMLTextAreaElement) return !element.readOnly && !element.disabled;
-  if (element instanceof HTMLInputElement) {
-    const type = element.type.toLowerCase();
-    return !element.readOnly && !element.disabled && !["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"].includes(type);
-  }
-  return element instanceof HTMLElement && element.isContentEditable;
-}
-
-function implicitRole(element: Element): string | undefined {
-  const tag = element.tagName.toLowerCase();
-  if (tag === "a" && element.hasAttribute("href")) return "link";
-  if (tag === "button") return "button";
-  if (tag === "textarea") return "textbox";
-  if (tag === "select") return element.hasAttribute("multiple") ? "listbox" : "combobox";
-  if (tag === "img") return "img";
-  if (/^h[1-6]$/.test(tag)) return "heading";
-  if (tag === "form") return "form";
-  if (tag === "nav") return "navigation";
-  if (tag === "main") return "main";
-  if (tag === "header") return "banner";
-  if (tag === "footer") return "contentinfo";
-  if (tag === "input") {
-    const type = (element.getAttribute("type") || "text").toLowerCase();
-    if (["button", "submit", "reset"].includes(type)) return "button";
-    if (type === "checkbox") return "checkbox";
-    if (type === "radio") return "radio";
-    if (type === "range") return "slider";
-    if (type === "number") return "spinbutton";
-    if (["email", "password", "search", "tel", "text", "url"].includes(type)) return type === "search" ? "searchbox" : "textbox";
-  }
-  return undefined;
-}
-
-function elementRole(element: Element): string | undefined {
-  return element.getAttribute("role")?.trim() || implicitRole(element);
-}
-
-function allElements(root: ParentNode = document): Element[] {
-  const base = root instanceof Document ? root.documentElement : root;
-  if (base instanceof Element) return [base, ...base.querySelectorAll("*")];
-  return [...root.querySelectorAll("*")];
-}
-
-function inputLabels(element: Element): string[] {
-  if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement)) return [];
-  const out: string[] = [];
-  if ("labels" in element) out.push(...[...(element.labels ?? [])].map(elementText));
-  const ariaLabel = element.getAttribute("aria-label");
-  if (ariaLabel) out.push(ariaLabel);
-  const placeholder = "placeholder" in element ? String(element.placeholder ?? "") : "";
-  if (placeholder) out.push(placeholder);
-  return out.map(normalizeText).filter(Boolean);
-}
-
-// ---- uid snapshot (take_snapshot) --------------------------------------------
-//
-// take_snapshot walks the visible DOM, assigns short uids to interactive and
-// structural elements, and returns a compact indented text tree. The uids
-// resolve through this registry, so follow-up actions (smart_click, type_text,
-// check, ...) can target `uid` directly instead of guessing CSS selectors —
-// the same interaction model as chrome-devtools-mcp's take_snapshot.
-
-interface SnapshotEntry {
-  element: Element;
-  children: SnapshotEntry[];
-}
-
-let snapshotGeneration = 0;
-let snapshotUidSeq = 0;
-const snapshotRefs = new Map<string, WeakRef<Element>>();
-
-const INTERACTIVE_ROLES = new Set([
-  "button", "link", "textbox", "searchbox", "checkbox", "radio", "combobox", "listbox",
-  "slider", "spinbutton", "switch", "tab", "menuitem", "menuitemcheckbox", "menuitemradio", "option",
-]);
-
-const STRUCTURAL_ROLES = new Set([
-  "heading", "navigation", "main", "banner", "contentinfo", "form", "dialog", "alertdialog",
-  "alert", "img", "table", "list", "listitem", "tablist", "tabpanel", "region", "article", "search",
-]);
-
-function isSnapshotInteractive(element: Element): boolean {
-  const role = elementRole(element);
-  if (role && INTERACTIVE_ROLES.has(role)) return true;
-  if (isEditableElement(element)) return true;
-  if (element.hasAttribute("onclick")) return true;
-  const tabindex = element.getAttribute("tabindex");
-  return tabindex !== null && Number(tabindex) >= 0;
-}
-
-function isSnapshotStructural(element: Element): boolean {
-  const role = elementRole(element);
-  return !!role && STRUCTURAL_ROLES.has(role);
-}
-
-function snapshotStates(element: Element): string[] {
-  const states: string[] = [];
-  if (isDisabledElement(element)) states.push("disabled");
-  if (element instanceof HTMLInputElement && ["checkbox", "radio"].includes(element.type)) {
-    states.push(element.checked ? "checked" : "unchecked");
-  }
-  const expanded = element.getAttribute("aria-expanded");
-  if (expanded === "true") states.push("expanded");
-  else if (expanded === "false") states.push("collapsed");
-  if (element.getAttribute("aria-selected") === "true") states.push("selected");
-  if (element instanceof HTMLOptionElement && element.selected) states.push("selected");
-  return states;
-}
-
-function snapshotLine(uid: string, element: Element): string {
-  const role = elementRole(element) ?? element.tagName.toLowerCase();
-  let line = `uid=${uid} ${role}`;
-  if (role === "heading") {
-    const level = element.getAttribute("aria-level") ?? element.tagName.match(/^H([1-6])$/i)?.[1];
-    if (level) line += ` level=${level}`;
-  }
-  const name = normalizeText(accessibleName(element)).slice(0, 80);
-  if (name) line += ` ${JSON.stringify(name)}`;
-  if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
-    const value = String(element.value ?? "");
-    if (value && !(element instanceof HTMLInputElement && element.type === "password")) {
-      line += ` value=${JSON.stringify(value.slice(0, 40))}`;
-    }
-  }
-  if (element instanceof HTMLAnchorElement && element.getAttribute("href")) {
-    line += ` href=${JSON.stringify(String(element.getAttribute("href")).slice(0, 80))}`;
-  }
-  const states = snapshotStates(element);
-  if (states.length) line += ` [${states.join(", ")}]`;
-  return line;
-}
-
-/** Collect interesting elements, lifting children of boring wrappers. */
-function buildSnapshotEntries(element: Element, includeHidden: boolean): SnapshotEntry[] {
-  const entries: SnapshotEntry[] = [];
-  for (const child of element.children) {
-    if (!includeHidden && !isVisibleElement(child)) continue;
-    const sub = buildSnapshotEntries(child, includeHidden);
-    if (isSnapshotInteractive(child) || isSnapshotStructural(child)) {
-      entries.push({ element: child, children: sub });
-    } else {
-      entries.push(...sub);
-    }
-  }
-  return entries;
-}
-
-function renderSnapshotEntries(entries: SnapshotEntry[], depth: number, lines: string[], budget: { left: number; truncated: boolean }): void {
-  for (const entry of entries) {
-    if (budget.left <= 0) {
-      budget.truncated = true;
-      return;
-    }
-    budget.left -= 1;
-    const uid = `${snapshotGeneration}_${++snapshotUidSeq}`;
-    snapshotRefs.set(uid, new WeakRef(entry.element));
-    lines.push(`${"  ".repeat(depth)}${snapshotLine(uid, entry.element)}`);
-    renderSnapshotEntries(entry.children, depth + 1, lines, budget);
-  }
-}
-
-function resolveUid(uid: string): Element {
-  const element = snapshotRefs.get(uid)?.deref();
-  if (!element) {
-    throw new Error(`Unknown or stale uid "${uid}" (current snapshot generation is ${snapshotGeneration}); call take_snapshot for fresh uids.`);
-  }
-  if (!element.isConnected) {
-    throw new Error(`Element for uid "${uid}" is no longer attached to the DOM; call take_snapshot again.`);
-  }
-  return element;
-}
-
-function clearSnapshotRefs(): void {
-  snapshotRefs.clear();
-}
-
-function locatorMatches(args: Record<string, unknown>, rootArg?: ParentNode, applyNth = true): Element[] {
-  const selector = stringArg(args.selector);
-  const exact = args.exact === true;
-  let matches: Element[];
-
-  if (args.uid !== undefined) {
-    // Resolved through the snapshot registry; deliberately before any
-    // `document` access so stale-uid errors stay cheap and precise.
-    matches = [resolveUid(String(args.uid))];
-    if (args.visible === true) matches = matches.filter(isVisibleElement);
-    return matches;
-  }
-
-  const root = rootArg ?? document;
-  if (selector) {
-    matches = [...root.querySelectorAll(selector)];
-  } else if (args.testId !== undefined) {
-    const id = String(args.testId ?? "");
-    matches = [...root.querySelectorAll(`[data-testid=${selectorLiteral(id)}], [data-test=${selectorLiteral(id)}], [data-cy=${selectorLiteral(id)}]`)];
-  } else if (args.role !== undefined) {
-    const role = String(args.role ?? "").toLowerCase();
-    matches = allElements(root).filter((element) => elementRole(element)?.toLowerCase() === role);
-  } else if (args.label !== undefined) {
-    matches = allElements(root).filter((element) => inputLabels(element).some((label) => textMatches(label, args.label, exact)));
-  } else if (args.placeholder !== undefined) {
-    matches = allElements(root).filter((element) => element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement).filter((element) => textMatches((element as HTMLInputElement | HTMLTextAreaElement).placeholder, args.placeholder, exact));
-  } else if (args.text !== undefined) {
-    const visibleMatches = allElements(root).filter((element) => isVisibleElement(element) && textMatches(elementText(element), args.text, exact));
-    matches = visibleMatches.filter((element) => ![...element.children].some((child) => textMatches(elementText(child), args.text, exact)));
-    if (!matches.length) matches = visibleMatches;
-  } else {
-    throw new Error("Provide uid (from take_snapshot), selector, text, role, label, testId, or placeholder.");
-  }
-
-  if (args.name !== undefined) matches = matches.filter((element) => textMatches(accessibleName(element), args.name, exact));
-  if (args.visible === true) matches = matches.filter(isVisibleElement);
-
-  if (applyNth && args.nth !== undefined) {
-    const index = Number(args.nth);
-    if (!Number.isInteger(index)) throw new Error("nth must be an integer.");
-    matches = matches[index] ? [matches[index]!] : [];
-  }
-
-  return matches;
-}
-
-function locatorSummary(element: Element, opts: { includeHtml?: boolean } = {}): Record<string, unknown> {
-  return {
-    ...snapshotElement(element),
-    role: elementRole(element),
-    accessibleName: accessibleName(element) || undefined,
-    visible: isVisibleElement(element),
-    enabled: !isDisabledElement(element),
-    editable: isEditableElement(element),
-    html: opts.includeHtml ? element.outerHTML.slice(0, 1200) : undefined,
-  };
-}
-
-function centerPoint(element: Element): { x: number; y: number } {
-  const rect = element.getBoundingClientRect();
-  return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-}
-
-function coveringElement(element: Element): Element | undefined {
-  const rect = element.getBoundingClientRect();
-  if (rect.width <= 0 || rect.height <= 0) return undefined;
-  const point = centerPoint(element);
-  if (point.x < 0 || point.y < 0 || point.x > innerWidth || point.y > innerHeight) return undefined;
-  const top = document.elementFromPoint(point.x, point.y);
-  if (!top || top === element || element.contains(top)) return undefined;
-  return top;
-}
-
-async function actionabilityFor(element: Element): Promise<Record<string, unknown>> {
-  const before = element.getBoundingClientRect();
-  await sleep(50);
-  const after = element.getBoundingClientRect();
-  const coveredBy = coveringElement(element);
-  return {
-    visible: isVisibleElement(element),
-    enabled: !isDisabledElement(element),
-    stable: Math.abs(before.x - after.x) < 0.5 && Math.abs(before.y - after.y) < 0.5 && Math.abs(before.width - after.width) < 0.5 && Math.abs(before.height - after.height) < 0.5,
-    receivesPointerEvents: !coveredBy,
-    coveredBy: coveredBy ? locatorSummary(coveredBy) : undefined,
-    rect: snapshotElement(element).rect,
-  };
-}
-
-async function waitForLocator(args: Record<string, unknown>, opts: { timeoutMs?: number; actionable?: boolean; strict?: boolean } = {}): Promise<Element> {
-  const timeoutMs = numberArg(opts.timeoutMs ?? args.timeoutMs, 5000, 0, 60000);
-  const strict = opts.strict ?? args.strict === true;
-  const start = Date.now();
-  let lastCount = 0;
-  for (;;) {
-    const matches = locatorMatches(args);
-    lastCount = matches.length;
-    if (strict && matches.length > 1) throw new Error(`Locator matched ${matches.length} elements; pass nth or make it stricter.`);
-    const element = matches[0];
-    if (element) {
-      if (!opts.actionable) return element;
-      element.scrollIntoView({ block: "center", inline: "center" });
-      await sleep(80);
-      const state = await actionabilityFor(element);
-      if (state.visible && state.enabled && state.stable && state.receivesPointerEvents) return element;
-    }
-    if (Date.now() - start > timeoutMs) throw new Error(`Timed out after ${timeoutMs}ms waiting for locator (${lastCount} match(es)).`);
-    await sleep(100);
-  }
-}
-
-function focusElement(element: Element): void {
-  if (element instanceof HTMLElement || element instanceof SVGElement) element.focus();
-}
-
-function dispatchMouseLike(element: Element, type: string, init: MouseEventInit = {}): boolean {
-  const point = centerPoint(element);
-  return element.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, composed: true, view: window, clientX: point.x, clientY: point.y, button: 0, buttons: type === "mouseup" || type === "click" || type === "dblclick" ? 0 : 1, ...init }));
-}
-
-function dispatchPointerLike(element: Element, type: string): boolean {
-  const point = centerPoint(element);
-  const init: PointerEventInit = { bubbles: true, cancelable: true, composed: true, view: window, clientX: point.x, clientY: point.y, button: 0, buttons: type === "pointerup" ? 0 : 1, pointerId: 1, pointerType: "mouse", isPrimary: true };
-  if (typeof PointerEvent === "function") return element.dispatchEvent(new PointerEvent(type, init));
-  return dispatchMouseLike(element, type.replace(/^pointer/, "mouse"));
-}
-
-function clickElement(element: Element, detail = 1): void {
-  focusElement(element);
-  dispatchPointerLike(element, "pointerover");
-  dispatchMouseLike(element, "mouseover", { detail });
-  dispatchPointerLike(element, "pointermove");
-  dispatchMouseLike(element, "mousemove", { detail });
-  dispatchPointerLike(element, "pointerdown");
-  dispatchMouseLike(element, "mousedown", { detail });
-  dispatchPointerLike(element, "pointerup");
-  dispatchMouseLike(element, "mouseup", { detail });
-  if (detail === 2) dispatchMouseLike(element, "dblclick", { detail });
-  else if (element instanceof HTMLElement) element.click();
-  else dispatchMouseLike(element, "click", { detail });
-}
-
-function setNativeProperty(element: Element, prop: "value" | "checked", value: unknown): void {
-  const proto = Object.getPrototypeOf(element) as object | null;
-  const descriptor = proto ? Object.getOwnPropertyDescriptor(proto, prop) : undefined;
-  if (descriptor?.set) descriptor.set.call(element, value);
-  else (element as unknown as Record<string, unknown>)[prop] = value;
-}
-
-function inputEvents(element: Element): void {
-  element.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
-  element.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
-}
-
-function setTextValue(element: Element, value: string, append = false): void {
-  focusElement(element);
-  if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
-    setNativeProperty(element, "value", append ? `${element.value}${value}` : value);
-    inputEvents(element);
-    return;
-  }
-  if (element instanceof HTMLElement && element.isContentEditable) {
-    if (!append) element.textContent = "";
-    const selection = getSelection();
-    const range = document.createRange();
-    range.selectNodeContents(element);
-    range.collapse(false);
-    selection?.removeAllRanges();
-    selection?.addRange(range);
-    document.execCommand("insertText", false, value);
-    inputEvents(element);
-    return;
-  }
-  throw new Error("Target is not a text input, textarea, or contenteditable element.");
-}
-
-function setCheckedValue(element: Element, checked: boolean): void {
-  if (!(element instanceof HTMLInputElement) || !["checkbox", "radio"].includes(element.type)) throw new Error("Target is not a checkbox or radio input.");
-  focusElement(element);
-  if (element.checked !== checked) {
-    setNativeProperty(element, "checked", checked);
-    inputEvents(element);
-  }
-}
-
-function triggerKey(element: Element, key: string, opts: Record<string, unknown> = {}): void {
-  focusElement(element);
-  const init: KeyboardEventInit = { key, code: typeof opts.code === "string" ? opts.code : key.length === 1 ? `Key${key.toUpperCase()}` : key, bubbles: true, cancelable: true, composed: true, altKey: opts.altKey === true, ctrlKey: opts.ctrlKey === true, metaKey: opts.metaKey === true, shiftKey: opts.shiftKey === true };
-  element.dispatchEvent(new KeyboardEvent("keydown", init));
-  element.dispatchEvent(new KeyboardEvent("keyup", init));
-}
 
 function decodeBase64(value: string): Uint8Array {
   const binary = atob(value);
@@ -812,36 +318,8 @@ export function teardownAutomationTools(): void {
 }
 
 export function registerAutomationTools(server: EmbeddedMcpServer, opts: { extCall: ExtCall }): void {
-  server.registerTool(
-    {
-      name: "take_snapshot",
-      description:
-        "Take a compact text snapshot of the page's interactive/structural elements with stable uids. " +
-        "Pass a uid to smart_click / type_text / hover / check / select_option etc. instead of a selector. " +
-        "Uids go stale after navigation or DOM changes — take a fresh snapshot then.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          maxNodes: { type: "number", description: "max elements in the snapshot (default 400)" },
-          includeHidden: { type: "boolean", description: "include elements that are not visible (default false)" },
-        },
-      },
-    },
-    (args) => {
-      snapshotGeneration += 1;
-      snapshotUidSeq = 0;
-      snapshotRefs.clear();
-      const budget = { left: numberArg(args.maxNodes, 400, 10, 2000), truncated: false };
-      const entries = buildSnapshotEntries(document.body, args.includeHidden === true);
-      const lines: string[] = [];
-      renderSnapshotEntries(entries, 0, lines, budget);
-      const header = `Page snapshot — ${document.title ? `"${normalizeText(document.title)}" — ` : ""}${location.href}`;
-      const footer = budget.truncated
-        ? `\n[truncated at ${numberArg(args.maxNodes, 400, 10, 2000)} nodes — pass a larger maxNodes to see more]`
-        : "";
-      return text(`${header}\n${lines.join("\n") || "(no interactive or structural elements found)"}${footer}`);
-    },
-  );
+  // take_snapshot lives in the core input group (input-tools.ts) — uid targeting
+  // is what the core click/type_text/press_key tools build on.
 
   server.registerTool(
     {
@@ -917,19 +395,9 @@ export function registerAutomationTools(server: EmbeddedMcpServer, opts: { extCa
     (args) => json({ count: locatorMatches(args, document, false).length }),
   );
 
-  server.registerTool(
-    {
-      name: "smart_click",
-      description: "Click a locator (uid from take_snapshot, or selector/text/role/...) after Playwright-like visibility/enabled/stability/coverage checks.",
-      inputSchema: { type: "object", properties: { uid: { type: "string", description: "element uid from take_snapshot" }, selector: { type: "string" }, text: { type: "string" }, role: { type: "string" }, name: { type: "string" }, label: { type: "string" }, testId: { type: "string" }, exact: { type: "boolean" }, nth: { type: "number" }, timeoutMs: { type: "number", description: "default 5000" }, force: { type: "boolean", description: "skip actionability checks" }, strict: { type: "boolean" } } },
-    },
-    async (args) => {
-      const element = await waitForLocator(args, { actionable: args.force !== true, strict: args.strict === true });
-      const before = await actionabilityFor(element);
-      clickElement(element);
-      return json({ clicked: locatorSummary(element), actionability: before });
-    },
-  );
+  // click / type_text / press_key live in the always-available core input group
+  // (builtins.ts → registerInputTools) so they work with or without this
+  // opt-in toolset, and there is only one implementation of each action.
 
   server.registerTool({ name: "hover", description: "Move the synthetic pointer over a locator.", inputSchema: { type: "object", properties: { uid: { type: "string", description: "element uid from take_snapshot" }, selector: { type: "string" }, text: { type: "string" }, role: { type: "string" }, name: { type: "string" }, testId: { type: "string" }, timeoutMs: { type: "number" } } } }, async (args) => {
     const element = await waitForLocator(args, { actionable: false });
@@ -947,25 +415,6 @@ export function registerAutomationTools(server: EmbeddedMcpServer, opts: { extCa
     clickElement(element, 1);
     dispatchMouseLike(element, "dblclick", { detail: 2 });
     return json({ doubleClicked: locatorSummary(element) });
-  });
-
-  server.registerTool({ name: "type_text", description: "Type or set text into an input/textarea/contenteditable locator and fire input/change events.", inputSchema: { type: "object", properties: { uid: { type: "string", description: "element uid from take_snapshot" }, selector: { type: "string" }, label: { type: "string" }, placeholder: { type: "string" }, text: { type: "string" }, value: { type: "string" }, append: { type: "boolean" }, timeoutMs: { type: "number" } } } }, async (args) => {
-    const element = await waitForLocator(args, { actionable: false });
-    setTextValue(element, String(args.value ?? args.text ?? ""), args.append === true);
-    return json({ typed: locatorSummary(element), value: (element as HTMLInputElement | HTMLTextAreaElement).value ?? element.textContent ?? "" });
-  });
-
-  server.registerTool({ name: "press_key", description: "Dispatch keydown/keyup to a locator or the active element.", inputSchema: { type: "object", properties: { uid: { type: "string", description: "element uid from take_snapshot" }, selector: { type: "string" }, text: { type: "string" }, role: { type: "string" }, name: { type: "string" }, label: { type: "string" }, testId: { type: "string" }, placeholder: { type: "string" }, key: { type: "string" }, code: { type: "string" }, altKey: { type: "boolean" }, ctrlKey: { type: "boolean" }, metaKey: { type: "boolean" }, shiftKey: { type: "boolean" } }, required: ["key"] } }, async (args) => {
-    const hasLocator = args.uid || args.selector || args.text || args.role || args.name || args.label || args.testId || args.placeholder;
-    const element = hasLocator ? await waitForLocator(args) : (document.activeElement ?? document.body);
-    triggerKey(element, String(args.key ?? ""), args);
-    return json({ pressed: args.key, target: locatorSummary(element) });
-  });
-
-  server.registerTool({ name: "clear_value", description: "Clear an input/textarea/contenteditable locator.", inputSchema: { type: "object", properties: { uid: { type: "string", description: "element uid from take_snapshot" }, selector: { type: "string" }, label: { type: "string" }, placeholder: { type: "string" }, timeoutMs: { type: "number" } } } }, async (args) => {
-    const element = await waitForLocator(args);
-    setTextValue(element, "", false);
-    return json({ cleared: locatorSummary(element) });
   });
 
   server.registerTool({ name: "select_option", description: "Select one or more values on a <select> element and fire input/change events.", inputSchema: { type: "object", properties: { uid: { type: "string", description: "element uid from take_snapshot" }, selector: { type: "string" }, label: { type: "string" }, value: { description: "string or string[]" }, timeoutMs: { type: "number" } }, required: ["value"] } }, async (args) => {

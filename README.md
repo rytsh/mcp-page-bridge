@@ -29,9 +29,10 @@ flowchart LR
     end
 
     subgraph ext["Browser — MV3 extension"]
-        SW["Service worker<br/>owns the WebSocket(s)"]
+        SW["Service worker<br/>owns the WebSocket(s)<br/>trusted input · CDP"]
         CS["content script<br/>(ISOLATED)"]
-        IN["inject (MAIN)<br/>window.mcp"]
+        IN["inject (MAIN)<br/>window.mcp + built-ins"]
+        FR["frame agent (MAIN)<br/>every iframe"]
         PG["Your page / app"]
     end
 
@@ -40,6 +41,7 @@ flowchart LR
     SW <-->|"chrome.runtime port"| CS
     CS <-->|"postMessage"| IN
     IN -->|"registers tools"| PG
+    SW <-->|"scripting.executeScript<br/>snapshot · actions"| FR
     B -.->|serves| D
 ```
 
@@ -377,8 +379,20 @@ See [DETAILS.md](DETAILS.md#profiles-multi-user-isolation) for the full model.
 4. Click **Enable on this tab**.
 5. Ask your agent to call `mcp_page_bridge_list_clients` to confirm the tab is connected.
 
-Every enabled tab already exposes a lean set of built-in tools (`eval`,
-`dom_query`, `click`, `screenshot`, `navigate`, …) — no page changes needed.
+Every enabled tab already exposes a lean set of built-in tools (`take_snapshot`,
+`click`, `type_text`, `press_key`, `eval`, `dom_query`, `screenshot`,
+`navigate`, …) — no page changes needed:
+
+- **Snapshot → act → observe.** `take_snapshot` hands out stable `uid`s for the
+  page's interactive elements (cross-origin iframes included, as `f1e2`), and
+  action tools append a fresh snapshot to their result, so a click and its
+  outcome are one call. Ask for pixels with `observe:"screenshot"`.
+- **Keyboard-accurate input.** `type_text` types character by character (embed
+  keys with `<kbd>Enter</kbd>`), `press_key` takes chords like `Meta+A
+  Backspace`. Turn on **Trusted input** in the popup and both dispatch real
+  browser events for pages that ignore synthetic ones.
+- **Screenshots that line up with the tree.** `screenshot` supports
+  `fullPage:true` and `refs:true` (uid labels drawn on the page).
 
 Optional dashboard: open `http://127.0.0.1:8787/` while the bridge is running.
 Use **Shutdown bridge** there when you want to stop the background daemon.

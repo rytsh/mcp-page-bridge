@@ -7,6 +7,9 @@
 import type { ContentBlock, EmbeddedMcpServer, ToolResult } from "./embedded-server.js";
 import { registerAutomationTools } from "./automation-tools.js";
 import { registerCdpTools } from "./cdp-tools.js";
+import { registerInputTools } from "./input-tools.js";
+import { observeMode, observeProperty, withObservation } from "./observe.js";
+import { clampToolText, hideUidOverlay, showUidOverlay } from "./dom-core.js";
 import { safeSerialize, toLogString } from "./serialize.js";
 
 export interface ConsoleEntry {
@@ -50,7 +53,7 @@ export function installConsoleCapture(max = 300): ConsoleBuffer {
 }
 
 function text(value: string): ToolResult {
-  return { content: [{ type: "text", text: value }] };
+  return { content: [{ type: "text", text: clampToolText(value) }] };
 }
 
 function json(value: unknown): ToolResult {
@@ -774,7 +777,7 @@ function collectMediaQueries(maxRules: unknown): string[] {
 
 export function registerBuiltins(
   server: EmbeddedMcpServer,
-  opts: { extCall: ExtCall; console: ConsoleBuffer; includeEval?: boolean; coreTools?: boolean; designTools?: boolean; automationTools?: boolean; cdpTools?: boolean },
+  opts: { extCall: ExtCall; console: ConsoleBuffer; includeEval?: boolean; coreTools?: boolean; designTools?: boolean; automationTools?: boolean; cdpTools?: boolean; trustedInput?: boolean },
 ): void {
   const captureScreenshot = async (): Promise<{ dataUrl: string; base64: string }> => {
     const res = (await opts.extCall("screenshot", { download: false })) as { dataUrl: string };
@@ -861,27 +864,13 @@ export function registerBuiltins(
 
   server.registerTool(
     {
-      name: "click",
-      description: "Click the first element matching a CSS selector.",
-      inputSchema: {
-        type: "object",
-        properties: { selector: { type: "string" } },
-        required: ["selector"],
-      },
-    },
-    (args) => {
-      (el(String(args.selector)) as HTMLElement).click();
-      return text(`clicked ${args.selector}`);
-    },
-  );
-
-  server.registerTool(
-    {
       name: "set_value",
-      description: "Set an input/textarea/select value and fire input+change events.",
+      description:
+        "Set an input/textarea/select value in one shot and fire input+change events. " +
+        "Prefer type_text when the page reacts to typing (autocomplete, search-as-you-type, validation on keystrokes).",
       inputSchema: {
         type: "object",
-        properties: { selector: { type: "string" }, value: { type: "string" } },
+        properties: { selector: { type: "string" }, value: { type: "string" }, observe: observeProperty("none") },
         required: ["selector", "value"],
       },
     },
@@ -890,7 +879,7 @@ export function registerBuiltins(
       node.value = String(args.value ?? "");
       node.dispatchEvent(new Event("input", { bubbles: true }));
       node.dispatchEvent(new Event("change", { bubbles: true }));
-      return text(`set ${args.selector} = ${args.value}`);
+      return withObservation(text(`set ${args.selector} = ${args.value}`), observeMode(args, "none"), { extCall: opts.extCall });
     },
   );
 
@@ -904,16 +893,18 @@ export function registerBuiltins(
           selector: { type: "string" },
           x: { type: "number" },
           y: { type: "number" },
+          observe: observeProperty("snapshot"),
         },
       },
     },
     (args) => {
+      const observe = observeMode(args);
       if (args.selector) {
         el(String(args.selector)).scrollIntoView({ behavior: "smooth", block: "center" });
-        return text(`scrolled to ${args.selector}`);
+        return withObservation(text(`scrolled to ${args.selector}`), observe, { extCall: opts.extCall, settleMs: 400 });
       }
       window.scrollTo({ left: Number(args.x ?? 0), top: Number(args.y ?? 0), behavior: "smooth" });
-      return text(`scrolled to (${args.x ?? 0}, ${args.y ?? 0})`);
+      return withObservation(text(`scrolled to (${args.x ?? 0}, ${args.y ?? 0})`), observe, { extCall: opts.extCall, settleMs: 400 });
     },
   );
 
@@ -967,6 +958,13 @@ export function registerBuiltins(
       return text(html.length > max ? `${html.slice(0, max)}…(${html.length - max} more)` : html);
     },
   );
+  }
+
+  // Input primitives (click / type_text / press_key / clear_value) are shared:
+  // they belong to the core toolset, but stay available when a page turns core
+  // tools off and only enables the automation toolset.
+  if (opts.coreTools !== false || opts.automationTools) {
+    registerInputTools(server, { extCall: opts.extCall, trustedInput: opts.trustedInput });
   }
 
   if (opts.automationTools) registerAutomationTools(server, { extCall: opts.extCall });
@@ -1406,26 +1404,58 @@ export function registerBuiltins(
   server.registerTool(
     {
       name: "screenshot",
-      description: "PNG screenshot of the visible tab; download:true also saves it to Downloads.",
+      description:
+        "PNG screenshot of the tab. fullPage:true captures the whole scrollable page (needs the optional debugger permission), " +
+        "refs:true labels every element from the last snapshot with its uid so the image and the uid tree line up, " +
+        "download:true also saves it to Downloads.",
       inputSchema: {
         type: "object",
         properties: {
+          fullPage: { type: "boolean", description: "capture beyond the viewport (default false)" },
+          refs: { type: "boolean", description: "overlay uid labels from the last snapshot (default false)" },
           download: { type: "boolean", description: "also save to Downloads" },
           filename: { type: "string", description: "download filename" },
         },
       },
     },
     async (args) => {
-      const res = (await opts.extCall("screenshot", {
-        download: !!args.download,
-        filename: args.filename ? String(args.filename) : undefined,
-      })) as { dataUrl: string; savedAs?: string };
-      const base64 = res.dataUrl.includes(",")
-        ? res.dataUrl.slice(res.dataUrl.indexOf(",") + 1)
-        : res.dataUrl;
-      const content: ContentBlock[] = [{ type: "image", data: base64, mimeType: "image/png" }];
-      if (res.savedAs) content.push({ type: "text", text: `Saved to Downloads as ${res.savedAs}` });
-      return { content } satisfies ToolResult;
+      const withRefs = args.refs === true;
+      let markers = 0;
+      if (withRefs) {
+        try {
+          const shown = (await opts.extCall("frameOverlay", { show: true })) as { markers?: number };
+          markers = shown?.markers ?? 0;
+        } catch {
+          markers = showUidOverlay();
+        }
+        // Give the compositor a frame to paint the markers.
+        await new Promise((resolve) => setTimeout(resolve, 80));
+      }
+      try {
+        const res = (await opts.extCall("screenshot", {
+          download: !!args.download,
+          filename: args.filename ? String(args.filename) : undefined,
+          fullPage: args.fullPage === true,
+        })) as { dataUrl: string; savedAs?: string; fullPage?: boolean; fullPageError?: string };
+        const base64 = res.dataUrl.includes(",")
+          ? res.dataUrl.slice(res.dataUrl.indexOf(",") + 1)
+          : res.dataUrl;
+        const content: ContentBlock[] = [{ type: "image", data: base64, mimeType: "image/png" }];
+        if (withRefs) {
+          content.push({ type: "text", text: `${markers} uid label(s) drawn from the last snapshot.` });
+        }
+        if (res.fullPageError) content.push({ type: "text", text: `full page unavailable (${res.fullPageError}); captured the viewport instead` });
+        if (res.savedAs) content.push({ type: "text", text: `Saved to Downloads as ${res.savedAs}` });
+        return { content } satisfies ToolResult;
+      } finally {
+        if (withRefs) {
+          try {
+            await opts.extCall("frameOverlay", { show: false });
+          } catch {
+            hideUidOverlay();
+          }
+        }
+      }
     },
   );
 

@@ -5,7 +5,7 @@
  */
 import { MCP_PAGE_BRIDGE_VERSION } from "mcp-page-bridge-protocol";
 import { EmbeddedMcpServer, type MinimalTransport } from "./embedded-server.js";
-import { registerBrowserTools } from "./browser-tools.js";
+import { registerBrowserTools, type BrowserToolDeps } from "./browser-tools.js";
 
 export class BrowserProvider {
   private ws?: WebSocket;
@@ -16,7 +16,10 @@ export class BrowserProvider {
   /** Incremented on every (re)connect/teardown so stale socket events are ignored. */
   private generation = 0;
 
-  constructor(private readonly urlFn: () => Promise<string>) {}
+  constructor(
+    private readonly urlFn: () => Promise<string>,
+    private readonly deps: BrowserToolDeps,
+  ) {}
 
   get active(): boolean {
     return this.want;
@@ -87,7 +90,7 @@ export class BrowserProvider {
       version: MCP_PAGE_BRIDGE_VERSION,
       title: "Browser control",
     });
-    registerBrowserTools(server);
+    registerBrowserTools(server, this.deps);
     this.server = server;
 
     const transport: MinimalTransport = {

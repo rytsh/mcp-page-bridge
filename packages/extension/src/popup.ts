@@ -36,6 +36,7 @@ interface Status {
   designTools: boolean;
   automationTools: boolean;
   cdpTools: boolean;
+  trustedInput: boolean;
   cdpDebuggerPermission: boolean;
   cdpAttached: boolean;
   selectedElements?: SelectedElementStatus[];
@@ -169,6 +170,10 @@ function render(status: Status): void {
   el<HTMLInputElement>("designTools").checked = !!status.designTools;
   el<HTMLInputElement>("automationTools").checked = !!status.automationTools;
   el<HTMLInputElement>("cdpTools").checked = !!status.cdpTools;
+  el<HTMLInputElement>("trustedInput").checked = !!status.trustedInput;
+  el<HTMLParagraphElement>("trustedInputHint").textContent = status.trustedInput
+    ? "click / type_text / press_key dispatch real events via the debugger. The tab is focused briefly for each action."
+    : "Off: input uses synthetic DOM events (isTrusted:false). Turn on for pages that ignore them; needs the debugger permission.";
   el<HTMLParagraphElement>("cdpHint").textContent = status.cdpTools
     ? `Advanced CDP tools enabled${status.cdpAttached ? " and attached" : ""}. Chrome shows a debugging banner while attached.`
     : status.cdpDebuggerPermission
@@ -294,12 +299,20 @@ async function main(): Promise<void> {
     const automationTools = el<HTMLInputElement>("automationTools").checked;
     const tabGroups = el<HTMLInputElement>("tabGroups").checked;
     let cdpTools = el<HTMLInputElement>("cdpTools").checked;
-    if (cdpTools && !(await ensureDebuggerPermission())) {
-      cdpTools = false;
-      el<HTMLInputElement>("cdpTools").checked = false;
-      el<HTMLParagraphElement>("cdpHint").textContent = "Debugger permission was not granted; Advanced CDP tools stayed off.";
+    let trustedInput = el<HTMLInputElement>("trustedInput").checked;
+    if ((cdpTools || trustedInput) && !(await ensureDebuggerPermission())) {
+      if (cdpTools) {
+        cdpTools = false;
+        el<HTMLInputElement>("cdpTools").checked = false;
+        el<HTMLParagraphElement>("cdpHint").textContent = "Debugger permission was not granted; Advanced CDP tools stayed off.";
+      }
+      if (trustedInput) {
+        trustedInput = false;
+        el<HTMLInputElement>("trustedInput").checked = false;
+        el<HTMLParagraphElement>("trustedInputHint").textContent = "Debugger permission was not granted; trusted input stayed off.";
+      }
     }
-    return { browserControl, coreTools, designTools, automationTools, cdpTools, tabGroups };
+    return { browserControl, coreTools, designTools, automationTools, cdpTools, trustedInput, tabGroups };
   }
 
   // The bridge identity (host, port, token, secure, profileKey) is per-tab.
@@ -367,6 +380,7 @@ async function main(): Promise<void> {
   el<HTMLInputElement>("designTools").addEventListener("change", () => void saveFlags());
   el<HTMLInputElement>("automationTools").addEventListener("change", () => void saveFlags());
   el<HTMLInputElement>("cdpTools").addEventListener("change", () => void saveFlags());
+  el<HTMLInputElement>("trustedInput").addEventListener("change", () => void saveFlags());
 
   el<HTMLInputElement>("viewSelection").addEventListener("change", async () => {
     const visible = el<HTMLInputElement>("viewSelection").checked;

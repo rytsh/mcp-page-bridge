@@ -62,6 +62,13 @@ export const MCP_PAGE_BRIDGE_DASHBOARD_CLOSE_TAB = "mcpPageBridge/closeTab" as c
 export const DASHBOARD_HEADER = "x-mcp-page-bridge-dashboard" as const;
 export const DASHBOARD_HEADER_VALUE = "1" as const;
 
+/**
+ * Attribute the content script sets on `<html>` for loopback pages, carrying the
+ * extension version. The dashboard uses it to tell "extension not installed"
+ * apart from "installed but no tab enabled".
+ */
+export const EXTENSION_MARK_ATTRIBUTE = "data-mcp-page-bridge-extension" as const;
+
 /** Header carrying the shared token on HTTP API requests when a token is set. */
 export const TOKEN_HEADER = "x-mcp-page-bridge-token" as const;
 
@@ -79,11 +86,16 @@ export const BUILTIN_TOOL_NAMES = [
   "eval",
   "dom_query",
   "get_page_info",
-  "click",
   "set_value",
   "scroll",
   "wait_for",
   "get_html",
+  // Core input primitives (shared by the core and automation toolsets)
+  "take_snapshot",
+  "click",
+  "type_text",
+  "press_key",
+  "clear_value",
   // Element selection
   "get_selected_element",
   "get_selected_elements",
@@ -115,19 +127,14 @@ export const BUILTIN_TOOL_NAMES = [
   "navigate",
   "reload",
   // Automation (opt-in)
-  "take_snapshot",
   "find_by_text",
   "find_by_role",
   "find_by_label",
   "find_by_test_id",
   "locator_snapshot",
   "locator_count",
-  "smart_click",
   "hover",
   "double_click",
-  "type_text",
-  "press_key",
-  "clear_value",
   "select_option",
   "check",
   "uncheck",
@@ -175,7 +182,15 @@ export const BUILTIN_TOOL_NAMES = [
 ] as const;
 
 /** Names of the opt-in "browser" provider tools (service-worker hosted, all-tabs). */
-export const BROWSER_TOOL_NAMES = ["list_tabs", "open_tab", "activate_tab", "navigate_tab", "close_tab"] as const;
+export const BROWSER_TOOL_NAMES = [
+  "list_tabs",
+  "open_tab",
+  "activate_tab",
+  "navigate_tab",
+  "enable_tab",
+  "close_tab",
+  "close_agent_tabs",
+] as const;
 
 /** Direction of an internal channel message relative to the bridge. */
 export type ChannelDir = "up" | "down";
@@ -254,6 +269,13 @@ export interface ControlPayload {
   automationTools?: boolean;
   /** On "activate": whether optional Chrome DevTools Protocol tools are registered. */
   cdpTools?: boolean;
+  /**
+   * On "activate": whether click/type_text/press_key should dispatch **trusted**
+   * input through CDP (`Input.dispatch*`) instead of synthetic DOM events.
+   * Requires the optional debugger permission; falls back to synthetic events
+   * whenever the CDP path is unavailable or fails.
+   */
+  trustedInput?: boolean;
 }
 
 export const MCP_PAGE_BRIDGE_MARK = "__mcpPageBridge" as const;

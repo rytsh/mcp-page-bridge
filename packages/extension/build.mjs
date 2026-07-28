@@ -30,6 +30,8 @@ const entries = {
   content: "src/content.ts",
   inject: "src/inject.ts",
   popup: "src/popup.ts",
+  // Injected on demand into every frame of a tab (cross-frame snapshot/actions).
+  "frame-agent": "src/frame-agent.ts",
 };
 
 async function copyStatic() {

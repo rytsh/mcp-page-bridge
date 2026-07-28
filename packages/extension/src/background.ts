@@ -75,6 +75,10 @@ let automationTools = false;
 // Optional Chrome DevTools Protocol tools. Requires the optional "debugger"
 // permission and is kept off by default because Chrome shows a debugging banner.
 let cdpTools = false;
+// Optional trusted input: click/type_text/press_key dispatch real Input.* events
+// through CDP instead of synthetic DOM events. Also requires the optional
+// "debugger" permission; the page falls back to synthetic events when it fails.
+let trustedInput = false;
 
 interface CdpEventEntry {
   method: string;
@@ -160,12 +164,36 @@ function bounceTabSockets(state: TabState): void {
 
 // Optional, opt-in "browser" provider (controls all tabs, not just one page).
 // It is not tab-scoped, so it always talks to the default profile's daemon.
-const browserProvider = new BrowserProvider(() => wsUrl(defaultBridgeProfile()));
+const browserProvider = new BrowserProvider(() => wsUrl(defaultBridgeProfile()), {
+  enableTab: async (tabId) => {
+    const state = await ensureEnabledTab(tabId);
+    if (!state) {
+      // Restricted page: don't leave a tab marked enabled that can never connect.
+      await setEnabled(tabId, false);
+      void updateActionIcon(tabId, false);
+      return false;
+    }
+    void syncTabGroups();
+    return true;
+  },
+  isTabEnabled: (tabId) => isEnabled(tabId),
+  trackAgentTab: async (tabId) => {
+    const set = await getAgentTabs();
+    set.add(tabId);
+    await saveAgentTabs(set);
+  },
+  listAgentTabs: async () => [...(await getAgentTabs())],
+  forgetAgentTabs: async (tabIds) => {
+    const set = await getAgentTabs();
+    for (const tabId of tabIds) set.delete(tabId);
+    await saveAgentTabs(set);
+  },
+});
 
 void (async () => {
   const v = await chrome.storage.local.get([
     "bridgeProfiles", "defaultProfileId", "host", "port", "token", "secure",
-    "browserControl", "coreTools", "designTools", "automationTools", "cdpTools", "tabGroups",
+    "browserControl", "coreTools", "designTools", "automationTools", "cdpTools", "trustedInput", "tabGroups",
   ]);
   bridgeProfiles = parseProfiles(v.bridgeProfiles);
   defaultProfileId = typeof v.defaultProfileId === "string" ? v.defaultProfileId : "";
@@ -192,7 +220,8 @@ void (async () => {
   automationTools = !!v.automationTools;
   tabGroupsEnabled = !!v.tabGroups;
   cdpTools = !!v.cdpTools && (await hasDebuggerPermission());
-  if (cdpTools) ensureCdpListeners();
+  trustedInput = !!v.trustedInput && (await hasDebuggerPermission());
+  if (cdpTools || trustedInput) ensureCdpListeners();
   if (browserControl) browserProvider.start();
 })();
 
@@ -212,6 +241,18 @@ async function setEnabled(tabId: number, on: boolean): Promise<void> {
   if (on) set.add(tabId);
   else set.delete(tabId);
   await chrome.storage.session.set({ enabledTabs: [...set] });
+}
+
+// Tabs opened by the agent through the browser provider's open_tab. Tracked so
+// close_agent_tabs can clean up a session without touching the user's own tabs.
+
+async function getAgentTabs(): Promise<Set<number>> {
+  const v = await chrome.storage.session.get("agentTabs");
+  return new Set<number>((v.agentTabs as number[] | undefined) ?? []);
+}
+
+async function saveAgentTabs(set: Set<number>): Promise<void> {
+  await chrome.storage.session.set({ agentTabs: [...set] });
 }
 
 // ---- visual tab groups (opt-in switch) ----------------------------------------
@@ -395,6 +436,312 @@ function strArg(value: unknown, fallback = ""): string {
 function numArg(value: unknown, fallback: number): number {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
+}
+
+// ---- cross-frame snapshot / actions -------------------------------------------
+//
+// Page tools only see the top document, so a page assembled from cross-origin
+// iframes (payment widgets, embedded editors, ad frames) was invisible. Here we
+// inject `frame-agent.js` into every frame, ask each one for its snapshot lines,
+// and stitch them into a single tree whose uids carry the frame index (`f2e7`).
+// Actions on such a uid are routed back to the owning frame.
+
+const FRAME_AGENT_FILE = "frame-agent.js";
+
+interface FrameSection {
+  index: number;
+  frameId: number;
+  url: string;
+  title: string;
+  lines: string[];
+  truncated: boolean;
+}
+
+/** Frame index (as used in `f2e7` uids) → frameId, from the latest snapshot. */
+const frameIdsByTab = new Map<number, Map<number, number>>();
+
+async function injectFrameAgent(tabId: number): Promise<void> {
+  await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    files: [FRAME_AGENT_FILE],
+    world: "MAIN",
+    injectImmediately: true,
+  });
+}
+
+/** Frame ids that answered, main frame first. */
+async function listAgentFrames(tabId: number): Promise<number[]> {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    world: "MAIN",
+    func: () => (window as unknown as Record<string, unknown>).__mcpPageBridgeFrame !== undefined,
+  });
+  const ids = results.filter((r) => r.result === true).map((r) => r.frameId);
+  return ids.sort((a, b) => (a === 0 ? -1 : b === 0 ? 1 : a - b));
+}
+
+async function snapshotFrame(
+  tabId: number,
+  frameId: number,
+  req: { maxNodes: number; includeHidden: boolean; uidPrefix: string },
+): Promise<{ lines: string[]; truncated: boolean; url: string; title: string } | undefined> {
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId, frameIds: [frameId] },
+    world: "MAIN",
+    args: [req],
+    func: (payload: { maxNodes: number; includeHidden: boolean; uidPrefix: string }) => {
+      const api = (window as unknown as Record<string, any>).__mcpPageBridgeFrame;
+      if (!api) return undefined;
+      try {
+        return api.snapshot(payload);
+      } catch {
+        return undefined;
+      }
+    },
+  });
+  return result?.result as { lines: string[]; truncated: boolean; url: string; title: string } | undefined;
+}
+
+async function runFrameSnapshot(tabId: number, args: Record<string, unknown>): Promise<unknown> {
+  const maxNodes = Math.max(10, Math.min(2000, Math.floor(numArg(args.maxNodes, 400))));
+  const includeHidden = boolArg(args.includeHidden);
+
+  await injectFrameAgent(tabId);
+  const frameIds = await listAgentFrames(tabId);
+  if (!frameIds.length) throw new Error("No frame answered the snapshot request.");
+
+  const mapping = new Map<number, number>();
+  const sections: FrameSection[] = [];
+
+  for (const frameId of frameIds) {
+    const index = sections.length;
+    // The top frame keeps bare uids (e1, e2, …); sub-frames get an f<index> prefix.
+    const uidPrefix = index === 0 ? "" : `f${index}`;
+    const rendered = await snapshotFrame(tabId, frameId, { maxNodes, includeHidden, uidPrefix });
+    if (!rendered) continue;
+    // Empty sub-frames (trackers, spacer iframes) only add noise.
+    if (!rendered.lines.length && index !== 0) continue;
+    mapping.set(index, frameId);
+    sections.push({ index, frameId, url: rendered.url, title: rendered.title, lines: rendered.lines, truncated: rendered.truncated });
+  }
+
+  frameIdsByTab.set(tabId, mapping);
+
+  const blocks = sections.map((section) => {
+    const title = section.title ? `"${section.title.slice(0, 80)}" — ` : "";
+    if (section.index === 0) {
+      return `Page snapshot — ${title}${section.url}\n${section.lines.join("\n") || "(no interactive or structural elements found)"}`;
+    }
+    return `iframe f${section.index} — ${title}${section.url}\n${section.lines.map((line) => `  ${line}`).join("\n")}`;
+  });
+  const truncated = sections.some((section) => section.truncated);
+  const footer = truncated ? `\n[truncated at ${maxNodes} nodes per frame — pass a larger maxNodes to see more]` : "";
+  return { text: `${blocks.join("\n\n")}${footer}`, frames: sections.length };
+}
+
+/** Route an action to the frame that owns a `f<index>e<n>` uid. */
+async function runFrameAct(tabId: number, args: Record<string, unknown>): Promise<unknown> {
+  const uid = strArg(args.uid);
+  const match = /^f(\d+)e\d+$/.exec(uid);
+  if (!match) throw new Error(`Not a frame uid: ${uid || "(missing)"}`);
+  const index = Number(match[1]);
+  const frameId = frameIdsByTab.get(tabId)?.get(index);
+  if (frameId === undefined) throw new Error(`Unknown frame f${index}; call take_snapshot again.`);
+
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId, frameIds: [frameId] },
+    world: "MAIN",
+    args: [args],
+    func: async (req: Record<string, unknown>) => {
+      const api = (window as unknown as Record<string, any>).__mcpPageBridgeFrame;
+      if (!api) return { ok: false, error: "frame agent missing; call take_snapshot again" };
+      try {
+        return { ok: true, result: await api.act(req) };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    },
+  });
+
+  const value = result?.result as { ok?: boolean; result?: unknown; error?: string } | undefined;
+  if (!value?.ok) throw new Error(value?.error ?? "frame action failed");
+  return value.result;
+}
+
+// ---- trusted input (CDP Input.*) ----------------------------------------------
+//
+// Synthetic DOM events carry `isTrusted: false`, which a fair number of pages
+// (canvas apps, bot-protected forms, some component libraries) ignore. With the
+// popup's "Trusted input" switch on, the page asks the service worker to
+// dispatch real events through CDP instead.
+//
+// Two details make this behave like a human:
+//   - **Focus hop**: CDP input is delivered to the *focused* tab, so we activate
+//     the target tab (and its window) for the duration of the action and put the
+//     previous tab/window back afterwards.
+//   - **Attach/detach**: when the CDP toolset isn't otherwise in use we detach
+//     right after the action, so Chrome's debugging banner only shows while we
+//     are actually typing/clicking.
+
+interface FocusState {
+  restoreTabId?: number;
+  restoreWindowId?: number;
+}
+
+async function focusTabForInput(tabId: number): Promise<FocusState> {
+  const state: FocusState = {};
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (tab.windowId === undefined) return state;
+    const [previous] = await chrome.tabs.query({ active: true, windowId: tab.windowId });
+    const focusedWindow = await chrome.windows.getLastFocused().catch(() => undefined);
+    if (!tab.active) {
+      if (previous?.id !== undefined && previous.id !== tabId) state.restoreTabId = previous.id;
+      await chrome.tabs.update(tabId, { active: true });
+    }
+    if (focusedWindow?.id !== undefined && focusedWindow.id !== tab.windowId) {
+      state.restoreWindowId = focusedWindow.id;
+    }
+    await chrome.windows.update(tab.windowId, { focused: true }).catch(() => undefined);
+  } catch {
+    // Tab or window vanished; the caller still gets a best-effort dispatch.
+  }
+  return state;
+}
+
+async function restoreFocusAfterInput(state: FocusState): Promise<void> {
+  if (state.restoreTabId !== undefined) {
+    await chrome.tabs.update(state.restoreTabId, { active: true }).catch(() => undefined);
+  }
+  if (state.restoreWindowId !== undefined) {
+    await chrome.windows.update(state.restoreWindowId, { focused: true }).catch(() => undefined);
+  }
+}
+
+/** Attach (if needed), run the CDP work with the tab focused, then clean up. */
+async function withTrustedInputSession<T>(tabId: number, run: () => Promise<T>): Promise<T> {
+  if (!(await hasDebuggerPermission())) {
+    throw new Error("Trusted input requires the optional debugger permission. Re-enable it in the popup.");
+  }
+  const wasAttached = cdpSessions.get(tabId)?.attached === true;
+  await ensureCdpAttached(tabId);
+  const focus = await focusTabForInput(tabId);
+  try {
+    return await run();
+  } finally {
+    await restoreFocusAfterInput(focus);
+    // Only tear down what we set up: a session the CDP toolset owns stays.
+    if (!wasAttached && !cdpTools) await detachCdp(tabId);
+  }
+}
+
+/** Debugger-backed features (trusted input, full-page capture) are available. */
+function canUseDebugger(): boolean {
+  return cdpTools || trustedInput;
+}
+
+/**
+ * Capture the whole scrollable page via CDP. Attaches only if nothing else has,
+ * and detaches again so the debugging banner doesn't linger.
+ */
+async function captureFullPage(tabId: number): Promise<string> {
+  if (!(await hasDebuggerPermission())) {
+    throw new Error("Full-page capture requires the optional debugger permission.");
+  }
+  const wasAttached = cdpSessions.get(tabId)?.attached === true;
+  await ensureCdpAttached(tabId, ["Page"]);
+  try {
+    const result = await sendCdpCommand<{ data?: string }>(tabId, "Page.captureScreenshot", {
+      format: "png",
+      captureBeyondViewport: true,
+      fromSurface: true,
+    });
+    if (!result?.data) throw new Error("Page.captureScreenshot returned no data.");
+    return `data:image/png;base64,${result.data}`;
+  } finally {
+    if (!wasAttached && !cdpTools) await detachCdp(tabId);
+  }
+}
+
+const INPUT_MAX_KEYS = 2000;
+
+interface TrustedKeyDescriptor {
+  key: string;
+  code: string;
+  text: string;
+  modifiers: number;
+  windowsVirtualKeyCode: number;
+}
+
+function trustedKeyDescriptors(value: unknown): TrustedKeyDescriptor[] {
+  if (!Array.isArray(value)) throw new Error("keys must be an array of key descriptors.");
+  if (value.length > INPUT_MAX_KEYS) throw new Error(`Too many keys in one call (max ${INPUT_MAX_KEYS}).`);
+  return value.map((entry) => {
+    const item = (entry ?? {}) as Record<string, unknown>;
+    const key = strArg(item.key);
+    if (!key) throw new Error("Every key descriptor needs a key.");
+    return {
+      key,
+      code: strArg(item.code, key),
+      text: strArg(item.text),
+      modifiers: Math.max(0, Math.floor(numArg(item.modifiers, 0))),
+      windowsVirtualKeyCode: Math.max(0, Math.floor(numArg(item.windowsVirtualKeyCode, 0))),
+    };
+  });
+}
+
+async function dispatchTrustedKeys(tabId: number, keys: TrustedKeyDescriptor[], delayMs: number): Promise<void> {
+  for (const key of keys) {
+    const base = {
+      key: key.key,
+      code: key.code,
+      modifiers: key.modifiers,
+      windowsVirtualKeyCode: key.windowsVirtualKeyCode,
+      nativeVirtualKeyCode: key.windowsVirtualKeyCode,
+    };
+    // `keyDown` with text produces the character; without text Chrome wants
+    // `rawKeyDown` so the key doesn't also insert a stray glyph.
+    await sendCdpCommand(tabId, "Input.dispatchKeyEvent", {
+      ...base,
+      type: key.text ? "keyDown" : "rawKeyDown",
+      text: key.text || undefined,
+      unmodifiedText: key.text || undefined,
+    });
+    await sendCdpCommand(tabId, "Input.dispatchKeyEvent", { ...base, type: "keyUp" });
+    if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+}
+
+async function dispatchTrustedClick(tabId: number, x: number, y: number, clickCount: number): Promise<void> {
+  const common = { x, y, button: "left" as const };
+  await sendCdpCommand(tabId, "Input.dispatchMouseEvent", { ...common, type: "mouseMoved", clickCount: 0, buttons: 0 });
+  for (let i = 1; i <= clickCount; i += 1) {
+    await sendCdpCommand(tabId, "Input.dispatchMouseEvent", { ...common, type: "mousePressed", clickCount: i, buttons: 1 });
+    await sendCdpCommand(tabId, "Input.dispatchMouseEvent", { ...common, type: "mouseReleased", clickCount: i, buttons: 0 });
+  }
+}
+
+async function runTrustedInput(tabId: number, args: Record<string, unknown>): Promise<unknown> {
+  const kind = strArg(args.kind);
+  const delayMs = Math.max(0, Math.min(1000, numArg(args.delayMs, 0)));
+
+  switch (kind) {
+    case "click": {
+      const x = Math.round(numArg(args.x, -1));
+      const y = Math.round(numArg(args.y, -1));
+      if (x < 0 || y < 0) throw new Error("click needs viewport x/y coordinates.");
+      const clickCount = Math.max(1, Math.min(3, Math.floor(numArg(args.clickCount, 1))));
+      await withTrustedInputSession(tabId, () => dispatchTrustedClick(tabId, x, y, clickCount));
+      return { ok: true, via: "cdp", x, y, clickCount };
+    }
+    case "keys": {
+      const keys = trustedKeyDescriptors(args.keys);
+      await withTrustedInputSession(tabId, () => dispatchTrustedKeys(tabId, keys, delayMs));
+      return { ok: true, via: "cdp", keys: keys.length };
+    }
+    default:
+      throw new Error(`unknown input kind: ${kind}`);
+  }
 }
 
 async function runCdp(tabId: number, args: Record<string, unknown>): Promise<unknown> {
@@ -802,7 +1149,7 @@ async function ensureEnabledTab(tabId: number): Promise<TabState | undefined> {
   for (let i = 0; i < 6; i += 1) {
     state = tabs.get(tabId);
     if (state) {
-      sendControl(state, "activate", { coreTools, designTools, automationTools, cdpTools });
+      sendControl(state, "activate", { coreTools, designTools, automationTools, cdpTools, trustedInput });
       return state;
     }
     await sleep(80);
@@ -968,7 +1315,7 @@ async function handleUp(state: TabState, msg: ChannelMessage): Promise<void> {
     if (action === "hello") {
       const on = await isEnabled(state.tabId);
       void updateActionIcon(state.tabId, on);
-      if (on) sendControl(state, "activate", { coreTools, designTools, automationTools, cdpTools });
+      if (on) sendControl(state, "activate", { coreTools, designTools, automationTools, cdpTools, trustedInput });
     }
     return;
   }
@@ -1017,15 +1364,50 @@ async function runExt(
 ): Promise<unknown> {
   switch (action) {
     case "screenshot": {
-      const tab = await chrome.tabs.get(tabId);
-      const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+      // Full page needs CDP (captureVisibleTab only ever returns the viewport),
+      // so it rides on the same optional debugger permission as trusted input.
+      let dataUrl: string | undefined;
+      let fullPage = false;
+      let fullPageError: string | undefined;
+      if (args.fullPage === true) {
+        if (canUseDebugger()) {
+          try {
+            dataUrl = await captureFullPage(tabId);
+            fullPage = true;
+          } catch (error) {
+            fullPageError = error instanceof Error ? error.message : String(error);
+          }
+        } else {
+          fullPageError = "fullPage needs the optional debugger permission — enable Trusted input or Advanced CDP tools in the popup.";
+        }
+      }
+      if (!dataUrl) {
+        const tab = await chrome.tabs.get(tabId);
+        dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+      }
       let savedAs: string | undefined;
       if (args.download) {
         const filename = (args.filename as string) || `mcp-page-bridge-${Date.now()}.png`;
         await chrome.downloads.download({ url: dataUrl, filename, saveAs: false });
         savedAs = filename;
       }
-      return { dataUrl, savedAs };
+      return { dataUrl, savedAs, fullPage, fullPageError };
+    }
+    case "frameOverlay": {
+      const show = args.show === true;
+      await injectFrameAgent(tabId).catch(() => undefined);
+      const results = await chrome.scripting.executeScript({
+        target: { tabId, allFrames: true },
+        world: "MAIN",
+        args: [show],
+        func: async (visible: boolean) => {
+          const api = (window as unknown as Record<string, any>).__mcpPageBridgeFrame;
+          if (!api) return 0;
+          const out = await api.act({ kind: visible ? "overlay_show" : "overlay_hide" });
+          return typeof out?.markers === "number" ? out.markers : 0;
+        },
+      });
+      return { markers: results.reduce((sum, r) => sum + (typeof r.result === "number" ? r.result : 0), 0) };
     }
     case "navigate":
       await chrome.tabs.update(tabId, { url: String(args.url) });
@@ -1044,6 +1426,13 @@ async function runExt(
     case "cdp":
       if (!cdpTools) throw new Error("Advanced CDP tools are not enabled in the extension popup.");
       return runCdp(tabId, args);
+    case "input":
+      if (!trustedInput) throw new Error("Trusted input is not enabled in the extension popup.");
+      return runTrustedInput(tabId, args);
+    case "frameSnapshot":
+      return runFrameSnapshot(tabId, args);
+    case "frameAct":
+      return runFrameAct(tabId, args);
     default:
       throw new Error(`unknown ext action: ${action}`);
   }
@@ -1110,6 +1499,7 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
         designTools,
         automationTools,
         cdpTools: cdpTools && cdpPermission,
+        trustedInput: trustedInput && cdpPermission,
         cdpDebuggerPermission: cdpPermission,
         cdpAttached: !!cdpSessions.get(tabId)?.attached,
         selectedElements: design.selection.items,
@@ -1298,24 +1688,28 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
       const prevDesignTools = designTools;
       const prevAutomationTools = automationTools;
       const prevCdpTools = cdpTools;
+      const prevTrustedInput = trustedInput;
       coreTools = req.coreTools !== false;
       designTools = !!req.designTools;
       automationTools = !!req.automationTools;
       cdpTools = !!req.cdpTools && (await hasDebuggerPermission());
+      trustedInput = !!req.trustedInput && (await hasDebuggerPermission());
+      if (cdpTools || trustedInput) ensureCdpListeners();
       if (req.tabGroups !== undefined) tabGroupsEnabled = !!req.tabGroups;
-      await chrome.storage.local.set({ browserControl, coreTools, designTools, automationTools, cdpTools, tabGroups: tabGroupsEnabled });
+      await chrome.storage.local.set({ browserControl, coreTools, designTools, automationTools, cdpTools, trustedInput, tabGroups: tabGroupsEnabled });
       if (browserControl) browserProvider.restart();
       else browserProvider.stop();
-      if (prevCdpTools && !cdpTools) await detachAllCdp();
+      if (prevCdpTools && !cdpTools && !trustedInput) await detachAllCdp();
+      if (prevTrustedInput && !trustedInput && !cdpTools) await detachAllCdp();
       // Re-apply opt-in toolset settings to already-enabled tabs so the
       // built-in catalog updates live (the page rebuilds its embedded server).
-      if (coreTools !== prevCoreTools || designTools !== prevDesignTools || automationTools !== prevAutomationTools || cdpTools !== prevCdpTools) {
+      if (coreTools !== prevCoreTools || designTools !== prevDesignTools || automationTools !== prevAutomationTools || cdpTools !== prevCdpTools || trustedInput !== prevTrustedInput) {
         for (const state of tabs.values()) {
-          if (await isEnabled(state.tabId)) sendControl(state, "activate", { coreTools, designTools, automationTools, cdpTools });
+          if (await isEnabled(state.tabId)) sendControl(state, "activate", { coreTools, designTools, automationTools, cdpTools, trustedInput });
         }
       }
       void syncTabGroups();
-      sendResponse({ ok: true, browserControl, coreTools, designTools, automationTools, cdpTools, tabGroups: tabGroupsEnabled });
+      sendResponse({ ok: true, browserControl, coreTools, designTools, automationTools, cdpTools, trustedInput, tabGroups: tabGroupsEnabled });
       return;
     }
 
@@ -1364,6 +1758,8 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   }
   void setEnabled(tabId, false);
   void detachCdp(tabId);
+  frameIdsByTab.delete(tabId);
+  void getAgentTabs().then((set) => (set.delete(tabId) ? saveAgentTabs(set) : undefined));
   if (tabBridgeOverrides.delete(tabId)) void persistTabOverrides();
 });
 

@@ -13,6 +13,7 @@
     INITIAL_TOKEN,
     type Health,
   } from "./lib/api";
+  import { EXTENSION_MARK_ATTRIBUTE } from "mcp-page-bridge-protocol";
   import type { ProvidersResponse, Selected } from "./lib/types";
   import { groupsFor } from "./lib/util";
   import ProviderCard from "./lib/ProviderCard.svelte";
@@ -27,6 +28,9 @@
   let selected = $state<Selected | null>(null);
   let openProviders = $state<Record<string, boolean>>({});
   let openGroups = $state<Record<string, boolean>>({});
+  // The extension marks loopback pages with its version, so we can tell
+  // "extension not installed" apart from "installed but no tab enabled".
+  let extensionVersion = $state<string | null>(null);
 
   // ---- auth / profile gate ----
   let health = $state<Health | null>(null);
@@ -149,9 +153,29 @@
     startPolling();
   }
 
+  /**
+   * The content script sets the marker at document_start, but the extension may
+   * still be starting up when the dashboard boots, so poll briefly.
+   */
+  function watchForExtension(): () => void {
+    const read = () => document.documentElement.getAttribute(EXTENSION_MARK_ATTRIBUTE);
+    extensionVersion = read();
+    if (extensionVersion) return () => undefined;
+    const started = Date.now();
+    const id = setInterval(() => {
+      extensionVersion = read();
+      if (extensionVersion || Date.now() - started > 5000) clearInterval(id);
+    }, 250);
+    return () => clearInterval(id);
+  }
+
   onMount(() => {
     void boot();
-    return () => stopPolling();
+    const stopExtensionWatch = watchForExtension();
+    return () => {
+      stopPolling();
+      stopExtensionWatch();
+    };
   });
 
   async function handleAction(label: string, action: "activate" | "close") {
@@ -315,8 +339,16 @@
                   If you didn't set a profile key on the tab, it's in the default partition —
                   <button class="link-btn" type="button" onclick={logout}>view the default</button>.
                 </p>
+              {:else if extensionVersion}
+                <p>
+                  Extension v{extensionVersion} detected. No tab is enabled yet — open the page you
+                  want to expose, click the mcp-page-bridge icon, then <strong>Enable on this tab</strong>.
+                </p>
               {:else}
-                <p>No browsers connected yet. Enable the mcp-page-bridge extension on a tab.</p>
+                <p>
+                  Extension not detected on this page. Install the mcp-page-bridge browser extension,
+                  then reload this dashboard.
+                </p>
               {/if}
             </div>
           </div>

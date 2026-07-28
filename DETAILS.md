@@ -390,10 +390,101 @@ reconnects the provider so the dashboard and agent see the new namespace.
 When a tab is enabled, the extension exposes a lean **core** built-in toolset on
 the same provider (so any page is reachable even without calling `window.mcp`):
 
-`eval` (run JS in the page), `dom_query`, `get_html`, `get_page_info`, `click`,
-`set_value`, `scroll`, `wait_for`, `console_logs` (captured from
-`document_start`), `screenshot` (pass `download:true` to also save the PNG to
-the browser's Downloads folder), `navigate`, `reload`.
+`eval` (run JS in the page), `dom_query`, `get_html`, `get_page_info`,
+`take_snapshot`, `click`, `type_text`, `press_key`, `clear_value`, `set_value`,
+`scroll`, `wait_for`, `console_logs` (captured from `document_start`),
+`screenshot`, `navigate`, `reload`.
+
+**Snapshot → act → observe.** `take_snapshot` returns a compact text tree of the
+page's interactive and structural elements, each with a stable `uid`:
+
+```
+Page snapshot — "Cart" — https://shop.test/cart
+uid=e3 navigation
+  uid=e4 link "Home" href="/"
+uid=e9 searchbox "Search products" value="socks"
+uid=e12 button "Checkout"
+iframe f1 — https://payments.test/widget
+  uid=f1e2 textbox "Card number"
+  uid=f1e5 button "Pay"
+```
+
+Cross-origin iframes are included: the service worker injects a small per-frame
+agent into every frame, collects each frame's lines and stitches them into one
+tree, prefixing sub-frame uids with the frame index (`f1e2`). Acting on such a
+uid is routed back to that frame automatically, so embedded checkout widgets,
+editors and ad frames are reachable — the top document keeps bare uids (`e12`).
+Pass `allFrames:false` to snapshot only the top document. Uids go stale on
+navigation and DOM changes; re-snapshot then.
+
+**Actions observe by default.** `click`, `type_text`, `press_key` and `scroll`
+append a fresh, shortened uid snapshot to their result, so "click and see what
+happened" is one call instead of three. Control it per call with `observe`:
+`"snapshot"` (default), `"screenshot"`, `"both"`, or `"none"`. Screenshots stay
+opt-in because they are expensive for agents that never look at pixels;
+`set_value` and `clear_value` default to `"none"`.
+
+**Screenshots.** `screenshot` captures the visible tab by default;
+`fullPage:true` captures the whole scrollable page through CDP (needs the
+optional debugger permission — enable Trusted input or the CDP toolset — and
+falls back to the viewport with a note otherwise). `refs:true` labels every
+element from the last snapshot with its uid, in every frame, captures, and
+removes the labels again, so the image and the uid tree line up.
+`download:true` also saves the PNG to the browser's Downloads folder.
+
+**Input primitives.** `click`, `type_text`, `press_key`, and `clear_value` share
+one locator + input engine, so every target can be given as a `uid` (from
+`take_snapshot`), a CSS `selector`, visible `text`, a `role`+`name` pair, a form
+`label`, or a `testId` — and `click` also accepts raw viewport `x`/`y`
+coordinates. `click` waits until the element is visible, enabled, stable and not
+covered before acting (`force:true` skips the checks).
+
+`type_text` types character by character, dispatching the same
+`keydown`/`beforeinput`/`input`/`keyup` sequence a real keystroke produces, so
+autocomplete, search-as-you-type and controlled React/Vue inputs react the way
+they do for a user. It clears the field first unless `clear:false`/`append:true`,
+and `submit:true` presses Enter at the end. Key presses can be embedded in the
+text with `<kbd>…</kbd>` markup:
+
+```jsonc
+{ "text": "jane <kbd>Tab</kbd>doe", "selector": "#firstName" }
+{ "text": "mcp page bridge", "role": "searchbox", "submit": true }
+```
+
+`press_key` takes a space-separated chord sequence — `Enter`, `Escape`,
+`Shift+Tab`, `Meta+A Backspace`, `ArrowDown ArrowDown Enter` — plus optional
+`repeat`/`delayMs`. `Meta` and `Mod` are platform-aware (Cmd on macOS, Ctrl
+elsewhere) so a select-all works everywhere; `Cmd` and `Ctrl` are literal.
+Because synthetic keys don't drive the browser's default actions, the engine
+emulates the important ones: Enter submits the form from a single-line input (or
+clicks a non-editable target), Backspace/Delete edit the value at the caret, and
+`Meta/Ctrl+A` selects the field contents.
+
+**Trusted input (opt-in).** By default these tools build the events in the page,
+so `event.isTrusted` is `false` — which some pages (canvas apps, bot-protected
+forms, a few component libraries) ignore. Turn on **Trusted input (real
+key/mouse events)** in the popup and `click`/`type_text`/`press_key` dispatch
+through CDP `Input.dispatchMouseEvent`/`Input.dispatchKeyEvent` in the service
+worker instead. It requests the same optional `debugger` permission the CDP
+toolset uses, but without adding any tools to the catalog.
+
+Because CDP delivers input to the *focused* tab, each trusted action briefly
+activates the target tab (and its window) and restores the previous focus
+afterwards. When the CDP toolset isn't otherwise attached, the debugger is
+attached only for the duration of the action, so Chrome's debugging banner shows
+just while the agent is clicking/typing. Every trusted attempt falls back to the
+synthetic path if anything fails, and the tool result records which path ran:
+
+```jsonc
+{ "clicked": { "selector": "#buy", "role": "button" }, "clickCount": 1, "via": "cdp" }
+{ "target": "(focused element)", "pressed": 2, "via": "js", "trustedError": "…" }
+```
+
+These four tools are registered whenever *either* the core or the automation
+toolset is on, so a page that turns core tools off still has working input.
+`set_value` remains as the one-shot value setter (useful for `<select>` and for
+pages that block typing); prefer `type_text` whenever the page reacts to
+keystrokes.
 
 The popup's **Core tools (default MCPs)** switch controls this lean default
 toolset and is checked by default. Turn it off before enabling a tab if you only
@@ -407,21 +498,22 @@ immediately. With design tools off the catalog is ~12 tools; on, it adds the 21
 selection/CSS/audit tools listed below.
 
 The popup also has a separate **Automation tools** switch for Playwright-like live
-page automation. It adds a uid-based page snapshot (`take_snapshot` returns a
-compact text tree of interactive/structural elements with stable `uid`s; pass
-`uid` to the action tools below instead of guessing CSS selectors — uids go
-stale after navigation/DOM changes, just re-snapshot), locator helpers
+page automation. It adds locator helpers
 (`find_by_text`, `find_by_role`, `find_by_label`, `find_by_test_id`,
-`locator_snapshot`, `locator_count`), safer
-actions (`smart_click`, `hover`, `double_click`, `type_text`, `press_key`,
-`clear_value`, `select_option`, `check`, `uncheck`, `upload_file`,
-`drag_and_drop` — all accepting `uid` or a locator), page-level `fetch`/`XMLHttpRequest` capture
+`locator_snapshot`, `locator_count`), extra
+actions (`hover`, `double_click`, `select_option`, `check`, `uncheck`,
+`upload_file`, `drag_and_drop` — all accepting `uid` or a locator, and building
+on the same core `click`/`type_text`/`press_key` engine), page-level `fetch`/`XMLHttpRequest` capture
 (`start_network_capture`, `stop_network_capture`, `list_network_requests`,
 `wait_for_response`, `get_response_body`, `clear_network_capture`),
 storage/cookie helpers, dialog auto-handling,
 same-origin iframe helpers, and best-effort `resize_window`. This is not a full
 Playwright replacement: there is no isolated browser context, HTTP-only cookie
-access, cross-origin iframe control, trace viewer, or video.
+access, trace viewer, or video.
+
+Every built-in tool's text output is clamped (~40k characters) with an explicit
+truncation note, so one oversized `eval` result or CDP payload can't swallow the
+agent's context.
 
 For browser-protocol-level work, the popup has a separate **Advanced CDP tools**
 switch. It requests Chrome's optional `debugger` permission only when enabled.
@@ -478,9 +570,18 @@ By default tools are **tab-scoped** — they act on the page they're registered
 in. Enable **"Browser control (all tabs)"** in the popup to also expose a
 separate **`browser`** provider (hosted by the service worker, independent of any
 page) with: `list_tabs`, `open_tab`, `activate_tab`, `navigate_tab`,
-`close_tab`. This is more powerful (it can open/close/navigate *any* tab), so
-it's off by default. It's still localhost-only and every call is gated by your
-agent's permission prompts.
+`enable_tab`, `close_tab`, `close_agent_tabs`. This is more powerful (it can
+open/close/navigate *any* tab), so it's off by default. It's still localhost-only
+and every call is gated by your agent's permission prompts.
+
+**Agent-owned tabs.** `open_tab` enables the bridge on the tab it creates
+(`enable:false` opts out), so the agent can immediately use that page's tools
+instead of waiting for a human to click *Enable on this tab* in the popup. Such
+tabs are tracked for the session: `close_agent_tabs` closes exactly those and
+leaves the user's own tabs alone, and `list_tabs` reports `enabled` and
+`openedByAgent` per tab. `enable_tab` does the same for a tab the user already
+had open. Restricted pages (`chrome://`, the Web Store) are reported as
+`enabled: false` rather than silently failing later.
 
 ## How it connects / is detected
 
