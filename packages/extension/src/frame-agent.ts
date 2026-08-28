@@ -14,9 +14,12 @@ import {
   briefSummary,
   clearElementValue,
   clickElement,
-  dispatchMouseLike,
+  dragPointer,
   hideUidOverlay,
   isPointInViewport,
+  type MouseButtonName,
+  parseModifiers,
+  parseMouseButton,
   pressKeys,
   renderSnapshotLines,
   resolveUid,
@@ -24,10 +27,12 @@ import {
   typeText,
   viewportPointFor,
   waitForLocator,
+  wheelAt,
 } from "./dom-core.js";
 
 export interface FrameSnapshotRequest {
   maxNodes?: number;
+  maxDepth?: number;
   includeHidden?: boolean;
   uidPrefix?: string;
 }
@@ -41,16 +46,24 @@ export interface FrameSnapshotResult {
 }
 
 export interface FrameActRequest {
-  kind: "click" | "type_text" | "press_key" | "clear_value" | "describe" | "point" | "overlay_show" | "overlay_hide";
+  kind: "click" | "type_text" | "press_key" | "clear_value" | "drag" | "wheel" | "describe" | "point" | "overlay_show" | "overlay_hide";
   uid?: string;
   selector?: string;
+  targetUid?: string;
+  targetSelector?: string;
   text?: string;
   keys?: string;
   clear?: boolean;
   submit?: boolean;
   delayMs?: number;
+  holdMs?: number;
   repeat?: number;
   clickCount?: number;
+  button?: MouseButtonName | string;
+  modifiers?: string;
+  steps?: number;
+  deltaX?: number;
+  deltaY?: number;
   timeoutMs?: number;
 }
 
@@ -82,13 +95,32 @@ const api: FrameApi = {
       case "click": {
         const element = await resolveTarget(req);
         element.scrollIntoView({ block: "center", inline: "center" });
-        const clickCount = req.clickCount === 2 ? 2 : 1;
-        clickElement(element);
-        if (clickCount === 2) {
-          clickElement(element);
-          dispatchMouseLike(element, "dblclick", { detail: 2 });
-        }
-        return { clicked: briefSummary(element), clickCount, via: "js" };
+        const clickCount = Math.max(1, Math.min(3, Math.floor(req.clickCount ?? 1)));
+        const button = parseMouseButton(req.button);
+        const modifiers = parseModifiers(req.modifiers);
+        clickElement(element, { clickCount, button, modifiers });
+        return { clicked: briefSummary(element), clickCount, button, via: "js" };
+      }
+      case "drag": {
+        const source = await resolveTarget(req);
+        const target = req.targetUid
+          ? resolveUid(req.targetUid)
+          : req.targetSelector
+            ? await waitForLocator({ selector: req.targetSelector, timeoutMs: req.timeoutMs })
+            : undefined;
+        if (!target) throw new Error("Frame drag needs targetUid or targetSelector.");
+        source.scrollIntoView({ block: "center", inline: "center" });
+        // Frame-local viewport coordinates: both ends live in this document.
+        return dragPointer(viewportPointFor(source), viewportPointFor(target), {
+          steps: req.steps,
+          button: parseMouseButton(req.button),
+          modifiers: parseModifiers(req.modifiers),
+        });
+      }
+      case "wheel": {
+        const element = req.uid || req.selector ? await resolveTarget(req) : undefined;
+        const point = element ? viewportPointFor(element) : { x: Math.round(innerWidth / 2), y: Math.round(innerHeight / 2) };
+        return { ...wheelAt(point.x, point.y, req.deltaX ?? 0, req.deltaY ?? 0, parseModifiers(req.modifiers)) };
       }
       case "type_text": {
         const element = await resolveTarget(req);
@@ -101,7 +133,11 @@ const api: FrameApi = {
       }
       case "press_key": {
         const element = req.uid || req.selector ? await resolveTarget(req) : undefined;
-        const pressed = await pressKeys(element, String(req.keys ?? ""), { repeat: req.repeat ?? 1, delayMs: req.delayMs ?? 0 });
+        const pressed = await pressKeys(element, String(req.keys ?? ""), {
+          repeat: req.repeat ?? 1,
+          delayMs: req.delayMs ?? 0,
+          holdMs: req.holdMs ?? 0,
+        });
         return { target: element ? briefSummary(element) : "(focused element)", pressed, via: "js" };
       }
       case "clear_value": {

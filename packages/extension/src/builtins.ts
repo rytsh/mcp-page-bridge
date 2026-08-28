@@ -9,7 +9,16 @@ import { registerAutomationTools } from "./automation-tools.js";
 import { registerCdpTools } from "./cdp-tools.js";
 import { registerInputTools } from "./input-tools.js";
 import { observeMode, observeProperty, withObservation } from "./observe.js";
-import { clampToolText, hideUidOverlay, showUidOverlay } from "./dom-core.js";
+import {
+  clampToolText,
+  extractPageText,
+  hideUidOverlay,
+  numberArg,
+  parseModifiers,
+  showUidOverlay,
+  viewportPointFor,
+  wheelAt,
+} from "./dom-core.js";
 import { safeSerialize, toLogString } from "./serialize.js";
 
 export interface ConsoleEntry {
@@ -58,6 +67,33 @@ function text(value: string): ToolResult {
 
 function json(value: unknown): ToolResult {
   return text(JSON.stringify(safeSerialize(value), null, 2));
+}
+
+/**
+ * Spell out the image ↔ page coordinate mapping next to every screenshot.
+ *
+ * Without it an agent reading a control's position off the image has no way to
+ * know the picture is `devicePixelRatio` times (and possibly `scale` times)
+ * larger than the CSS-pixel space `click{x,y}` expects.
+ */
+function screenshotFrameNote(res: { width?: number; height?: number; scale?: number; fullPage?: boolean }): string {
+  // Read the globals defensively: this module is also loaded outside a browser
+  // (unit tests), where `innerWidth` simply does not exist.
+  const view = globalThis as unknown as { innerWidth?: number; innerHeight?: number; devicePixelRatio?: number };
+  const cssWidth = view.innerWidth ?? 0;
+  const cssHeight = view.innerHeight ?? 0;
+  const dpr = view.devicePixelRatio ?? 1;
+
+  const parts = [`Image ${res.width ?? "?"}×${res.height ?? "?"} px`];
+  if (cssWidth) parts.push(`viewport ${cssWidth}×${cssHeight} CSS px @ dpr ${dpr}`);
+  if (res.scale && res.scale !== 1) parts.push(`downscaled ${res.scale.toFixed(2)}×`);
+  if (res.fullPage) parts.push("full page (image covers the whole scrollable page, not just the viewport)");
+
+  const factor = res.width && cssWidth ? res.width / cssWidth : dpr;
+  return (
+    `${parts.join(" · ")}. click{x,y} and scroll{x,y} take CSS pixels, so divide any coordinate you read off ` +
+    `this image by ${factor.toFixed(2)}${res.fullPage ? " and subtract the current scroll offset" : ""}.`
+  );
 }
 
 async function runEval(code: string): Promise<unknown> {
@@ -849,7 +885,9 @@ export function registerBuiltins(
   server.registerTool(
     {
       name: "get_page_info",
-      description: "Page url, title, readyState, viewport, and user agent.",
+      description:
+        "Page url, title, readyState, viewport, scroll position, device pixel ratio, and user agent. " +
+        "The viewport block is the coordinate space every x/y argument uses (CSS pixels, origin at the top-left of the viewport).",
       inputSchema: { type: "object", properties: {} },
     },
     () =>
@@ -857,7 +895,16 @@ export function registerBuiltins(
         url: location.href,
         title: document.title,
         readyState: document.readyState,
-        viewport: { width: innerWidth, height: innerHeight },
+        viewport: {
+          width: innerWidth,
+          height: innerHeight,
+          devicePixelRatio,
+          scrollX: Math.round(scrollX),
+          scrollY: Math.round(scrollY),
+          pageWidth: document.documentElement.scrollWidth,
+          pageHeight: document.documentElement.scrollHeight,
+        },
+        coordinates: "x/y arguments are CSS pixels relative to the viewport; screenshot pixels are these multiplied by devicePixelRatio.",
         userAgent: navigator.userAgent,
       }),
   );
@@ -886,55 +933,125 @@ export function registerBuiltins(
   server.registerTool(
     {
       name: "scroll",
-      description: "Scroll to a selector or to x/y.",
+      description:
+        "Scroll the page. Three modes: selector — scroll that element into view; x+y — scroll the window to that offset; " +
+        "direction — dispatch a real mouse wheel at a point, which is the only mode that scrolls inner containers, " +
+        "virtualized lists, maps and other wheel-driven widgets (they never see window.scrollTo).",
       inputSchema: {
         type: "object",
         properties: {
-          selector: { type: "string" },
-          x: { type: "number" },
-          y: { type: "number" },
+          selector: { type: "string", description: "scroll this element into view" },
+          x: { type: "number", description: "window scroll offset x, or the wheel point x when direction is set" },
+          y: { type: "number", description: "window scroll offset y, or the wheel point y when direction is set" },
+          direction: { type: "string", enum: ["up", "down", "left", "right"], description: "wheel mode: which way to scroll" },
+          amount: { type: "number", description: "wheel notches, 1-10 (default 3); one notch is ~100px" },
+          modifiers: { type: "string", description: "modifier chord held during the wheel, e.g. \"ctrl\" for zoom" },
           observe: observeProperty("snapshot"),
         },
       },
     },
     (args) => {
       const observe = observeMode(args);
+      const settle = { extCall: opts.extCall, settleMs: 400 };
+
+      if (args.direction !== undefined) {
+        const direction = String(args.direction).toLowerCase();
+        if (!["up", "down", "left", "right"].includes(direction)) {
+          throw new Error("direction must be up, down, left, or right.");
+        }
+        const notch = 100;
+        const amount = numberArg(args.amount, 3, 1, 10) * notch;
+        const deltaY = direction === "down" ? amount : direction === "up" ? -amount : 0;
+        const deltaX = direction === "right" ? amount : direction === "left" ? -amount : 0;
+        // Default to the element the wheel would naturally land on: the point
+        // under a pointer parked in the middle of the viewport, or the selector.
+        let point = { x: Math.round(innerWidth / 2), y: Math.round(innerHeight / 2) };
+        if (args.x !== undefined && args.y !== undefined) point = { x: Number(args.x), y: Number(args.y) };
+        else if (args.selector) {
+          const target = el(String(args.selector));
+          target.scrollIntoView({ block: "center", inline: "center" });
+          point = viewportPointFor(target);
+        }
+        const result = wheelAt(point.x, point.y, deltaX, deltaY, parseModifiers(args.modifiers));
+        return withObservation(json({ wheel: { at: point, deltaX, deltaY }, ...result }), observe, settle);
+      }
+
       if (args.selector) {
         el(String(args.selector)).scrollIntoView({ behavior: "smooth", block: "center" });
-        return withObservation(text(`scrolled to ${args.selector}`), observe, { extCall: opts.extCall, settleMs: 400 });
+        return withObservation(text(`scrolled to ${args.selector}`), observe, settle);
       }
       window.scrollTo({ left: Number(args.x ?? 0), top: Number(args.y ?? 0), behavior: "smooth" });
-      return withObservation(text(`scrolled to (${args.x ?? 0}, ${args.y ?? 0})`), observe, { extCall: opts.extCall, settleMs: 400 });
+      return withObservation(text(`scrolled to (${args.x ?? 0}, ${args.y ?? 0})`), observe, settle);
     },
   );
 
   server.registerTool(
     {
       name: "wait_for",
-      description: "Wait until a selector appears (or time out).",
+      description:
+        "Wait until a selector appears, until it disappears (gone:true), or simply for a fixed time (durationMs) " +
+        "when the page has no observable marker to wait on.",
       inputSchema: {
         type: "object",
         properties: {
-          selector: { type: "string" },
+          selector: { type: "string", description: "CSS selector to wait for" },
+          gone: { type: "boolean", description: "wait for the selector to disappear instead (spinners, overlays)" },
+          durationMs: { type: "number", description: "just sleep this long (0-30000) — no selector needed" },
           timeoutMs: { type: "number", description: "default 5000" },
         },
-        required: ["selector"],
       },
     },
     async (args) => {
+      if (args.durationMs !== undefined && args.selector === undefined) {
+        const duration = numberArg(args.durationMs, 0, 0, 30000);
+        await new Promise((r) => setTimeout(r, duration));
+        return text(`waited ${duration}ms`);
+      }
+      if (args.selector === undefined) throw new Error("wait_for needs a selector or durationMs.");
+
       const selector = String(args.selector);
-      const timeout = Number(args.timeoutMs ?? 5000);
+      const gone = args.gone === true;
+      const timeout = numberArg(args.timeoutMs, 5000, 0, 120000);
       const start = Date.now();
       for (;;) {
-        if (document.querySelector(selector)) return text(`found ${selector}`);
+        const present = !!document.querySelector(selector);
+        if (present !== gone) return text(gone ? `${selector} is gone` : `found ${selector}`);
         if (Date.now() - start > timeout) {
           return {
-            content: [{ type: "text", text: `timeout waiting for ${selector}` }],
+            content: [{ type: "text", text: `timeout waiting for ${selector}${gone ? " to disappear" : ""}` }],
             isError: true,
           } satisfies ToolResult;
         }
         await new Promise((r) => setTimeout(r, 100));
       }
+    },
+  );
+
+  server.registerTool(
+    {
+      name: "get_page_text",
+      description:
+        "The page's readable text, as a reader sees it: visible text only, block structure kept as line breaks, " +
+        "headings marked with #. Use this instead of get_html for articles, docs and any text-heavy page — " +
+        "it costs a fraction of the tokens raw HTML does. Defaults to the main content region.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          selector: { type: "string", description: "scope the extraction to this element (default: the page's main content)" },
+          includeHidden: { type: "boolean", description: "also include visually hidden text (default false)" },
+          max: { type: "number", description: "max characters (default 20000)" },
+        },
+      },
+    },
+    (args) => {
+      const root = args.selector ? el(String(args.selector)) : undefined;
+      const extracted = extractPageText({
+        root,
+        includeHidden: args.includeHidden === true,
+        max: numberArg(args.max, 20000, 200, 40000),
+      });
+      const header = `${document.title ? `"${document.title}" — ` : ""}${location.href} (text of ${extracted.root})`;
+      return text(`${header}\n\n${extracted.text || "(no readable text found)"}`);
     },
   );
 
@@ -1407,12 +1524,15 @@ export function registerBuiltins(
       description:
         "PNG screenshot of the tab. fullPage:true captures the whole scrollable page (needs the optional debugger permission), " +
         "refs:true labels every element from the last snapshot with its uid so the image and the uid tree line up, " +
-        "download:true also saves it to Downloads.",
+        "download:true also saves it to Downloads. " +
+        "The result states the image size and the CSS-pixel viewport it maps to, so coordinates you read off the image " +
+        "can be converted before passing them to click/scroll as x/y.",
       inputSchema: {
         type: "object",
         properties: {
           fullPage: { type: "boolean", description: "capture beyond the viewport (default false)" },
           refs: { type: "boolean", description: "overlay uid labels from the last snapshot (default false)" },
+          maxWidth: { type: "number", description: "downscale the image to at most this many pixels wide (keeps it under model image limits)" },
           download: { type: "boolean", description: "also save to Downloads" },
           filename: { type: "string", description: "download filename" },
         },
@@ -1436,11 +1556,21 @@ export function registerBuiltins(
           download: !!args.download,
           filename: args.filename ? String(args.filename) : undefined,
           fullPage: args.fullPage === true,
-        })) as { dataUrl: string; savedAs?: string; fullPage?: boolean; fullPageError?: string };
+          maxWidth: args.maxWidth !== undefined ? numberArg(args.maxWidth, 0, 64, 8192) : undefined,
+        })) as {
+          dataUrl: string;
+          savedAs?: string;
+          fullPage?: boolean;
+          fullPageError?: string;
+          width?: number;
+          height?: number;
+          scale?: number;
+        };
         const base64 = res.dataUrl.includes(",")
           ? res.dataUrl.slice(res.dataUrl.indexOf(",") + 1)
           : res.dataUrl;
         const content: ContentBlock[] = [{ type: "image", data: base64, mimeType: "image/png" }];
+        content.push({ type: "text", text: screenshotFrameNote(res) });
         if (withRefs) {
           content.push({ type: "text", text: `${markers} uid label(s) drawn from the last snapshot.` });
         }
@@ -1456,6 +1586,73 @@ export function registerBuiltins(
           }
         }
       }
+    },
+  );
+
+  server.registerTool(
+    {
+      name: "zoom",
+      description:
+        "Crop a rectangle of the viewport and return it enlarged — for reading small text, badges, or checking a " +
+        "control's exact state without burning a full screenshot. The region is in CSS pixels relative to the " +
+        "viewport, the same coordinate space click/scroll x/y use; coordinates you read off the zoomed image are " +
+        "still full-viewport coordinates.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          x: { type: "number", description: "region left (CSS px)" },
+          y: { type: "number", description: "region top (CSS px)" },
+          width: { type: "number", description: "region width (CSS px)" },
+          height: { type: "number", description: "region height (CSS px)" },
+          selector: { type: "string", description: "zoom this element's bounding box instead of x/y/width/height" },
+          padding: { type: "number", description: "extra CSS px around a selector region (default 8)" },
+          scale: { type: "number", description: "enlargement factor, 1-6 (default: fill ~800px wide)" },
+        },
+      },
+    },
+    async (args) => {
+      let region: { x: number; y: number; width: number; height: number };
+      if (args.selector) {
+        const target = el(String(args.selector));
+        target.scrollIntoView({ block: "center", inline: "center" });
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        const rect = target.getBoundingClientRect();
+        const pad = numberArg(args.padding, 8, 0, 200);
+        region = { x: rect.left - pad, y: rect.top - pad, width: rect.width + pad * 2, height: rect.height + pad * 2 };
+      } else if (args.width !== undefined && args.height !== undefined) {
+        region = { x: Number(args.x ?? 0), y: Number(args.y ?? 0), width: Number(args.width), height: Number(args.height) };
+      } else {
+        throw new Error("zoom needs a selector, or x/y/width/height.");
+      }
+
+      const clipped = {
+        x: Math.max(0, Math.round(region.x)),
+        y: Math.max(0, Math.round(region.y)),
+        width: Math.round(region.width),
+        height: Math.round(region.height),
+      };
+      clipped.width = Math.max(4, Math.min(clipped.width, innerWidth - clipped.x));
+      clipped.height = Math.max(4, Math.min(clipped.height, innerHeight - clipped.y));
+
+      const res = (await opts.extCall("screenshot", {
+        download: false,
+        region: clipped,
+        devicePixelRatio,
+        scale: args.scale !== undefined ? numberArg(args.scale, 2, 1, 6) : undefined,
+      })) as { dataUrl: string; width?: number; height?: number; scale?: number };
+      const base64 = res.dataUrl.includes(",") ? res.dataUrl.slice(res.dataUrl.indexOf(",") + 1) : res.dataUrl;
+      return {
+        content: [
+          { type: "image", data: base64, mimeType: "image/png" },
+          {
+            type: "text",
+            text:
+              `Zoomed region x=${clipped.x} y=${clipped.y} w=${clipped.width} h=${clipped.height} (CSS px), ` +
+              `enlarged ${res.scale ?? 1}× to ${res.width ?? "?"}×${res.height ?? "?"} image px. ` +
+              "Coordinates for click/scroll are still full-viewport CSS pixels, not zoomed-image pixels.",
+          },
+        ],
+      } satisfies ToolResult;
     },
   );
 
@@ -1485,6 +1682,65 @@ export function registerBuiltins(
       await opts.extCall("reload");
       return text("reloading");
     },
+  );
+
+  // ---- downloads ----
+  // A page action that produces a file (export CSV, download report) used to be
+  // a dead end: the agent clicked, something landed in ~/Downloads, and it had
+  // no way to learn the path. These two report the browser's download list, so
+  // the agent can hand the path to its own filesystem tools.
+
+  server.registerTool(
+    {
+      name: "list_downloads",
+      description:
+        "List recent browser downloads with their state and on-disk path. " +
+        "Use it after an action that exports a file — the returned path can be read with your filesystem tools.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          limit: { type: "number", description: "max entries, newest first (default 10)" },
+          state: { type: "string", enum: ["in_progress", "complete", "interrupted"], description: "filter by state" },
+        },
+      },
+    },
+    async (args) =>
+      json(
+        await opts.extCall("downloads", {
+          action: "list",
+          limit: numberArg(args.limit, 10, 1, 100),
+          state: args.state ? String(args.state) : undefined,
+        }),
+      ),
+  );
+
+  server.registerTool(
+    {
+      name: "wait_for_download",
+      description:
+        "Wait until a download finishes and return its path, filename and size. " +
+        "Call it right after clicking an export/download control; by default it waits for any download " +
+        "that started after this call, or pass filename/url to match a specific one.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          filename: { type: "string", description: "substring the filename must contain" },
+          url: { type: "string", description: "substring the source URL must contain" },
+          since: { type: "boolean", description: "only consider downloads started from now on (default true)" },
+          timeoutMs: { type: "number", description: "default 30000" },
+        },
+      },
+    },
+    async (args) =>
+      json(
+        await opts.extCall("downloads", {
+          action: "wait",
+          filename: args.filename ? String(args.filename) : undefined,
+          url: args.url ? String(args.url) : undefined,
+          since: args.since !== false,
+          timeoutMs: numberArg(args.timeoutMs, 30000, 0, 300000),
+        }),
+      ),
   );
   }
 }

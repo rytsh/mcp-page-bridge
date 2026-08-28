@@ -56,6 +56,16 @@ const (
 	// Bridge -> extension private JSON-RPC methods used by the local dashboard.
 	MethodDashboardActivateTab = "mcpPageBridge/activateTab"
 	MethodDashboardCloseTab    = "mcpPageBridge/closeTab"
+
+	// MethodReadFile is the extension -> bridge private JSON-RPC method behind
+	// `upload_file {path}`: the extension has no filesystem access, the daemon
+	// runs next to the agent. Only served when --upload-dir is configured.
+	MethodReadFile = "mcpPageBridge/readFile"
+
+	// MaxUploadFileBytes caps a single upload_file read. Large enough for the
+	// documents and fixtures an agent realistically attaches, small enough that
+	// one call cannot exhaust memory (the payload is base64'd in RAM).
+	MaxUploadFileBytes = 32 << 20 // 32 MiB
 )
 
 var (

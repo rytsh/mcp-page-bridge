@@ -55,6 +55,16 @@ export const MCP_PAGE_BRIDGE_DASHBOARD_ACTIVATE_TAB = "mcpPageBridge/activateTab
 export const MCP_PAGE_BRIDGE_DASHBOARD_CLOSE_TAB = "mcpPageBridge/closeTab" as const;
 
 /**
+ * Extension -> bridge private JSON-RPC method backing `upload_file { path }`.
+ *
+ * The extension cannot read the filesystem; the daemon runs on the same machine
+ * as the agent and serves the bytes. It is refused unless the daemon was started
+ * with `--upload-dir`, and only for files inside that directory — the daemon is
+ * the single place that enforces the boundary.
+ */
+export const MCP_PAGE_BRIDGE_READ_FILE = "mcpPageBridge/readFile" as const;
+
+/**
  * Header the local dashboard sends on state-changing HTTP requests. Cross-origin
  * pages cannot set custom headers without a CORS preflight, so this (combined
  * with Origin/Host validation on the bridge) keeps the JSON API local-only.
@@ -90,9 +100,12 @@ export const BUILTIN_TOOL_NAMES = [
   "scroll",
   "wait_for",
   "get_html",
+  "get_page_text",
   // Core input primitives (shared by the core and automation toolsets)
   "take_snapshot",
+  "find",
   "click",
+  "drag",
   "type_text",
   "press_key",
   "clear_value",
@@ -124,22 +137,20 @@ export const BUILTIN_TOOL_NAMES = [
   "clear_design_baseline",
   // Service-worker delegated
   "screenshot",
+  "zoom",
   "navigate",
   "reload",
+  "list_downloads",
+  "wait_for_download",
   // Automation (opt-in)
-  "find_by_text",
-  "find_by_role",
-  "find_by_label",
-  "find_by_test_id",
   "locator_snapshot",
   "locator_count",
   "hover",
-  "double_click",
   "select_option",
   "check",
   "uncheck",
   "upload_file",
-  "drag_and_drop",
+  "mouse",
   "start_network_capture",
   "stop_network_capture",
   "list_network_requests",

@@ -111,19 +111,20 @@ describe("built-in tools", () => {
       "navigate",
       "reload",
       "take_snapshot",
-      "find_by_text",
-      "find_by_role",
-      "find_by_label",
-      "find_by_test_id",
+      "find",
+      "drag",
+      "get_page_text",
+      "zoom",
+      "list_downloads",
+      "wait_for_download",
       "locator_snapshot",
       "locator_count",
       "hover",
-      "double_click",
       "select_option",
       "check",
       "uncheck",
       "upload_file",
-      "drag_and_drop",
+      "mouse",
       "start_network_capture",
       "stop_network_capture",
       "list_network_requests",
@@ -186,9 +187,13 @@ describe("built-in tools", () => {
         "click",
         "console_logs",
         "dom_query",
+        "drag",
         "eval",
+        "find",
         "get_html",
         "get_page_info",
+        "get_page_text",
+        "list_downloads",
         "navigate",
         "press_key",
         "reload",
@@ -198,24 +203,27 @@ describe("built-in tools", () => {
         "take_snapshot",
         "type_text",
         "wait_for",
+        "wait_for_download",
+        "zoom",
       ].sort(),
     );
     // Design/selection extras are gated off.
     expect(names).not.toContain("apply_css");
     expect(names).not.toContain("get_selected_element");
     expect(names).not.toContain("capture_design_baseline");
-    expect(names).not.toContain("find_by_text");
+    expect(names).not.toContain("locator_snapshot");
     expect(names).not.toContain("start_network_capture");
     expect(names).not.toContain("cdp_attach");
   });
 
   it("registers automation tools only when enabled", async () => {
     const off = await setup({ automationTools: false });
-    expect((await off.client.listTools()).tools.map((t) => t.name)).not.toContain("find_by_text");
+    expect((await off.client.listTools()).tools.map((t) => t.name)).not.toContain("locator_snapshot");
 
     const on = await setup({ automationTools: true });
     const names = (await on.client.listTools()).tools.map((t) => t.name);
-    expect(names).toContain("find_by_text");
+    expect(names).toContain("locator_snapshot");
+    expect(names).toContain("mouse");
     expect(names).toContain("start_network_capture");
     expect(names).toContain("get_storage_state");
   });
@@ -233,7 +241,7 @@ describe("built-in tools", () => {
   it("can disable only the default core tools", async () => {
     const { client } = await setup({ coreTools: false, designTools: false, automationTools: true, cdpTools: false });
     const names = (await client.listTools()).tools.map((t) => t.name);
-    expect(names).toContain("find_by_text");
+    expect(names).toContain("locator_snapshot");
     // Input primitives stay available even with the core toolset off.
     expect(names).toContain("take_snapshot");
     expect(names).toContain("click");
@@ -250,7 +258,7 @@ describe("built-in tools", () => {
 
     const clicked = await client.callTool({ name: "click", arguments: { x: 40, y: 60, observe: "none" } });
     expect(payloadOf(clicked)).toMatchObject({ via: "cdp", clickCount: 1 });
-    expect(calls).toContainEqual(["input", { kind: "click", x: 40, y: 60, clickCount: 1 }]);
+    expect(calls).toContainEqual(["input", { kind: "click", x: 40, y: 60, clickCount: 1, button: "left", modifiers: 0 }]);
 
     const pressed = await client.callTool({ name: "press_key", arguments: { keys: "Meta+A Backspace", observe: "none" } });
     expect(payloadOf(pressed)).toMatchObject({ via: "cdp", pressed: 2 });
@@ -287,7 +295,10 @@ describe("built-in tools", () => {
 
     const res = await client.callTool({ name: "click", arguments: { uid: "f2e5", observe: "none" } });
     expect(payloadOf(res)).toMatchObject({ frame: "f2", via: "js" });
-    expect(calls).toContainEqual(["frameAct", { uid: "f2e5", clickCount: 1, timeoutMs: undefined, kind: "click" }]);
+    expect(calls).toContainEqual([
+      "frameAct",
+      { uid: "f2e5", clickCount: 1, button: "left", modifiers: undefined, timeoutMs: undefined, kind: "click" },
+    ]);
     // A frame target must never go through the trusted (top-frame) input path.
     expect(calls.some(([action]) => action === "input")).toBe(false);
   });
@@ -296,7 +307,7 @@ describe("built-in tools", () => {
     const { client, calls } = await setup();
     const res = await client.callTool({ name: "take_snapshot", arguments: {} });
     expect(textOf(res)).toContain("iframe f1");
-    expect(calls).toContainEqual(["frameSnapshot", { maxNodes: 400, includeHidden: false }]);
+    expect(calls).toContainEqual(["frameSnapshot", { maxNodes: 400, includeHidden: false, maxDepth: 15 }]);
   });
 
   it("never calls the trusted input path when the switch is off", async () => {

@@ -380,19 +380,35 @@ See [DETAILS.md](DETAILS.md#profiles-multi-user-isolation) for the full model.
 5. Ask your agent to call `mcp_page_bridge_list_clients` to confirm the tab is connected.
 
 Every enabled tab already exposes a lean set of built-in tools (`take_snapshot`,
-`click`, `type_text`, `press_key`, `eval`, `dom_query`, `screenshot`,
-`navigate`, …) — no page changes needed:
+`find`, `click`, `drag`, `type_text`, `press_key`, `get_page_text`, `eval`,
+`screenshot`, `navigate`, …) — no page changes needed:
 
 - **Snapshot → act → observe.** `take_snapshot` hands out stable `uid`s for the
   page's interactive elements (cross-origin iframes included, as `f1e2`), and
   action tools append a fresh snapshot to their result, so a click and its
-  outcome are one call. Ask for pixels with `observe:"screenshot"`.
+  outcome are one call. Ask for pixels with `observe:"screenshot"`. Scope big
+  pages with `rootUid`/`maxDepth`, or skip the tree entirely with
+  `find("add to cart button")`.
+- **Real pointer input.** `click` carries a `button` (`right` opens the page's
+  context menu) and `modifiers` (`ctrl`/`shift` for multi- and range-select);
+  `drag` does a stepped pointer drag, which is what dnd-kit, sortable lists,
+  sliders and canvas editors actually listen for; `scroll` with a `direction`
+  dispatches a real wheel, the only way to move inner scroll containers and
+  virtualized lists.
 - **Keyboard-accurate input.** `type_text` types character by character (embed
   keys with `<kbd>Enter</kbd>`), `press_key` takes chords like `Meta+A
-  Backspace`. Turn on **Trusted input** in the popup and both dispatch real
-  browser events for pages that ignore synthetic ones.
+  Backspace` and can hold keys with `holdMs`. Turn on **Trusted input** in the
+  popup and all of it dispatches real browser events for pages that ignore
+  synthetic ones.
+- **Reading without burning context.** `get_page_text` returns the rendered
+  article text instead of raw HTML; `zoom` enlarges one region instead of
+  spending a whole screenshot on it.
 - **Screenshots that line up with the tree.** `screenshot` supports
-  `fullPage:true` and `refs:true` (uid labels drawn on the page).
+  `fullPage:true`, `refs:true` (uid labels drawn on the page) and `maxWidth`, and
+  every result states how image pixels map back to the CSS pixels `click{x,y}`
+  expects.
+- **Follows the file.** `wait_for_download` returns the on-disk path of the file
+  a page just exported, so your agent can read it with its own filesystem tools.
 
 Optional dashboard: open `http://127.0.0.1:8787/` while the bridge is running.
 Use **Shutdown bridge** there when you want to stop the background daemon.

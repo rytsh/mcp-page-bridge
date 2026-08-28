@@ -10,6 +10,7 @@
 import {
   MCP_PAGE_BRIDGE_DASHBOARD_ACTIVATE_TAB,
   MCP_PAGE_BRIDGE_DASHBOARD_CLOSE_TAB,
+  MCP_PAGE_BRIDGE_READ_FILE,
   type ChannelMessage,
   type ControlAction,
   type ControlPayload,
@@ -483,13 +484,13 @@ async function listAgentFrames(tabId: number): Promise<number[]> {
 async function snapshotFrame(
   tabId: number,
   frameId: number,
-  req: { maxNodes: number; includeHidden: boolean; uidPrefix: string },
+  req: { maxNodes: number; maxDepth: number; includeHidden: boolean; uidPrefix: string },
 ): Promise<{ lines: string[]; truncated: boolean; url: string; title: string } | undefined> {
   const [result] = await chrome.scripting.executeScript({
     target: { tabId, frameIds: [frameId] },
     world: "MAIN",
     args: [req],
-    func: (payload: { maxNodes: number; includeHidden: boolean; uidPrefix: string }) => {
+    func: (payload: { maxNodes: number; maxDepth: number; includeHidden: boolean; uidPrefix: string }) => {
       const api = (window as unknown as Record<string, any>).__mcpPageBridgeFrame;
       if (!api) return undefined;
       try {
@@ -504,6 +505,7 @@ async function snapshotFrame(
 
 async function runFrameSnapshot(tabId: number, args: Record<string, unknown>): Promise<unknown> {
   const maxNodes = Math.max(10, Math.min(2000, Math.floor(numArg(args.maxNodes, 400))));
+  const maxDepth = Math.max(1, Math.min(40, Math.floor(numArg(args.maxDepth, 15))));
   const includeHidden = boolArg(args.includeHidden);
 
   await injectFrameAgent(tabId);
@@ -517,7 +519,7 @@ async function runFrameSnapshot(tabId: number, args: Record<string, unknown>): P
     const index = sections.length;
     // The top frame keeps bare uids (e1, e2, …); sub-frames get an f<index> prefix.
     const uidPrefix = index === 0 ? "" : `f${index}`;
-    const rendered = await snapshotFrame(tabId, frameId, { maxNodes, includeHidden, uidPrefix });
+    const rendered = await snapshotFrame(tabId, frameId, { maxNodes, maxDepth, includeHidden, uidPrefix });
     if (!rendered) continue;
     // Empty sub-frames (trackers, spacer iframes) only add noise.
     if (!rendered.lines.length && index !== 0) continue;
@@ -663,6 +665,339 @@ async function captureFullPage(tabId: number): Promise<string> {
   }
 }
 
+// ---- image post-processing (zoom / downscale) ---------------------------------
+//
+// `chrome.tabs.captureVisibleTab` only ever returns the full viewport at the
+// display's pixel ratio. Cropping a region (zoom) and shrinking an oversized
+// capture both happen here, in the service worker, with OffscreenCanvas — the
+// page has no access to the captured bitmap.
+
+interface ProcessedImage {
+  dataUrl: string;
+  width: number;
+  height: number;
+  scale: number;
+}
+
+async function processCapture(
+  dataUrl: string,
+  opts: { region?: { x: number; y: number; width: number; height: number }; devicePixelRatio?: number; scale?: number; maxWidth?: number },
+): Promise<ProcessedImage> {
+  const blob = await (await fetch(dataUrl)).blob();
+  const bitmap = await createImageBitmap(blob);
+  const dpr = Math.max(0.1, numArg(opts.devicePixelRatio, 1));
+
+  // The capture is in device pixels; regions arrive in CSS pixels.
+  let sx = 0;
+  let sy = 0;
+  let sw = bitmap.width;
+  let sh = bitmap.height;
+  if (opts.region) {
+    sx = Math.max(0, Math.round(opts.region.x * dpr));
+    sy = Math.max(0, Math.round(opts.region.y * dpr));
+    sw = Math.max(1, Math.min(Math.round(opts.region.width * dpr), bitmap.width - sx));
+    sh = Math.max(1, Math.min(Math.round(opts.region.height * dpr), bitmap.height - sy));
+  }
+
+  let scale = 1;
+  if (opts.scale !== undefined) {
+    scale = Math.max(1, Math.min(6, opts.scale));
+  } else if (opts.region) {
+    // Default zoom: enlarge the crop to roughly 800px wide so small text reads.
+    scale = Math.max(1, Math.min(6, 800 / sw));
+  }
+  let dw = Math.round(sw * scale);
+  let dh = Math.round(sh * scale);
+
+  const maxWidth = opts.maxWidth !== undefined ? Math.max(64, Math.min(8192, Math.round(opts.maxWidth))) : undefined;
+  if (maxWidth && dw > maxWidth) {
+    const shrink = maxWidth / dw;
+    dw = Math.round(dw * shrink);
+    dh = Math.round(dh * shrink);
+    scale *= shrink;
+  }
+
+  const canvas = new OffscreenCanvas(dw, dh);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    bitmap.close();
+    throw new Error("OffscreenCanvas 2d context unavailable.");
+  }
+  ctx.imageSmoothingEnabled = scale < 1;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, dw, dh);
+  bitmap.close();
+
+  const outBlob = await canvas.convertToBlob({ type: "image/png" });
+  const buffer = new Uint8Array(await outBlob.arrayBuffer());
+  let binary = "";
+  for (let i = 0; i < buffer.length; i += 0x8000) {
+    binary += String.fromCharCode(...buffer.subarray(i, i + 0x8000));
+  }
+  return { dataUrl: `data:image/png;base64,${btoa(binary)}`, width: dw, height: dh, scale };
+}
+
+/** Pixel size of a PNG data URL, without decoding it into a canvas. */
+async function imageSize(dataUrl: string): Promise<{ width: number; height: number }> {
+  try {
+    const blob = await (await fetch(dataUrl)).blob();
+    const bitmap = await createImageBitmap(blob);
+    const size = { width: bitmap.width, height: bitmap.height };
+    bitmap.close();
+    return size;
+  } catch {
+    return { width: 0, height: 0 };
+  }
+}
+
+// ---- download tracking --------------------------------------------------------
+//
+// A page action that produces a file (export CSV, download invoice) was a dead
+// end for the agent: something landed in ~/Downloads and it had no way to learn
+// the path. We keep a small ring of download events so `list_downloads` and
+// `wait_for_download` can report the finished file — including the on-disk path,
+// which the agent's own filesystem tools can then read.
+
+const DOWNLOAD_MAX_ENTRIES = 100;
+
+interface DownloadRecord {
+  id: number;
+  url: string;
+  filename: string;
+  path: string;
+  state: "in_progress" | "complete" | "interrupted";
+  bytesReceived: number;
+  totalBytes: number;
+  mime: string;
+  error?: string;
+  startedAt: string;
+  endedAt?: string;
+}
+
+const downloadRecords = new Map<number, DownloadRecord>();
+
+function recordDownload(item: chrome.downloads.DownloadItem | chrome.downloads.DownloadDelta): void {
+  const id = item.id;
+  const existing = downloadRecords.get(id);
+  const asItem = item as Partial<chrome.downloads.DownloadItem>;
+  const asDelta = item as Partial<chrome.downloads.DownloadDelta>;
+  const pick = <T>(direct: T | undefined, delta: { current?: string } | undefined, fallback: T): T =>
+    direct !== undefined ? direct : ((delta?.current as T | undefined) ?? fallback);
+
+  const record: DownloadRecord = {
+    id,
+    url: pick(asItem.finalUrl ?? asItem.url, asDelta.finalUrl ?? asDelta.url, existing?.url ?? ""),
+    path: pick(asItem.filename, asDelta.filename, existing?.path ?? ""),
+    filename: "",
+    state: pick(asItem.state as DownloadRecord["state"] | undefined, asDelta.state, existing?.state ?? "in_progress"),
+    bytesReceived: asItem.bytesReceived ?? existing?.bytesReceived ?? 0,
+    totalBytes: asItem.totalBytes ?? existing?.totalBytes ?? 0,
+    mime: pick(asItem.mime, asDelta.mime, existing?.mime ?? ""),
+    error: pick(asItem.error, asDelta.error, existing?.error) || undefined,
+    startedAt: existing?.startedAt ?? asItem.startTime ?? new Date().toISOString(),
+    endedAt: existing?.endedAt,
+  };
+  record.filename = record.path.split(/[\\/]/).pop() ?? "";
+  if (record.state !== "in_progress" && !record.endedAt) record.endedAt = new Date().toISOString();
+
+  downloadRecords.set(id, record);
+  if (downloadRecords.size > DOWNLOAD_MAX_ENTRIES) {
+    const oldest = [...downloadRecords.keys()].slice(0, downloadRecords.size - DOWNLOAD_MAX_ENTRIES);
+    for (const key of oldest) downloadRecords.delete(key);
+  }
+}
+
+if (chrome.downloads?.onCreated) {
+  chrome.downloads.onCreated.addListener((item) => recordDownload(item));
+  chrome.downloads.onChanged.addListener((delta) => {
+    // A delta only carries what changed; re-query so the size/path stay accurate.
+    recordDownload(delta);
+    chrome.downloads.search({ id: delta.id }, (items) => {
+      for (const item of items) recordDownload(item);
+    });
+  });
+}
+
+function downloadList(limit: number, state?: string): DownloadRecord[] {
+  let entries = [...downloadRecords.values()].sort((a, b) => b.id - a.id);
+  if (state) entries = entries.filter((entry) => entry.state === state);
+  return entries.slice(0, limit);
+}
+
+async function runDownloads(args: Record<string, unknown>): Promise<unknown> {
+  const action = strArg(args.action, "list");
+  if (action === "list") {
+    // Seed from Chrome's own list so downloads from before the SW woke up show.
+    await new Promise<void>((resolve) => {
+      chrome.downloads.search({ limit: DOWNLOAD_MAX_ENTRIES, orderBy: ["-startTime"] }, (items) => {
+        for (const item of items) recordDownload(item);
+        resolve();
+      });
+    });
+    const entries = downloadList(Math.max(1, Math.min(100, Math.floor(numArg(args.limit, 10)))), strArg(args.state) || undefined);
+    return { count: entries.length, downloads: entries };
+  }
+
+  if (action !== "wait") throw new Error(`unknown downloads action: ${action}`);
+
+  const timeoutMs = Math.max(0, Math.min(300000, numArg(args.timeoutMs, 30000)));
+  const filename = strArg(args.filename).toLowerCase();
+  const url = strArg(args.url).toLowerCase();
+  const onlyNew = args.since !== false;
+  const knownIds = onlyNew ? new Set(downloadRecords.keys()) : new Set<number>();
+  const started = Date.now();
+
+  for (;;) {
+    await new Promise<void>((resolve) => {
+      chrome.downloads.search({ limit: DOWNLOAD_MAX_ENTRIES, orderBy: ["-startTime"] }, (items) => {
+        for (const item of items) recordDownload(item);
+        resolve();
+      });
+    });
+    const match = [...downloadRecords.values()]
+      .sort((a, b) => b.id - a.id)
+      .find(
+        (entry) =>
+          (!onlyNew || !knownIds.has(entry.id)) &&
+          entry.state === "complete" &&
+          (!filename || entry.filename.toLowerCase().includes(filename)) &&
+          (!url || entry.url.toLowerCase().includes(url)),
+      );
+    if (match) return { ...match, note: "path is on the machine running the browser; read it with your filesystem tools." };
+    if (Date.now() - started > timeoutMs) {
+      const pending = downloadList(5).filter((entry) => entry.state === "in_progress");
+      throw new Error(
+        `No matching download completed within ${timeoutMs}ms.` +
+          (pending.length ? ` Still in progress: ${pending.map((entry) => entry.filename || entry.url).join(", ")}` : ""),
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
+// ---- tab context --------------------------------------------------------------
+//
+// An agent that clicks a link which opens a new tab has, so far, no way to know
+// it happened — it keeps talking to the old tab and wonders why nothing moved.
+// We track tabs opened *by* an enabled tab and report them (plus this tab's own
+// url/title) alongside action results. Deliberately scoped to the acting tab's
+// own offspring: dumping the user's whole tab list into the agent's context on
+// every click would be a privacy leak, not a feature.
+
+interface OpenedTabRecord {
+  id: number;
+  url: string;
+  title: string;
+  at: number;
+}
+
+const openedByTab = new Map<number, OpenedTabRecord[]>();
+
+if (chrome.tabs?.onCreated) {
+  chrome.tabs.onCreated.addListener((tab) => {
+    const opener = tab.openerTabId;
+    if (opener === undefined || tab.id === undefined) return;
+    const list = openedByTab.get(opener) ?? [];
+    list.push({ id: tab.id, url: tab.pendingUrl ?? tab.url ?? "", title: tab.title ?? "", at: Date.now() });
+    // Only the recent ones matter; the agent is told about each exactly once.
+    openedByTab.set(opener, list.slice(-10));
+  });
+}
+
+/**
+ * Compact "what changed around this tab" report. Newly opened child tabs are
+ * drained on read, so the agent is told about each one once and repeated
+ * actions don't re-append the same noise.
+ */
+async function tabContextFor(tabId: number): Promise<unknown> {
+  let self: { id: number; url: string; title: string } | undefined;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    self = { id: tabId, url: tab.url ?? "", title: tab.title ?? "" };
+  } catch {
+    self = undefined;
+  }
+
+  const pending = openedByTab.get(tabId) ?? [];
+  openedByTab.delete(tabId);
+  const opened = await Promise.all(
+    pending.map(async (record) => {
+      try {
+        const tab = await chrome.tabs.get(record.id);
+        return { id: record.id, url: tab.url ?? record.url, title: tab.title ?? record.title, enabled: await isEnabled(record.id) };
+      } catch {
+        return { id: record.id, url: record.url, title: record.title, closed: true };
+      }
+    }),
+  );
+
+  return { self, opened };
+}
+
+// ---- bridge-hosted file reads (upload_file path form) -------------------------
+//
+// The extension cannot read the filesystem, but the bridge daemon runs on the
+// same machine as the agent. `upload_file { path }` therefore asks the daemon,
+// over the tab's own provider socket, to hand back the bytes. The daemon
+// refuses unless it was started with --upload-dir, and only serves files inside
+// that directory — this extension side deliberately adds no path handling of
+// its own, so there is exactly one place enforcing the boundary.
+
+const BRIDGE_RPC_TIMEOUT_MS = 20000;
+let bridgeRpcSeq = 0;
+const pendingBridgeRpc = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+
+function isBridgeRpcResponse(value: unknown): value is { id: string; result?: unknown; error?: { message?: string } } {
+  if (!value || typeof value !== "object") return false;
+  const id = (value as { id?: unknown }).id;
+  return typeof id === "string" && id.startsWith("mpb-sw-") && pendingBridgeRpc.has(id);
+}
+
+function settleBridgeRpc(payload: { id: string; result?: unknown; error?: { message?: string } }): void {
+  const pending = pendingBridgeRpc.get(payload.id);
+  if (!pending) return;
+  pendingBridgeRpc.delete(payload.id);
+  clearTimeout(pending.timer);
+  if (payload.error) pending.reject(new Error(payload.error.message ?? "bridge request failed"));
+  else pending.resolve(payload.result);
+}
+
+/** Send a JSON-RPC request up the tab's provider socket and await the reply. */
+function callBridge(tabId: number, method: string, params: Record<string, unknown>): Promise<unknown> {
+  const state = tabs.get(tabId);
+  const entry = state ? [...state.sockets.values()].find((socket) => socket.ws?.readyState === WebSocket.OPEN) : undefined;
+  if (!entry?.ws) return Promise.reject(new Error("No open bridge connection for this tab."));
+
+  const id = `mpb-sw-${++bridgeRpcSeq}`;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingBridgeRpc.delete(id);
+      reject(new Error(`Bridge did not answer ${method} within ${BRIDGE_RPC_TIMEOUT_MS}ms.`));
+    }, BRIDGE_RPC_TIMEOUT_MS);
+    pendingBridgeRpc.set(id, { resolve, reject, timer });
+    try {
+      entry.ws!.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
+    } catch (error) {
+      pendingBridgeRpc.delete(id);
+      clearTimeout(timer);
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
+}
+
+async function readBridgeFile(tabId: number, args: Record<string, unknown>): Promise<unknown> {
+  const path = strArg(args.path);
+  if (!path) throw new Error("readFile needs a path.");
+  const result = (await callBridge(tabId, MCP_PAGE_BRIDGE_READ_FILE, { path })) as {
+    base64?: string;
+    name?: string;
+    mimeType?: string;
+    size?: number;
+  };
+  if (typeof result?.base64 !== "string") throw new Error("Bridge returned no file content.");
+  return { base64: result.base64, name: result.name ?? path.split(/[\\/]/).pop() ?? "file", mimeType: result.mimeType, size: result.size ?? 0 };
+}
+
 const INPUT_MAX_KEYS = 2000;
 
 interface TrustedKeyDescriptor {
@@ -690,7 +1025,7 @@ function trustedKeyDescriptors(value: unknown): TrustedKeyDescriptor[] {
   });
 }
 
-async function dispatchTrustedKeys(tabId: number, keys: TrustedKeyDescriptor[], delayMs: number): Promise<void> {
+async function dispatchTrustedKeys(tabId: number, keys: TrustedKeyDescriptor[], delayMs: number, holdMs = 0): Promise<void> {
   for (const key of keys) {
     const base = {
       key: key.key,
@@ -707,23 +1042,88 @@ async function dispatchTrustedKeys(tabId: number, keys: TrustedKeyDescriptor[], 
       text: key.text || undefined,
       unmodifiedText: key.text || undefined,
     });
+    if (holdMs > 0) {
+      // Chrome auto-repeats a physically held key; mirror that so press-and-hold
+      // handlers see the same event stream a real user produces.
+      const deadline = Date.now() + holdMs;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, Math.min(33, Math.max(0, deadline - Date.now()))));
+        if (Date.now() >= deadline) break;
+        await sendCdpCommand(tabId, "Input.dispatchKeyEvent", {
+          ...base,
+          type: key.text ? "keyDown" : "rawKeyDown",
+          text: key.text || undefined,
+          unmodifiedText: key.text || undefined,
+          autoRepeat: true,
+        });
+      }
+    }
     await sendCdpCommand(tabId, "Input.dispatchKeyEvent", { ...base, type: "keyUp" });
     if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
 }
 
-async function dispatchTrustedClick(tabId: number, x: number, y: number, clickCount: number): Promise<void> {
-  const common = { x, y, button: "left" as const };
-  await sendCdpCommand(tabId, "Input.dispatchMouseEvent", { ...common, type: "mouseMoved", clickCount: 0, buttons: 0 });
-  for (let i = 1; i <= clickCount; i += 1) {
-    await sendCdpCommand(tabId, "Input.dispatchMouseEvent", { ...common, type: "mousePressed", clickCount: i, buttons: 1 });
+/** `MouseEvent.buttons` bitmask CDP expects, per button name. */
+const CDP_BUTTON_MASKS: Record<string, number> = { left: 1, right: 2, middle: 4, none: 0 };
+
+function mouseButtonArg(value: unknown, fallback = "left"): string {
+  const name = strArg(value, fallback).toLowerCase();
+  return name in CDP_BUTTON_MASKS ? name : fallback;
+}
+
+async function dispatchTrustedClick(
+  tabId: number,
+  x: number,
+  y: number,
+  opts: { clickCount: number; button: string; modifiers: number },
+): Promise<void> {
+  const common = { x, y, button: opts.button, modifiers: opts.modifiers };
+  const mask = CDP_BUTTON_MASKS[opts.button] ?? 1;
+  await sendCdpCommand(tabId, "Input.dispatchMouseEvent", { ...common, type: "mouseMoved", button: "none", clickCount: 0, buttons: 0 });
+  for (let i = 1; i <= opts.clickCount; i += 1) {
+    await sendCdpCommand(tabId, "Input.dispatchMouseEvent", { ...common, type: "mousePressed", clickCount: i, buttons: mask });
     await sendCdpCommand(tabId, "Input.dispatchMouseEvent", { ...common, type: "mouseReleased", clickCount: i, buttons: 0 });
   }
+}
+
+/**
+ * Trusted pointer drag: press, glide, release.
+ *
+ * Real `Input.dispatchMouseEvent` moves are what pages using pointer capture or
+ * bot-protected drag widgets accept; the synthetic path in the page can't
+ * produce `isTrusted` events.
+ */
+async function dispatchTrustedDrag(
+  tabId: number,
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+  opts: { steps: number; holdMs: number; settleMs: number; button: string; modifiers: number },
+): Promise<void> {
+  const mask = CDP_BUTTON_MASKS[opts.button] ?? 1;
+  const common = { button: opts.button, modifiers: opts.modifiers };
+  await sendCdpCommand(tabId, "Input.dispatchMouseEvent", { ...common, type: "mouseMoved", button: "none", x: from.x, y: from.y, clickCount: 0, buttons: 0 });
+  await sendCdpCommand(tabId, "Input.dispatchMouseEvent", { ...common, type: "mousePressed", x: from.x, y: from.y, clickCount: 1, buttons: mask });
+  if (opts.holdMs > 0) await new Promise((resolve) => setTimeout(resolve, opts.holdMs));
+  for (let step = 1; step <= opts.steps; step += 1) {
+    const progress = step / opts.steps;
+    await sendCdpCommand(tabId, "Input.dispatchMouseEvent", {
+      ...common,
+      type: "mouseMoved",
+      x: Math.round(from.x + (to.x - from.x) * progress),
+      y: Math.round(from.y + (to.y - from.y) * progress),
+      clickCount: 0,
+      buttons: mask,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 8));
+  }
+  if (opts.settleMs > 0) await new Promise((resolve) => setTimeout(resolve, opts.settleMs));
+  await sendCdpCommand(tabId, "Input.dispatchMouseEvent", { ...common, type: "mouseReleased", x: to.x, y: to.y, clickCount: 1, buttons: 0 });
 }
 
 async function runTrustedInput(tabId: number, args: Record<string, unknown>): Promise<unknown> {
   const kind = strArg(args.kind);
   const delayMs = Math.max(0, Math.min(1000, numArg(args.delayMs, 0)));
+  const modifiers = Math.max(0, Math.floor(numArg(args.modifiers, 0)));
 
   switch (kind) {
     case "click": {
@@ -731,17 +1131,61 @@ async function runTrustedInput(tabId: number, args: Record<string, unknown>): Pr
       const y = Math.round(numArg(args.y, -1));
       if (x < 0 || y < 0) throw new Error("click needs viewport x/y coordinates.");
       const clickCount = Math.max(1, Math.min(3, Math.floor(numArg(args.clickCount, 1))));
-      await withTrustedInputSession(tabId, () => dispatchTrustedClick(tabId, x, y, clickCount));
-      return { ok: true, via: "cdp", x, y, clickCount };
+      const button = mouseButtonArg(args.button);
+      await withTrustedInputSession(tabId, () => dispatchTrustedClick(tabId, x, y, { clickCount, button, modifiers }));
+      return { ok: true, via: "cdp", x, y, clickCount, button };
     }
     case "keys": {
       const keys = trustedKeyDescriptors(args.keys);
-      await withTrustedInputSession(tabId, () => dispatchTrustedKeys(tabId, keys, delayMs));
-      return { ok: true, via: "cdp", keys: keys.length };
+      const holdMs = Math.max(0, Math.min(30000, numArg(args.holdMs, 0)));
+      await withTrustedInputSession(tabId, () => dispatchTrustedKeys(tabId, keys, delayMs, holdMs));
+      return { ok: true, via: "cdp", keys: keys.length, holdMs: holdMs || undefined };
+    }
+    case "drag": {
+      const from = pointArg(args.from, "from");
+      const to = pointArg(args.to, "to");
+      const options = {
+        steps: Math.max(1, Math.min(60, Math.floor(numArg(args.steps, 12)))),
+        holdMs: Math.max(0, Math.min(5000, numArg(args.holdMs, 60))),
+        settleMs: Math.max(0, Math.min(5000, numArg(args.settleMs, 60))),
+        button: mouseButtonArg(args.button),
+        modifiers,
+      };
+      await withTrustedInputSession(tabId, () => dispatchTrustedDrag(tabId, from, to, options));
+      return { ok: true, via: "cdp", from, to, steps: options.steps, button: options.button };
+    }
+    case "wheel": {
+      const x = Math.round(numArg(args.x, -1));
+      const y = Math.round(numArg(args.y, -1));
+      if (x < 0 || y < 0) throw new Error("wheel needs viewport x/y coordinates.");
+      const deltaX = numArg(args.deltaX, 0);
+      const deltaY = numArg(args.deltaY, 0);
+      await withTrustedInputSession(tabId, () =>
+        sendCdpCommand(tabId, "Input.dispatchMouseEvent", {
+          type: "mouseWheel",
+          x,
+          y,
+          button: "none",
+          buttons: 0,
+          clickCount: 0,
+          deltaX,
+          deltaY,
+          modifiers,
+        }),
+      );
+      return { ok: true, via: "cdp", x, y, deltaX, deltaY };
     }
     default:
       throw new Error(`unknown input kind: ${kind}`);
   }
+}
+
+function pointArg(value: unknown, what: string): { x: number; y: number } {
+  const point = (value ?? {}) as Record<string, unknown>;
+  const x = Math.round(numArg(point.x, Number.NaN));
+  const y = Math.round(numArg(point.y, Number.NaN));
+  if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error(`${what} needs {x, y} viewport coordinates.`);
+  return { x, y };
 }
 
 async function runCdp(tabId: number, args: Record<string, unknown>): Promise<unknown> {
@@ -805,15 +1249,24 @@ async function runCdp(tabId: number, args: Record<string, unknown>): Promise<unk
       await sendCdpCommand(tabId, "Emulation.clearGeolocationOverride").catch(() => undefined);
       await sendCdpCommand(tabId, "Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }).catch(() => undefined);
       return { ok: true };
-    case "dispatchMouse":
+    case "dispatchMouse": {
       await ensureCdpAttached(tabId);
+      const type = strArg(args.type, "mousePressed");
+      // A mouseWheel without deltas is a no-op in Chrome, which made the wheel
+      // branch of this tool silently useless before deltaX/deltaY existed.
+      const wheel = type === "mouseWheel";
       return sendCdpCommand(tabId, "Input.dispatchMouseEvent", {
-        type: strArg(args.type, "mousePressed"),
+        type,
         x: numArg(args.x, 0),
         y: numArg(args.y, 0),
-        button: strArg(args.button, "left"),
-        clickCount: Math.max(0, Math.floor(numArg(args.clickCount, 1))),
+        button: strArg(args.button, wheel ? "none" : "left"),
+        buttons: args.buttons === undefined ? undefined : Math.max(0, Math.floor(numArg(args.buttons, 0))),
+        clickCount: wheel ? 0 : Math.max(0, Math.floor(numArg(args.clickCount, 1))),
+        deltaX: wheel ? numArg(args.deltaX, 0) : undefined,
+        deltaY: wheel ? numArg(args.deltaY, 0) : undefined,
+        modifiers: Math.max(0, Math.floor(numArg(args.modifiers, 0))),
       });
+    }
     case "dispatchKey": {
       await ensureCdpAttached(tabId);
       const key = strArg(args.key);
@@ -957,6 +1410,12 @@ function connectSocket(state: TabState, providerId: string): void {
       }
       if (isDashboardRpc(payload)) {
         void handleDashboardRpc(state, ws, payload);
+        return;
+      }
+      // Answers to requests the service worker itself made (readFile) never
+      // belong to the page's MCP server; settle them here.
+      if (isBridgeRpcResponse(payload)) {
+        settleBridgeRpc(payload);
         return;
       }
       downRpc(state, providerId, payload);
@@ -1385,13 +1844,42 @@ async function runExt(
         const tab = await chrome.tabs.get(tabId);
         dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
       }
+
+      // Crop (zoom) and/or downscale before the image ever reaches the agent, so
+      // a 4K retina capture doesn't blow past the model's image size limits.
+      const region = args.region as { x: number; y: number; width: number; height: number } | undefined;
+      let width = 0;
+      let height = 0;
+      let scale = 1;
+      if (region || args.maxWidth !== undefined || args.scale !== undefined) {
+        try {
+          const processed = await processCapture(dataUrl, {
+            region,
+            devicePixelRatio: numArg(args.devicePixelRatio, 1),
+            scale: args.scale === undefined ? undefined : numArg(args.scale, 1),
+            maxWidth: args.maxWidth === undefined ? undefined : numArg(args.maxWidth, 0),
+          });
+          dataUrl = processed.dataUrl;
+          width = processed.width;
+          height = processed.height;
+          scale = processed.scale;
+        } catch (error) {
+          if (region) throw error; // a zoom that can't crop has no useful fallback
+        }
+      }
+      if (!width) {
+        const size = await imageSize(dataUrl);
+        width = size.width;
+        height = size.height;
+      }
+
       let savedAs: string | undefined;
       if (args.download) {
         const filename = (args.filename as string) || `mcp-page-bridge-${Date.now()}.png`;
         await chrome.downloads.download({ url: dataUrl, filename, saveAs: false });
         savedAs = filename;
       }
-      return { dataUrl, savedAs, fullPage, fullPageError };
+      return { dataUrl, savedAs, fullPage, fullPageError, width, height, scale };
     }
     case "frameOverlay": {
       const show = args.show === true;
@@ -1423,6 +1911,12 @@ async function runExt(
       const win = await chrome.windows.update(tab.windowId, { width, height });
       return { ok: true, window: { id: win?.id, width: win?.width, height: win?.height } };
     }
+    case "downloads":
+      return runDownloads(args);
+    case "tabContext":
+      return tabContextFor(tabId);
+    case "readFile":
+      return readBridgeFile(tabId, args);
     case "cdp":
       if (!cdpTools) throw new Error("Advanced CDP tools are not enabled in the extension popup.");
       return runCdp(tabId, args);

@@ -21,21 +21,30 @@ import {
   briefSummary,
   charChords,
   cdpKeyDescriptor,
+  cdpModifierMask,
   clickPoint,
   clickElement,
   clearElementValue,
   dispatchMouseLike,
+  dragPointer,
+  findElements,
   focusElement,
   hasLocatorArgs,
+  hasModifiers,
   isFrameUid,
   isPointInViewport,
   json,
   type KeyChord,
+  type ModifierState,
+  type MouseButtonName,
   numberArg,
   parseKeySequence,
+  parseModifiers,
+  parseMouseButton,
   parseTypeSegments,
   pressKeys,
   renderPageSnapshot,
+  resolveUid,
   sleep,
   text,
   typeText,
@@ -89,18 +98,29 @@ async function actInFrame(extCall: ExtCall, kind: string, args: Record<string, u
 }
 
 /** Send trusted mouse events for an element's center point. */
-async function trustedClick(extCall: ExtCall, element: Element, clickCount: number): Promise<void> {
+async function trustedClick(
+  extCall: ExtCall,
+  element: Element,
+  opts: { clickCount: number; button: MouseButtonName; modifiers: ModifierState },
+): Promise<void> {
   element.scrollIntoView({ block: "center", inline: "center" });
   await sleep(30);
   const point = viewportPointFor(element);
   if (!isPointInViewport(point)) throw new Error("Element center is outside the viewport.");
-  await extCall("input", { kind: "click", x: point.x, y: point.y, clickCount });
+  await extCall("input", {
+    kind: "click",
+    x: point.x,
+    y: point.y,
+    clickCount: opts.clickCount,
+    button: opts.button,
+    modifiers: cdpModifierMask(opts.modifiers),
+  });
 }
 
 /** Send trusted key events for a chord list. */
-async function trustedKeys(extCall: ExtCall, chords: KeyChord[], delayMs: number): Promise<void> {
+async function trustedKeys(extCall: ExtCall, chords: KeyChord[], delayMs: number, holdMs = 0): Promise<void> {
   if (!chords.length) return;
-  await extCall("input", { kind: "keys", keys: chords.map(cdpKeyDescriptor), delayMs });
+  await extCall("input", { kind: "keys", keys: chords.map(cdpKeyDescriptor), delayMs, holdMs });
 }
 
 /** Flatten typed text (with `<kbd>` markup) into a single chord stream. */
@@ -127,12 +147,16 @@ export function registerInputTools(server: EmbeddedMcpServer, opts: InputToolOpt
         "Compact text snapshot of the page's interactive/structural elements with stable uids. " +
         "Pass a uid to click / type_text / press_key instead of guessing CSS selectors. " +
         "Covers cross-origin iframes too: their uids carry the frame index (f2e7). " +
+        "On a big page, scope it: rootUid/rootSelector snapshots one container and maxDepth caps the tree. " +
         "Action tools already return a shortened snapshot; call this for the full tree or after uids went stale " +
         "(navigation and DOM changes invalidate them).",
       inputSchema: {
         type: "object",
         properties: {
           maxNodes: { type: "number", description: "max elements per frame (default 400)" },
+          maxDepth: { type: "number", description: "max tree depth (default 15)" },
+          rootUid: { type: "string", description: "snapshot only this element's subtree (uid from a previous snapshot)" },
+          rootSelector: { type: "string", description: "snapshot only this element's subtree (CSS selector)" },
           includeHidden: { type: "boolean", description: "include elements that are not visible (default false)" },
           allFrames: { type: "boolean", description: "include iframes (default true); false snapshots only the top document" },
         },
@@ -140,17 +164,60 @@ export function registerInputTools(server: EmbeddedMcpServer, opts: InputToolOpt
     },
     async (args) => {
       const maxNodes = numberArg(args.maxNodes, 400, 10, 2000);
+      const maxDepth = numberArg(args.maxDepth, 15, 1, 40);
       const includeHidden = args.includeHidden === true;
-      if (args.allFrames !== false) {
+
+      // Resolve the root before rendering: rendering clears the uid registry a
+      // rootUid resolves through.
+      let root: Element | undefined;
+      if (typeof args.rootUid === "string" && args.rootUid) root = resolveUid(args.rootUid);
+      else if (typeof args.rootSelector === "string" && args.rootSelector) {
+        const found = document.querySelector(args.rootSelector);
+        if (!found) throw new Error(`No element matches rootSelector: ${args.rootSelector}`);
+        root = found;
+      }
+
+      // A scoped snapshot is by definition about this document's subtree, so the
+      // cross-frame stitching path doesn't apply.
+      if (!root && args.allFrames !== false) {
         try {
-          const result = (await opts.extCall("frameSnapshot", { maxNodes, includeHidden })) as { text?: string };
+          const result = (await opts.extCall("frameSnapshot", { maxNodes, includeHidden, maxDepth })) as { text?: string };
           if (result?.text) return text(result.text);
         } catch {
           // Frame injection can be blocked (restricted pages, no host access);
           // the top-document snapshot below still works.
         }
       }
-      return text(renderPageSnapshot({ maxNodes, includeHidden }));
+      return text(renderPageSnapshot({ maxNodes, includeHidden, maxDepth, root }));
+    },
+  );
+
+  server.registerTool(
+    {
+      name: "find",
+      description:
+        "Find elements by describing them in plain words — \"add to cart button\", \"email field\", \"pricing link\". " +
+        "Returns ranked, uid-tagged matches you can click / type_text straight away. " +
+        "Much cheaper than take_snapshot when you already know what you are looking for.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "what to look for, e.g. \"search field\" or \"submit button\"" },
+          limit: { type: "number", description: "max matches (default 10)" },
+          includeHidden: { type: "boolean", description: "also consider elements that are not visible (default false)" },
+        },
+        required: ["query"],
+      },
+    },
+    (args) => {
+      const query = String(args.query ?? "");
+      const limit = numberArg(args.limit, 10, 1, 50);
+      const matches = findElements(query, { limit, includeHidden: args.includeHidden === true });
+      if (!matches.length) {
+        return text(`No element matched "${query}". Try fewer words, a different role word (button/link/field), or call take_snapshot.`);
+      }
+      const lines = matches.map((match) => `${match.line}  (score ${match.score})`);
+      return text(`${matches.length} match(es) for "${query}" — uids are live, use them directly:\n${lines.join("\n")}`);
     },
   );
 
@@ -158,7 +225,9 @@ export function registerInputTools(server: EmbeddedMcpServer, opts: InputToolOpt
     {
       name: "click",
       description:
-        "Click an element. Target it with uid (from take_snapshot), selector, text, role+name, testId — or viewport x/y coordinates. " +
+        "Click an element. Target it with uid (from take_snapshot/find), selector, text, role+name, testId — or viewport x/y coordinates. " +
+        "button:\"right\" opens the page's context menu, \"middle\" fires auxclick; clickCount 2 double-clicks, 3 selects the line. " +
+        "modifiers holds keys during the click (\"ctrl\" to multi-select, \"shift\" to range-select). " +
         "Waits until the element is visible, enabled, stable and not covered before clicking (force:true skips the checks).",
       inputSchema: {
         type: "object",
@@ -166,7 +235,9 @@ export function registerInputTools(server: EmbeddedMcpServer, opts: InputToolOpt
           ...LOCATOR_PROPERTIES,
           x: { type: "number", description: "viewport x coordinate (use with y instead of a locator)" },
           y: { type: "number", description: "viewport y coordinate" },
-          clickCount: { type: "number", description: "1 (default) or 2 for a double click" },
+          button: { type: "string", enum: ["left", "middle", "right"], description: "mouse button (default left)" },
+          modifiers: { type: "string", description: "modifier chord held during the click, e.g. \"ctrl\", \"shift\", \"ctrl+shift\"" },
+          clickCount: { type: "number", description: "1 (default), 2 for double click, 3 for triple click" },
           timeoutMs: { type: "number", description: "how long to wait for the element (default 5000)" },
           force: { type: "boolean", description: "skip the actionability checks" },
           strict: { type: "boolean", description: "fail when the locator matches more than one element" },
@@ -175,54 +246,157 @@ export function registerInputTools(server: EmbeddedMcpServer, opts: InputToolOpt
       },
     },
     async (args) => {
-      const clickCount = numberArg(args.clickCount, 1, 1, 2);
+      const clickCount = numberArg(args.clickCount, 1, 1, 3);
+      const button = parseMouseButton(args.button);
+      const modifiers = parseModifiers(args.modifiers);
+      const clickOpts = { clickCount, button, modifiers };
       const observe = observeMode(args);
       const done = (payload: Record<string, unknown>) => withObservation(json(payload), observe, { extCall: opts.extCall });
+      // Trusted (CDP) input only carries a left-button click sequence with
+      // modifiers; contextmenu/auxclick semantics live in the synthetic engine.
+      const trustedCapable = trusted;
 
       if (isFrameUid(args.uid)) {
-        return done(await actInFrame(opts.extCall, "click", { uid: args.uid, clickCount, timeoutMs: args.timeoutMs }));
+        return done(
+          await actInFrame(opts.extCall, "click", {
+            uid: args.uid,
+            clickCount,
+            button,
+            modifiers: args.modifiers,
+            timeoutMs: args.timeoutMs,
+          }),
+        );
       }
 
       if (!hasLocatorArgs(args) && args.x !== undefined && args.y !== undefined) {
         const x = Number(args.x);
         const y = Number(args.y);
-        if (trusted) {
+        if (trustedCapable) {
           try {
-            await opts.extCall("input", { kind: "click", x, y, clickCount });
-            return done({ clicked: { at: { x, y } }, clickCount, via: "cdp" });
+            await opts.extCall("input", { kind: "click", x, y, clickCount, button, modifiers: cdpModifierMask(modifiers) });
+            return done({ clicked: { at: { x, y } }, clickCount, button, via: "cdp" });
           } catch (error) {
-            const target = clickPoint(x, y, clickCount);
-            return done({ clicked: briefSummary(target), at: { x, y }, clickCount, via: "js", trustedError: errorMessage(error) });
+            const target = clickPoint(x, y, clickOpts);
+            return done({ clicked: briefSummary(target), at: { x, y }, clickCount, button, via: "js", trustedError: errorMessage(error) });
           }
         }
-        const target = clickPoint(x, y, clickCount);
-        return done({ clicked: briefSummary(target), at: { x, y }, clickCount, via: "js" });
+        const target = clickPoint(x, y, clickOpts);
+        return done({ clicked: briefSummary(target), at: { x, y }, clickCount, button, via: "js" });
       }
 
       const element = await resolveTarget(args, { actionable: true, required: true });
       if (!element) throw new Error("No element resolved.");
       const actionability = await actionabilityFor(element);
+      const describe = (extra: Record<string, unknown>) => ({
+        clicked: briefSummary(element),
+        clickCount,
+        button,
+        modifiers: hasModifiers(modifiers) ? String(args.modifiers) : undefined,
+        actionability,
+        ...extra,
+      });
 
-      if (trusted) {
+      if (trustedCapable) {
         try {
-          await trustedClick(opts.extCall, element, clickCount);
-          return done({ clicked: briefSummary(element), clickCount, via: "cdp", actionability });
+          await trustedClick(opts.extCall, element, clickOpts);
+          return done(describe({ via: "cdp" }));
         } catch (error) {
-          clickElement(element);
-          if (clickCount === 2) {
-            clickElement(element);
-            dispatchMouseLike(element, "dblclick", { detail: 2 });
-          }
-          return done({ clicked: briefSummary(element), clickCount, via: "js", trustedError: errorMessage(error), actionability });
+          clickElement(element, clickOpts);
+          return done(describe({ via: "js", trustedError: errorMessage(error) }));
         }
       }
 
-      clickElement(element);
-      if (clickCount === 2) {
-        clickElement(element);
-        dispatchMouseLike(element, "dblclick", { detail: 2 });
+      clickElement(element, clickOpts);
+      return done(describe({ via: "js" }));
+    },
+  );
+
+  server.registerTool(
+    {
+      name: "drag",
+      description:
+        "Drag with the pointer: press at the source, move in steps, release at the target. " +
+        "This is what modern drag-and-drop (dnd-kit, sortable lists, sliders, canvas editors, resize handles) listens for; " +
+        "HTML5 DragEvents are fired too when the source element is draggable. " +
+        "Give each end as a uid/selector or as viewport coordinates (fromX/fromY, toX/toY).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          uid: { type: "string", description: "source element uid" },
+          selector: { type: "string", description: "source CSS selector" },
+          targetUid: { type: "string", description: "target element uid" },
+          targetSelector: { type: "string", description: "target CSS selector" },
+          fromX: { type: "number", description: "source viewport x (instead of a source locator)" },
+          fromY: { type: "number", description: "source viewport y" },
+          toX: { type: "number", description: "target viewport x (instead of a target locator)" },
+          toY: { type: "number", description: "target viewport y" },
+          steps: { type: "number", description: "intermediate move events (default 12, more = smoother)" },
+          holdMs: { type: "number", description: "pause after pressing down before moving (default 60)" },
+          settleMs: { type: "number", description: "pause before releasing (default 60)" },
+          button: { type: "string", enum: ["left", "middle", "right"], description: "mouse button (default left)" },
+          modifiers: { type: "string", description: "modifier chord held for the whole drag" },
+          timeoutMs: { type: "number", description: "how long to wait for the elements (default 5000)" },
+          observe: OBSERVE_PROPERTY,
+        },
+      },
+    },
+    async (args) => {
+      const observe = observeMode(args);
+      const modifiers = parseModifiers(args.modifiers);
+      const button = parseMouseButton(args.button);
+
+      const pointFor = async (
+        locator: Record<string, unknown>,
+        x: unknown,
+        y: unknown,
+        what: string,
+      ): Promise<{ x: number; y: number }> => {
+        if (x !== undefined && y !== undefined) return { x: Math.round(Number(x)), y: Math.round(Number(y)) };
+        if (!hasLocatorArgs(locator)) throw new Error(`drag needs a ${what} (uid/selector or coordinates).`);
+        const element = await waitForLocator({ ...locator, timeoutMs: args.timeoutMs }, { actionable: true });
+        element.scrollIntoView({ block: "center", inline: "center" });
+        await sleep(60);
+        const point = viewportPointFor(element);
+        if (!isPointInViewport(point)) throw new Error(`The ${what} is outside the viewport after scrolling.`);
+        return point;
+      };
+
+      const from = await pointFor({ uid: args.uid, selector: args.selector }, args.fromX, args.fromY, "source");
+      const to = await pointFor({ uid: args.targetUid, selector: args.targetSelector }, args.toX, args.toY, "target");
+
+      if (trusted) {
+        try {
+          await opts.extCall("input", {
+            kind: "drag",
+            from,
+            to,
+            steps: numberArg(args.steps, 12, 1, 60),
+            holdMs: numberArg(args.holdMs, 60, 0, 5000),
+            settleMs: numberArg(args.settleMs, 60, 0, 5000),
+            button,
+            modifiers: cdpModifierMask(modifiers),
+          });
+          return withObservation(json({ dragged: { from, to }, button, via: "cdp" }), observe, { extCall: opts.extCall });
+        } catch (error) {
+          const result = await dragPointer(from, to, {
+            steps: numberArg(args.steps, 12, 1, 60),
+            holdMs: numberArg(args.holdMs, 60, 0, 5000),
+            settleMs: numberArg(args.settleMs, 60, 0, 5000),
+            button,
+            modifiers,
+          });
+          return withObservation(json({ ...result, trustedError: errorMessage(error) }), observe, { extCall: opts.extCall });
+        }
       }
-      return done({ clicked: briefSummary(element), clickCount, via: "js", actionability });
+
+      const result = await dragPointer(from, to, {
+        steps: numberArg(args.steps, 12, 1, 60),
+        holdMs: numberArg(args.holdMs, 60, 0, 5000),
+        settleMs: numberArg(args.settleMs, 60, 0, 5000),
+        button,
+        modifiers,
+      });
+      return withObservation(json(result), observe, { extCall: opts.extCall });
     },
   );
 
@@ -313,6 +487,7 @@ export function registerInputTools(server: EmbeddedMcpServer, opts: InputToolOpt
       description:
         "Press keys / shortcuts on an element (or the focused element). Space-separate a sequence: \"Meta+A Backspace\", \"Enter\", \"Shift+Tab\", \"Escape\". " +
         "Meta and Mod are platform-aware (Cmd on macOS, Ctrl elsewhere); Cmd and Ctrl are literal. " +
+        "holdMs keeps each key down (with auto-repeat) for press-and-hold handlers. " +
         "Enter submits a form from a single-line input, Backspace/Delete edit the value — like a real keypress.",
       inputSchema: {
         type: "object",
@@ -326,6 +501,7 @@ export function registerInputTools(server: EmbeddedMcpServer, opts: InputToolOpt
           testId: LOCATOR_PROPERTIES.testId,
           nth: LOCATOR_PROPERTIES.nth,
           repeat: { type: "number", description: "repeat the whole sequence n times (default 1)" },
+          holdMs: { type: "number", description: "hold each key down this long before releasing (default 0, max 30000)" },
           delayMs: { type: "number", description: "delay between key presses in ms (default 0)" },
           timeoutMs: { type: "number", description: "how long to wait for the element (default 5000)" },
           observe: OBSERVE_PROPERTY,
@@ -337,11 +513,12 @@ export function registerInputTools(server: EmbeddedMcpServer, opts: InputToolOpt
       const keys = String(args.keys ?? "");
       const repeat = numberArg(args.repeat, 1, 1, 50);
       const delayMs = numberArg(args.delayMs, 0, 0, 1000);
+      const holdMs = numberArg(args.holdMs, 0, 0, 30000);
       const observe = observeMode(args);
       const done = (payload: Record<string, unknown>) => withObservation(json(payload), observe, { extCall: opts.extCall });
 
       if (isFrameUid(args.uid)) {
-        return done(await actInFrame(opts.extCall, "press_key", { uid: args.uid, keys, repeat, delayMs, timeoutMs: args.timeoutMs }));
+        return done(await actInFrame(opts.extCall, "press_key", { uid: args.uid, keys, repeat, delayMs, holdMs, timeoutMs: args.timeoutMs }));
       }
 
       const element = await resolveTarget(args);
@@ -355,15 +532,15 @@ export function registerInputTools(server: EmbeddedMcpServer, opts: InputToolOpt
           if (element) focusElement(element);
           const chords: KeyChord[] = [];
           for (let round = 0; round < repeat; round += 1) chords.push(...parseKeySequence(keys));
-          await trustedKeys(opts.extCall, chords, delayMs);
-          return done({ target, pressed: chords.length, via: "cdp" });
+          await trustedKeys(opts.extCall, chords, delayMs, holdMs);
+          return done({ target, pressed: chords.length, holdMs: holdMs || undefined, via: "cdp" });
         } catch (error) {
-          const pressed = await pressKeys(element, keys, { repeat, delayMs });
+          const pressed = await pressKeys(element, keys, { repeat, delayMs, holdMs });
           return done({ target, pressed, via: "js", trustedError: errorMessage(error) });
         }
       }
 
-      const pressed = await pressKeys(element, keys, { repeat, delayMs });
+      const pressed = await pressKeys(element, keys, { repeat, delayMs, holdMs });
       return done({ target, pressed, via: "js" });
     },
   );

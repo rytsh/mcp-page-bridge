@@ -42,6 +42,55 @@ export function observeMode(args: Record<string, unknown>, fallback: ObserveMode
 
 type ExtCall = (action: string, args?: Record<string, unknown>) => Promise<any>;
 
+interface TabContext {
+  self?: { id: number; url: string; title: string };
+  opened?: { id: number; url: string; title: string; enabled?: boolean; closed?: boolean }[];
+}
+
+/** Last url/title we told the agent about, so we only report actual changes. */
+let lastReportedLocation = "";
+
+/**
+ * Tell the agent when the action moved the ground under it: this tab navigated,
+ * or the click opened a new tab.
+ *
+ * Without this an agent that clicks a `target="_blank"` link keeps driving the
+ * old tab and cannot understand why nothing changed. Reported once per change
+ * (the service worker drains the opened-tab list on read), so a loop of clicks
+ * on a static page costs nothing.
+ */
+async function tabContextNote(extCall: ExtCall): Promise<string | undefined> {
+  let context: TabContext;
+  try {
+    context = ((await extCall("tabContext")) ?? {}) as TabContext;
+  } catch {
+    return undefined;
+  }
+
+  const lines: string[] = [];
+  const location = context.self ? `${context.self.url}\u0000${context.self.title}` : "";
+  if (context.self && location !== lastReportedLocation) {
+    // The very first observation establishes the baseline rather than reporting
+    // a "change" the agent already knows about from its own navigate call.
+    if (lastReportedLocation) {
+      lines.push(`This tab is now on ${context.self.url}${context.self.title ? ` — "${context.self.title}"` : ""}.`);
+    }
+    lastReportedLocation = location;
+  }
+
+  for (const opened of context.opened ?? []) {
+    if (opened.closed) continue;
+    lines.push(
+      `The action opened a new tab (id ${opened.id}): ${opened.url}${opened.title ? ` — "${opened.title}"` : ""}. ` +
+        (opened.enabled
+          ? "It is bridged: call mcp_page_bridge_list_clients to get its tool prefix."
+          : "It is not bridged yet: enable it with browser__enable_tab, or the user's popup, before driving it."),
+    );
+  }
+
+  return lines.length ? `Tab context:\n- ${lines.join("\n- ")}` : undefined;
+}
+
 /**
  * Append the observation blocks to an action result. Never throws: a page that
  * navigated away mid-action still returns the action outcome, with a note.
@@ -55,6 +104,9 @@ export async function withObservation(
 
   await sleep(Math.max(0, opts.settleMs ?? SETTLE_MS));
   const content: ContentBlock[] = [...result.content];
+
+  const tabNote = await tabContextNote(opts.extCall);
+  if (tabNote) content.push({ type: "text", text: tabNote });
 
   if (mode === "snapshot" || mode === "both") {
     try {

@@ -100,6 +100,7 @@ func runDaemon(ctx context.Context, cfg *config.Config) error {
 	b := bridge.New(bridge.Options{
 		Token:          cfg.Token,
 		RequireProfile: cfg.RequireProfile,
+		UploadDir:      cfg.UploadDir,
 		IdleTimeout:    idleTimeout,
 		OnIdleShutdown: func() {
 			slog.Info(fmt.Sprintf("idle for %s with no agents/providers; shutting down", idleTimeout))
@@ -179,6 +180,8 @@ func parseArgs(cfg *config.Config, argv []string) (cliArgs, error) {
 		"comma-separated extra Host/Origin names for the dashboard/API, e.g. a DNS name for a non-loopback bind (env MCP_PAGE_BRIDGE_ALLOWED_HOSTS)")
 	fs.Float64Var(&cfg.IdleTimeout, "idle-timeout", cfg.IdleTimeout,
 		"shut the daemon down after this many idle seconds; 0 disables (env MCP_PAGE_BRIDGE_IDLE_TIMEOUT)")
+	fs.StringVar(&cfg.UploadDir, "upload-dir", cfg.UploadDir,
+		"directory upload_file{path} may read from; unset (default) refuses every path upload (env MCP_PAGE_BRIDGE_UPLOAD_DIR)")
 	fs.BoolVar(&cfg.TLS, "tls", cfg.TLS,
 		"dial the bridge with https/wss; implied by --tls-cert/--tls-key (env MCP_PAGE_BRIDGE_TLS)")
 	fs.StringVar(&cfg.TLSCert, "tls-cert", cfg.TLSCert,

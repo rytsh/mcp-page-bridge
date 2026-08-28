@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
 
 	"github.com/rakunlabs/chu"
 	"github.com/rakunlabs/chu/loader/loaderenv"
@@ -41,6 +42,12 @@ type Config struct {
 	AllowedHosts string `cfg:"allowed_hosts"`
 	// IdleTimeout is in seconds; 0 disables idle auto-shutdown.
 	IdleTimeout float64 `cfg:"idle_timeout"`
+	// UploadDir enables `upload_file { path }`: the browser extension cannot
+	// read the filesystem, so it asks the daemon for the bytes. Empty (the
+	// default) refuses every such request. When set, only regular files whose
+	// resolved path stays inside this directory are served — resolving symlinks
+	// first, so a link inside the directory cannot reach outside it.
+	UploadDir string `cfg:"upload_dir"`
 
 	// TLS switches clients (stdio proxy, stop, probes) to https/wss; it is
 	// implied when TLSCert+TLSKey are set, so it is mainly for attaching to a
@@ -111,7 +118,38 @@ func (c *Config) Validate() error {
 	if c.TLSInsecureSkipVerify {
 		slog.Warn("tls-insecure is set: the bridge certificate is NOT verified (testing only)")
 	}
+	if c.UploadDir != "" {
+		resolved, err := ResolveUploadDir(c.UploadDir)
+		if err != nil {
+			return err
+		}
+		c.UploadDir = resolved
+		slog.Warn(fmt.Sprintf(
+			"upload-dir is set to %s: any bridged page can ask the daemon for files inside it; "+
+				"keep it a dedicated directory, not your home or downloads folder", resolved))
+	}
 	return nil
+}
+
+// ResolveUploadDir validates and canonicalises the upload directory.
+func ResolveUploadDir(dir string) (string, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("upload-dir %s; %w", dir, err)
+	}
+	// Resolve symlinks here so the containment check later compares real paths.
+	real, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("upload-dir %s; %w", dir, err)
+	}
+	info, err := os.Stat(real)
+	if err != nil {
+		return "", fmt.Errorf("upload-dir %s; %w", dir, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("upload-dir %s: not a directory", dir)
+	}
+	return real, nil
 }
 
 // ServesTLS reports whether the daemon should serve HTTPS/WSS.

@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { keyCodeFor, parseKeyChord, parseKeySequence, parseTypeSegments } from "./dom-core.js";
+import {
+  cdpModifierMask,
+  hasModifiers,
+  keyCodeFor,
+  parseKeyChord,
+  parseKeySequence,
+  parseModifiers,
+  parseMouseButton,
+  parseTypeSegments,
+} from "./dom-core.js";
 
 /**
  * The keyboard engine is the part of dom-core that is pure enough to unit test
@@ -103,5 +112,56 @@ describe("keyCodeFor", () => {
     expect(keyCodeFor(" ")).toBe("Space");
     expect(keyCodeFor("ArrowUp")).toBe("ArrowUp");
     expect(keyCodeFor("f5")).toBe("F5");
+  });
+});
+
+/**
+ * Mouse button and modifier parsing feed both the synthetic engine and the CDP
+ * (trusted) path, so a mismatch here silently turns a ctrl+click into a plain
+ * click. They share the keyboard engine's modifier aliases on purpose.
+ */
+describe("parseMouseButton", () => {
+  it("accepts the three button names and defaults to left", () => {
+    expect(parseMouseButton("left")).toBe("left");
+    expect(parseMouseButton("Right")).toBe("right");
+    expect(parseMouseButton("MIDDLE")).toBe("middle");
+    expect(parseMouseButton(undefined)).toBe("left");
+    expect(parseMouseButton("")).toBe("left");
+    expect(parseMouseButton(undefined, "right")).toBe("right");
+  });
+
+  it("rejects anything else instead of silently clicking left", () => {
+    expect(() => parseMouseButton("back")).toThrow(/Unknown mouse button/);
+  });
+});
+
+describe("parseModifiers", () => {
+  it("parses single and combined chords", () => {
+    expect(parseModifiers("ctrl")).toMatchObject({ ctrlKey: true, shiftKey: false, altKey: false, metaKey: false });
+    expect(parseModifiers("ctrl+shift")).toMatchObject({ ctrlKey: true, shiftKey: true });
+    expect(parseModifiers("Alt+Shift")).toMatchObject({ altKey: true, shiftKey: true });
+  });
+
+  it("treats Mod/Meta as platform-aware, Cmd/Ctrl as literal", () => {
+    expect(parseModifiers("mod", { mac: true })).toMatchObject({ metaKey: true, ctrlKey: false });
+    expect(parseModifiers("mod", { mac: false })).toMatchObject({ metaKey: false, ctrlKey: true });
+    expect(parseModifiers("cmd", { mac: false })).toMatchObject({ metaKey: true, ctrlKey: false });
+    expect(parseModifiers("ctrl", { mac: true })).toMatchObject({ ctrlKey: true, metaKey: false });
+  });
+
+  it("returns an empty state for nothing and rejects garbage", () => {
+    expect(hasModifiers(parseModifiers(undefined))).toBe(false);
+    expect(hasModifiers(parseModifiers(""))).toBe(false);
+    expect(hasModifiers(parseModifiers("shift"))).toBe(true);
+    expect(() => parseModifiers("hyper")).toThrow(/Unknown modifier/);
+  });
+
+  it("encodes the CDP bitmask the trusted path sends", () => {
+    expect(cdpModifierMask(parseModifiers(""))).toBe(0);
+    expect(cdpModifierMask(parseModifiers("alt"))).toBe(1);
+    expect(cdpModifierMask(parseModifiers("ctrl"))).toBe(2);
+    expect(cdpModifierMask(parseModifiers("cmd"))).toBe(4);
+    expect(cdpModifierMask(parseModifiers("shift"))).toBe(8);
+    expect(cdpModifierMask(parseModifiers("ctrl+shift"))).toBe(10);
   });
 });

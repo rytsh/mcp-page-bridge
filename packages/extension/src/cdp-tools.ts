@@ -130,7 +130,9 @@ export function registerCdpTools(server: EmbeddedMcpServer, opts: { extCall: Ext
   server.registerTool(
     {
       name: "cdp_dispatch_mouse",
-      description: "Dispatch a trusted-ish mouse event via CDP Input.dispatchMouseEvent.",
+      description:
+        "Dispatch a trusted mouse event via CDP Input.dispatchMouseEvent. " +
+        "mouseWheel needs deltaX/deltaY — without them the event scrolls nothing.",
       inputSchema: {
         type: "object",
         properties: {
@@ -138,7 +140,11 @@ export function registerCdpTools(server: EmbeddedMcpServer, opts: { extCall: Ext
           x: { type: "number" },
           y: { type: "number" },
           button: { type: "string", description: "left|middle|right|none" },
+          buttons: { type: "number", description: "bitmask of buttons currently held (1=left, 2=right, 4=middle)" },
           clickCount: { type: "number", description: "default 1" },
+          deltaX: { type: "number", description: "mouseWheel: horizontal scroll delta in px" },
+          deltaY: { type: "number", description: "mouseWheel: vertical scroll delta in px" },
+          modifiers: { type: "number", description: "bitmask: 1=Alt, 2=Ctrl, 4=Meta, 8=Shift" },
         },
         required: ["type", "x", "y"],
       },

@@ -343,7 +343,12 @@ function buildSnapshotEntries(element: Element, includeHidden: boolean): Snapsho
   return entries;
 }
 
-function renderSnapshotEntries(entries: SnapshotEntry[], depth: number, lines: string[], budget: { left: number; truncated: boolean }): void {
+function renderSnapshotEntries(
+  entries: SnapshotEntry[],
+  depth: number,
+  lines: string[],
+  budget: { left: number; truncated: boolean; maxDepth: number; depthClipped: boolean },
+): void {
   const registry = uidRegistry();
   for (const entry of entries) {
     if (budget.left <= 0) {
@@ -354,6 +359,10 @@ function renderSnapshotEntries(entries: SnapshotEntry[], depth: number, lines: s
     const uid = `${registry.prefix}e${++registry.seq}`;
     registry.refs.set(uid, new WeakRef(entry.element));
     lines.push(`${"  ".repeat(depth)}${snapshotLine(uid, entry.element)}`);
+    if (depth + 1 >= budget.maxDepth) {
+      if (entry.children.length) budget.depthClipped = true;
+      continue;
+    }
     renderSnapshotEntries(entry.children, depth + 1, lines, budget);
   }
 }
@@ -361,8 +370,24 @@ function renderSnapshotEntries(entries: SnapshotEntry[], depth: number, lines: s
 export interface SnapshotLines {
   lines: string[];
   truncated: boolean;
+  depthClipped: boolean;
   url: string;
   title: string;
+  /** Description of the subtree root, when the snapshot was scoped. */
+  root?: string;
+}
+
+export interface SnapshotOptions {
+  maxNodes?: number;
+  includeHidden?: boolean;
+  uidPrefix?: string;
+  /** Cap the rendered tree depth (default 15, like read_page). */
+  maxDepth?: number;
+  /**
+   * Scope the snapshot to a subtree. Resolve this *before* calling, because
+   * rendering clears the uid registry that a `rootUid` would resolve through.
+   */
+  root?: Element;
 }
 
 /**
@@ -370,27 +395,56 @@ export interface SnapshotLines {
  * `uidPrefix` namespaces uids per frame (`f2e7`) when the service worker
  * stitches several frames into one tree.
  */
-export function renderSnapshotLines(opts: { maxNodes?: number; includeHidden?: boolean; uidPrefix?: string } = {}): SnapshotLines {
+export function renderSnapshotLines(opts: SnapshotOptions = {}): SnapshotLines {
   const maxNodes = numberArg(opts.maxNodes, 400, 10, 2000);
+  const maxDepth = numberArg(opts.maxDepth, 15, 1, 40);
+  const root = opts.root ?? document.body;
+  const rootLabel = opts.root ? `${selectorFor(opts.root)} (${elementRole(opts.root) ?? opts.root.tagName.toLowerCase()})` : undefined;
   const registry = uidRegistry();
   registry.generation += 1;
   registry.seq = 0;
   registry.prefix = opts.uidPrefix ?? "";
   registry.refs.clear();
-  const budget = { left: maxNodes, truncated: false };
-  const entries = document.body ? buildSnapshotEntries(document.body, opts.includeHidden === true) : [];
+  const budget = { left: maxNodes, truncated: false, maxDepth, depthClipped: false };
+  const entries = root ? buildSnapshotEntries(root, opts.includeHidden === true) : [];
   const lines: string[] = [];
   renderSnapshotEntries(entries, 0, lines, budget);
-  return { lines, truncated: budget.truncated, url: location.href, title: document.title };
+  return {
+    lines,
+    truncated: budget.truncated,
+    depthClipped: budget.depthClipped,
+    url: location.href,
+    title: document.title,
+    root: rootLabel,
+  };
 }
 
 /** Render a fresh uid snapshot of this document, invalidating previous uids. */
-export function renderPageSnapshot(opts: { maxNodes?: number; includeHidden?: boolean } = {}): string {
+export function renderPageSnapshot(opts: SnapshotOptions = {}): string {
   const maxNodes = numberArg(opts.maxNodes, 400, 10, 2000);
   const snapshot = renderSnapshotLines(opts);
-  const header = `Page snapshot — ${snapshot.title ? `"${normalizeText(snapshot.title)}" — ` : ""}${snapshot.url}`;
-  const footer = snapshot.truncated ? `\n[truncated at ${maxNodes} nodes — pass a larger maxNodes to see more]` : "";
+  const scope = snapshot.root ? ` — scoped to ${snapshot.root}` : "";
+  const header = `Page snapshot — ${snapshot.title ? `"${normalizeText(snapshot.title)}" — ` : ""}${snapshot.url}${scope}`;
+  const notes: string[] = [];
+  if (snapshot.truncated) notes.push(`truncated at ${maxNodes} nodes — pass a larger maxNodes to see more`);
+  if (snapshot.depthClipped) notes.push("depth-clipped — pass a larger maxDepth, or scope with rootUid, to go deeper");
+  const footer = notes.length ? `\n[${notes.join("; ")}]` : "";
   return `${header}\n${snapshot.lines.join("\n") || "(no interactive or structural elements found)"}${footer}`;
+}
+
+/**
+ * Add one element to the uid registry without invalidating the current
+ * snapshot. `find` uses this so its results are immediately actionable while
+ * uids handed out by the last `take_snapshot` stay valid.
+ */
+export function registerUid(element: Element): string {
+  const registry = uidRegistry();
+  for (const [uid, ref] of registry.refs) {
+    if (ref.deref() === element) return uid;
+  }
+  const uid = `${registry.prefix}e${++registry.seq}`;
+  registry.refs.set(uid, new WeakRef(element));
+  return uid;
 }
 
 export function resolveUid(uid: string): Element {
@@ -530,6 +584,239 @@ export function hasLocatorArgs(args: Record<string, unknown>): boolean {
   );
 }
 
+// ---- natural-language element search (find) -----------------------------------
+//
+// `take_snapshot` is the complete but expensive view of a page. `find` is the
+// cheap one: describe the control ("add to cart button", "email field") and get
+// back a handful of ranked, uid-tagged candidates. Everything is local scoring —
+// no model call, no network — so it stays a single fast round trip.
+
+/** Words in a query that name a role, mapped to the roles they accept. */
+const ROLE_HINTS: Record<string, string[]> = {
+  button: ["button"],
+  btn: ["button"],
+  link: ["link"],
+  anchor: ["link"],
+  field: ["textbox", "searchbox", "spinbutton", "combobox"],
+  input: ["textbox", "searchbox", "spinbutton"],
+  textbox: ["textbox"],
+  textarea: ["textbox"],
+  box: ["textbox", "searchbox", "checkbox", "combobox"],
+  search: ["searchbox", "textbox"],
+  checkbox: ["checkbox"],
+  check: ["checkbox"],
+  radio: ["radio"],
+  toggle: ["switch", "checkbox"],
+  switch: ["switch", "checkbox"],
+  dropdown: ["combobox", "listbox"],
+  select: ["combobox", "listbox"],
+  combobox: ["combobox"],
+  option: ["option"],
+  tab: ["tab"],
+  menu: ["menuitem", "menuitemcheckbox", "menuitemradio"],
+  menuitem: ["menuitem"],
+  heading: ["heading"],
+  title: ["heading"],
+  header: ["heading", "banner"],
+  image: ["img"],
+  img: ["img"],
+  icon: ["img", "button"],
+  slider: ["slider"],
+  list: ["list", "listbox"],
+  row: ["listitem"],
+  dialog: ["dialog", "alertdialog"],
+  modal: ["dialog", "alertdialog"],
+  form: ["form"],
+};
+
+/** Words that only describe intent, not the element; dropped before matching. */
+const FILLER_WORDS = new Set(["the", "a", "an", "for", "with", "of", "to", "on", "in", "that", "says", "labeled", "labelled", "named", "called", "first", "any"]);
+
+function queryTokens(query: string): { words: string[]; roles: Set<string> } {
+  const roles = new Set<string>();
+  const words: string[] = [];
+  for (const raw of normalizeText(query).toLowerCase().split(/[\s,.\-_/]+/)) {
+    const token = raw.trim();
+    if (!token) continue;
+    const hinted = ROLE_HINTS[token];
+    if (hinted) {
+      for (const role of hinted) roles.add(role);
+      // A role word can also be part of the visible name ("Search"), so keep it
+      // as a weak word too rather than dropping it outright.
+      words.push(token);
+      continue;
+    }
+    if (FILLER_WORDS.has(token)) continue;
+    words.push(token);
+  }
+  return { words, roles };
+}
+
+/** Every string that could reasonably be "the name" of an element. */
+function searchableText(element: Element): { name: string; extra: string[] } {
+  const name = normalizeText(accessibleName(element)).toLowerCase();
+  const extra: string[] = [];
+  for (const attr of ["placeholder", "title", "name", "value", "alt", "aria-description", "data-testid", "data-test", "data-cy"]) {
+    const value = element.getAttribute(attr);
+    if (value) extra.push(normalizeText(value).toLowerCase());
+  }
+  if (element instanceof HTMLAnchorElement && element.getAttribute("href")) extra.push(String(element.getAttribute("href")).toLowerCase());
+  return { name, extra };
+}
+
+function nameScore(haystack: string, words: string[]): number {
+  if (!haystack || !words.length) return 0;
+  const phrase = words.join(" ");
+  if (haystack === phrase) return 100;
+  if (haystack.startsWith(phrase)) return 78;
+  if (haystack.includes(phrase)) return 66;
+  const hit = words.filter((word) => haystack.includes(word)).length;
+  if (!hit) return 0;
+  // All words present but scattered still beats a single-word coincidence.
+  return Math.round((hit / words.length) * 52) + (hit === words.length ? 8 : 0);
+}
+
+export interface FindMatch {
+  uid: string;
+  element: Element;
+  score: number;
+  line: string;
+}
+
+/**
+ * Rank elements against a natural-language description.
+ * Returns uid-tagged snapshot lines, so a match can be clicked straight away.
+ */
+export function findElements(query: string, opts: { limit?: number; includeHidden?: boolean; root?: ParentNode } = {}): FindMatch[] {
+  const { words, roles } = queryTokens(String(query ?? ""));
+  if (!words.length && !roles.size) throw new Error("find needs a description, e.g. \"add to cart button\" or \"email field\".");
+  const limit = numberArg(opts.limit, 20, 1, 50);
+  const includeHidden = opts.includeHidden === true;
+
+  const scored: { element: Element; score: number }[] = [];
+  for (const element of allElements(opts.root ?? document)) {
+    if (element.tagName === "SCRIPT" || element.tagName === "STYLE" || element.tagName === "HEAD") continue;
+    const interactive = isSnapshotInteractive(element);
+    const structural = isSnapshotStructural(element);
+    if (!interactive && !structural) continue;
+    const visible = isVisibleElement(element);
+    if (!visible && !includeHidden) continue;
+
+    const role = elementRole(element)?.toLowerCase();
+    // A role word in the query is a hard filter when it matches nothing else:
+    // "email field" should not return the "Email" heading.
+    const roleMatch = !roles.size || (role !== undefined && roles.has(role));
+    const { name, extra } = searchableText(element);
+
+    let score = nameScore(name, words);
+    if (!score) {
+      for (const value of extra) score = Math.max(score, Math.round(nameScore(value, words) * 0.8));
+    }
+    if (!score && roles.size && roleMatch) score = 12; // role-only query ("all buttons")
+    if (!score) continue;
+
+    if (roles.size) score += roleMatch ? 34 : -30;
+    if (interactive) score += 8;
+    const rect = element.getBoundingClientRect();
+    if (rect.top >= 0 && rect.top < innerHeight) score += 6;
+    // Prefer the smallest element carrying the name (the button, not its wrapper).
+    if (rect.width * rect.height > innerWidth * innerHeight * 0.5) score -= 12;
+    if (score > 0) scored.push({ element, score });
+  }
+
+  scored.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    // Equal scores: keep document order so results read top-to-bottom.
+    return a.element.compareDocumentPosition(b.element) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+  });
+
+  // Drop ancestors whose only claim is a descendant's text.
+  const kept: { element: Element; score: number }[] = [];
+  for (const candidate of scored) {
+    if (kept.some((other) => other.element !== candidate.element && candidate.element.contains(other.element) && other.score >= candidate.score)) continue;
+    kept.push(candidate);
+    if (kept.length >= limit) break;
+  }
+
+  return kept.map(({ element, score }) => {
+    const uid = registerUid(element);
+    return { uid, element, score, line: snapshotLine(uid, element) };
+  });
+}
+
+// ---- readable page text -------------------------------------------------------
+
+const TEXT_SKIP_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "SVG", "CANVAS", "IFRAME", "OBJECT", "EMBED", "VIDEO", "AUDIO", "HEAD"]);
+const TEXT_BLOCK_TAGS = new Set([
+  "P", "DIV", "SECTION", "ARTICLE", "MAIN", "HEADER", "FOOTER", "ASIDE", "NAV", "UL", "OL", "LI", "DL", "DT", "DD",
+  "TABLE", "THEAD", "TBODY", "TR", "TD", "TH", "BLOCKQUOTE", "PRE", "FIGURE", "FIGCAPTION", "FORM", "FIELDSET", "HR", "BR",
+  "H1", "H2", "H3", "H4", "H5", "H6",
+]);
+
+/** Best guess at the element holding the actual article/content. */
+function mainContentRoot(): Element {
+  for (const selector of ["main", "[role=main]", "article", "#main", "#content", ".main-content"]) {
+    const candidate = document.querySelector(selector);
+    if (candidate && isVisibleElement(candidate) && normalizeText(candidate.textContent ?? "").length > 200) return candidate;
+  }
+  return document.body ?? document.documentElement;
+}
+
+/**
+ * Extract the page's *rendered* text, the way a reader sees it.
+ *
+ * `get_html` is the raw-source alternative and costs several times the tokens
+ * for the same information; this walks visible text nodes only, keeps block
+ * structure as line breaks, and marks headings so the agent keeps the outline.
+ */
+export function extractPageText(opts: { root?: Element; includeHidden?: boolean; max?: number } = {}): { text: string; root: string; truncated: boolean } {
+  const root = opts.root ?? mainContentRoot();
+  const includeHidden = opts.includeHidden === true;
+  const max = numberArg(opts.max, 20000, 200, MAX_TOOL_TEXT);
+  const out: string[] = [];
+  let line = "";
+
+  const flush = (): void => {
+    const value = normalizeText(line);
+    if (value) out.push(value);
+    line = "";
+  };
+
+  const walk = (node: Node): void => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const value = node.nodeValue ?? "";
+      if (value.trim()) line += `${line && !line.endsWith(" ") ? " " : ""}${value.replace(/\s+/g, " ")}`;
+      return;
+    }
+    if (!(node instanceof Element)) return;
+    if (TEXT_SKIP_TAGS.has(node.tagName)) return;
+    if (node.getAttribute("aria-hidden") === "true") return;
+    if (!includeHidden && !isVisibleElement(node)) return;
+
+    const block = TEXT_BLOCK_TAGS.has(node.tagName);
+    const heading = /^H[1-6]$/.test(node.tagName);
+    if (block) flush();
+    if (heading) line += `${"#".repeat(Number(node.tagName[1]))} `;
+    for (const child of node.childNodes) {
+      walk(child);
+      if (out.join("\n").length > max) return;
+    }
+    if (block) flush();
+    if (node.tagName === "LI") flush();
+  };
+
+  walk(root);
+  flush();
+
+  const joined = out.join("\n");
+  const truncated = joined.length > max;
+  return {
+    text: truncated ? `${joined.slice(0, max)}\n…[truncated — raise max or pass a selector to scope the extraction]` : joined,
+    root: opts.root ? selectorFor(root) : root === document.body ? "body" : selectorFor(root),
+    truncated,
+  };
+}
+
 export function locatorSummary(element: Element, opts: { includeHtml?: boolean } = {}): Record<string, unknown> {
   return {
     ...snapshotElement(element),
@@ -613,53 +900,437 @@ export async function waitForLocator(args: Record<string, unknown>, opts: { time
 }
 
 // ---- mouse input --------------------------------------------------------------
+//
+// One engine backs every pointer interaction (click, right/middle click, hover,
+// drag, wheel). It carries the three things a real pointer event has and the
+// old implementation hardcoded away: a **button**, **modifier keys**, and a
+// **viewport point**. Without those, context menus, ctrl/shift-click selection,
+// and pointer-sensor drag-and-drop (dnd-kit, sliders, canvas) are unreachable.
+
+export type MouseButtonName = "left" | "middle" | "right";
+
+/** `MouseEvent.button` value per name. */
+const MOUSE_BUTTON_IDS: Record<MouseButtonName, number> = { left: 0, middle: 1, right: 2 };
+/** `MouseEvent.buttons` bitmask per name (differs from `button`!). */
+const MOUSE_BUTTON_MASKS: Record<MouseButtonName, number> = { left: 1, middle: 4, right: 2 };
+
+export function parseMouseButton(value: unknown, fallback: MouseButtonName = "left"): MouseButtonName {
+  const name = String(value ?? "").trim().toLowerCase();
+  if (name === "left" || name === "middle" || name === "right") return name;
+  if (!name) return fallback;
+  throw new Error(`Unknown mouse button "${value}"; use left, middle, or right.`);
+}
+
+export interface ModifierState {
+  altKey: boolean;
+  ctrlKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
+}
+
+export const NO_MODIFIERS: ModifierState = { altKey: false, ctrlKey: false, metaKey: false, shiftKey: false };
+
+export function hasModifiers(state: ModifierState): boolean {
+  return state.altKey || state.ctrlKey || state.metaKey || state.shiftKey;
+}
+
+/**
+ * Parse a modifier chord like `"ctrl+shift"` or `"Mod"` into event flags.
+ * Shares MODIFIER_ALIASES with the keyboard engine, so `Mod`/`Meta` stay
+ * platform-aware (Cmd on macOS, Ctrl elsewhere) exactly like in `press_key`.
+ */
+export function parseModifiers(value: unknown, opts: { mac?: boolean } = {}): ModifierState {
+  const raw = typeof value === "string" ? value.trim() : Array.isArray(value) ? value.join("+") : "";
+  const state: ModifierState = { ...NO_MODIFIERS };
+  if (!raw) return state;
+  const mac = opts.mac ?? isMacPlatform();
+  for (const part of raw.split("+")) {
+    const token = part.trim().toLowerCase();
+    if (!token) continue;
+    const modifier = MODIFIER_ALIASES[token];
+    if (!modifier) throw new Error(`Unknown modifier "${part}" in "${raw}"; use alt, ctrl, meta/mod, cmd, or shift.`);
+    if (modifier === "alt") state.altKey = true;
+    else if (modifier === "ctrl") state.ctrlKey = true;
+    else if (modifier === "shift") state.shiftKey = true;
+    else if (modifier === "meta") state.metaKey = true;
+    else if (mac) state.metaKey = true;
+    else state.ctrlKey = true;
+  }
+  return state;
+}
+
+/** CDP `Input.dispatchMouseEvent` modifier bitmask (same encoding as keys). */
+export function cdpModifierMask(state: ModifierState): number {
+  return (state.altKey ? 1 : 0) | (state.ctrlKey ? 2 : 0) | (state.metaKey ? 4 : 0) | (state.shiftKey ? 8 : 0);
+}
 
 export function focusElement(element: Element): void {
   if (element instanceof HTMLElement || element instanceof SVGElement) element.focus();
 }
 
+export interface PointerOptions {
+  /** Viewport point the event claims to happen at (defaults to the element center). */
+  point?: { x: number; y: number };
+  button?: MouseButtonName;
+  /** Buttons currently held down, as a `MouseEvent.buttons` mask. */
+  buttons?: number;
+  modifiers?: ModifierState;
+  detail?: number;
+}
+
+function mouseInit(point: { x: number; y: number }, opts: PointerOptions): MouseEventInit {
+  const button = opts.button ?? "left";
+  return {
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    view: window,
+    clientX: point.x,
+    clientY: point.y,
+    screenX: point.x,
+    screenY: point.y,
+    button: MOUSE_BUTTON_IDS[button],
+    buttons: opts.buttons ?? 0,
+    detail: opts.detail ?? 0,
+    ...(opts.modifiers ?? NO_MODIFIERS),
+  };
+}
+
+/** Dispatch one mouse-family event on an element. */
 export function dispatchMouseLike(element: Element, type: string, init: MouseEventInit = {}): boolean {
   const point = centerPoint(element);
-  return element.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, composed: true, view: window, clientX: point.x, clientY: point.y, button: 0, buttons: type === "mouseup" || type === "click" || type === "dblclick" ? 0 : 1, ...init }));
+  const base = mouseInit(point, {
+    buttons: type === "mouseup" || type === "click" || type === "dblclick" || type === "mouseover" || type === "mousemove" ? 0 : 1,
+  });
+  return element.dispatchEvent(new MouseEvent(type, { ...base, ...init }));
 }
 
-export function dispatchPointerLike(element: Element, type: string): boolean {
-  const point = centerPoint(element);
-  const init: PointerEventInit = { bubbles: true, cancelable: true, composed: true, view: window, clientX: point.x, clientY: point.y, button: 0, buttons: type === "pointerup" ? 0 : 1, pointerId: 1, pointerType: "mouse", isPrimary: true };
+/** Dispatch one pointer-family event on an element (falls back to mouse events). */
+export function dispatchPointerLike(element: Element, type: string, opts: PointerOptions = {}): boolean {
+  const point = opts.point ?? centerPoint(element);
+  const init: PointerEventInit = {
+    ...mouseInit(point, { ...opts, buttons: opts.buttons ?? (type === "pointerup" || type === "pointerover" || type === "pointermove" ? 0 : 1) }),
+    pointerId: 1,
+    pointerType: "mouse",
+    isPrimary: true,
+    width: 1,
+    height: 1,
+    pressure: type === "pointerdown" ? 0.5 : 0,
+  };
   if (typeof PointerEvent === "function") return element.dispatchEvent(new PointerEvent(type, init));
-  return dispatchMouseLike(element, type.replace(/^pointer/, "mouse"));
+  return element.dispatchEvent(new MouseEvent(type.replace(/^pointer/, "mouse"), init));
 }
 
-export function clickElement(element: Element, detail = 1): void {
+export interface ClickOptions {
+  /** 1 = single, 2 = double, 3 = triple (selects a line/paragraph in text). */
+  clickCount?: number;
+  button?: MouseButtonName;
+  modifiers?: ModifierState;
+  /** Override the viewport point events claim to originate from. */
+  point?: { x: number; y: number };
+}
+
+/**
+ * Dispatch the full pointer/mouse sequence for a click on `target`.
+ *
+ * Shared by the element path (`clickElement`) and the coordinate path
+ * (`clickPoint`), so both honour button and modifiers identically.
+ *   - right button also emits `contextmenu` (the event a page listens to for a
+ *     custom context menu),
+ *   - middle button also emits `auxclick`,
+ *   - clickCount 2/3 emits `dblclick` after the second press.
+ */
+function dispatchClickSequence(target: Element, point: { x: number; y: number }, opts: ClickOptions): void {
+  const button = opts.button ?? "left";
+  const modifiers = opts.modifiers ?? NO_MODIFIERS;
+  const mask = MOUSE_BUTTON_MASKS[button];
+  const clickCount = Math.max(1, Math.min(3, Math.floor(opts.clickCount ?? 1)));
+  const base: PointerOptions = { point, button, modifiers };
+  /** Dispatch one mouse-family event with this sequence's button/modifiers. */
+  const fire = (type: string, detail: number, buttons: number): void => {
+    target.dispatchEvent(new MouseEvent(type, mouseInit(point, { ...base, detail, buttons })));
+  };
+
+  dispatchPointerLike(target, "pointerover", { ...base, buttons: 0 });
+  fire("mouseover", 0, 0);
+  dispatchPointerLike(target, "pointermove", { ...base, buttons: 0 });
+  fire("mousemove", 0, 0);
+
+  for (let i = 1; i <= clickCount; i += 1) {
+    dispatchPointerLike(target, "pointerdown", { ...base, detail: i, buttons: mask });
+    fire("mousedown", i, mask);
+    dispatchPointerLike(target, "pointerup", { ...base, detail: i, buttons: 0 });
+    fire("mouseup", i, 0);
+    if (button === "left") fire("click", i, 0);
+    else if (button === "middle") fire("auxclick", i, 0);
+    if (i === 2) fire("dblclick", 2, 0);
+  }
+
+  if (button === "right") {
+    fire("auxclick", clickCount, 0);
+    fire("contextmenu", clickCount, 0);
+  }
+}
+
+/**
+ * Click an element. A plain left single click still ends with the native
+ * `element.click()` so default activation behaviour (links, labels, form
+ * submits) runs; any other button/modifier/count goes through the synthetic
+ * sequence only, because `element.click()` cannot express them.
+ */
+export function clickElement(element: Element, opts: ClickOptions | number = {}): void {
+  const options: ClickOptions = typeof opts === "number" ? { clickCount: opts } : opts;
+  const point = options.point ?? centerPoint(element);
+  const button = options.button ?? "left";
+  const clickCount = Math.max(1, Math.min(3, Math.floor(options.clickCount ?? 1)));
+  const modifiers = options.modifiers ?? NO_MODIFIERS;
+  const plain = button === "left" && clickCount === 1 && !hasModifiers(modifiers);
+
   focusElement(element);
-  dispatchPointerLike(element, "pointerover");
-  dispatchMouseLike(element, "mouseover", { detail });
-  dispatchPointerLike(element, "pointermove");
-  dispatchMouseLike(element, "mousemove", { detail });
-  dispatchPointerLike(element, "pointerdown");
-  dispatchMouseLike(element, "mousedown", { detail });
-  dispatchPointerLike(element, "pointerup");
-  dispatchMouseLike(element, "mouseup", { detail });
-  if (detail === 2) dispatchMouseLike(element, "dblclick", { detail });
-  else if (element instanceof HTMLElement) element.click();
-  else dispatchMouseLike(element, "click", { detail });
+  if (plain) {
+    dispatchClickSequenceNativeTail(element, point);
+    return;
+  }
+  dispatchClickSequence(element, point, { clickCount, button, modifiers, point });
+}
+
+/** Left single click that finishes with the element's native activation. */
+function dispatchClickSequenceNativeTail(element: Element, point: { x: number; y: number }): void {
+  const base: PointerOptions = { point, button: "left", modifiers: NO_MODIFIERS };
+  dispatchPointerLike(element, "pointerover", { ...base, buttons: 0 });
+  element.dispatchEvent(new MouseEvent("mouseover", mouseInit(point, { ...base, buttons: 0 })));
+  dispatchPointerLike(element, "pointermove", { ...base, buttons: 0 });
+  element.dispatchEvent(new MouseEvent("mousemove", mouseInit(point, { ...base, buttons: 0 })));
+  dispatchPointerLike(element, "pointerdown", { ...base, detail: 1, buttons: 1 });
+  element.dispatchEvent(new MouseEvent("mousedown", mouseInit(point, { ...base, detail: 1, buttons: 1 })));
+  dispatchPointerLike(element, "pointerup", { ...base, detail: 1, buttons: 0 });
+  element.dispatchEvent(new MouseEvent("mouseup", mouseInit(point, { ...base, detail: 1, buttons: 0 })));
+  if (element instanceof HTMLElement) element.click();
+  else element.dispatchEvent(new MouseEvent("click", mouseInit(point, { ...base, detail: 1, buttons: 0 })));
+}
+
+/**
+ * Resolve what sits at a viewport point, descending into same-origin iframes so
+ * a coordinate that lands inside an embedded document hits the real element
+ * rather than the `<iframe>` box.
+ */
+export function elementAtPoint(x: number, y: number): { element: Element; localX: number; localY: number; framePath: string[] } {
+  let element = document.elementFromPoint(x, y);
+  if (!element) throw new Error(`No element at viewport point (${x}, ${y}).`);
+  let localX = x;
+  let localY = y;
+  const framePath: string[] = [];
+
+  for (let depth = 0; depth < 5 && element instanceof HTMLIFrameElement; depth += 1) {
+    let inner: Document | null = null;
+    try {
+      inner = element.contentDocument;
+    } catch {
+      inner = null;
+    }
+    if (!inner) break; // cross-origin: the iframe box is the best we can do
+    const rect = element.getBoundingClientRect();
+    localX -= rect.left;
+    localY -= rect.top;
+    const next = inner.elementFromPoint(localX, localY);
+    framePath.push(selectorFor(element));
+    if (!next) break;
+    element = next;
+  }
+
+  return { element, localX, localY, framePath };
 }
 
 /** Click whatever sits at viewport coordinates (no locator involved). */
-export function clickPoint(x: number, y: number, detail = 1): Element {
-  const target = document.elementFromPoint(x, y);
-  if (!target) throw new Error(`No element at viewport point (${x}, ${y}).`);
-  const init: MouseEventInit = { bubbles: true, cancelable: true, composed: true, view: window, clientX: x, clientY: y, button: 0, detail };
-  focusElement(target);
-  for (const type of ["pointerover", "mouseover", "pointermove", "mousemove", "pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
-    if (type.startsWith("pointer") && typeof PointerEvent === "function") {
-      target.dispatchEvent(new PointerEvent(type, { ...init, pointerId: 1, pointerType: "mouse", isPrimary: true }));
-    } else if (!type.startsWith("pointer")) {
-      target.dispatchEvent(new MouseEvent(type, init));
-    }
+export function clickPoint(x: number, y: number, opts: ClickOptions | number = {}): Element {
+  const options: ClickOptions = typeof opts === "number" ? { clickCount: opts } : opts;
+  const { element, localX, localY } = elementAtPoint(x, y);
+  focusElement(element);
+  dispatchClickSequence(element, { x: localX, y: localY }, { ...options, point: { x: localX, y: localY } });
+  return element;
+}
+
+// ---- wheel / scrolling --------------------------------------------------------
+
+/** Nearest ancestor that can actually scroll in the requested direction. */
+function scrollableAncestor(element: Element | null, deltaX: number, deltaY: number): Element | undefined {
+  for (let node: Element | null = element; node; node = node.parentElement) {
+    const style = getComputedStyle(node);
+    const canY = /(auto|scroll|overlay)/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 1;
+    const canX = /(auto|scroll|overlay)/.test(style.overflowX) && node.scrollWidth > node.clientWidth + 1;
+    if ((deltaY !== 0 && canY) || (deltaX !== 0 && canX)) return node;
   }
-  if (detail === 2) target.dispatchEvent(new MouseEvent("dblclick", init));
-  return target;
+  return undefined;
+}
+
+export interface WheelResult {
+  target: Record<string, unknown>;
+  scrolled: { element: string; left: number; top: number } | { window: true; x: number; y: number };
+  defaultPrevented: boolean;
+}
+
+/**
+ * Dispatch a `wheel` event at a viewport point and apply the scroll ourselves.
+ *
+ * Synthetic wheel events never scroll anything (only trusted ones do), so after
+ * dispatching we move the nearest scrollable ancestor — unless the page called
+ * `preventDefault()`, which is exactly what wheel-driven UIs (maps, zoomable
+ * canvases, virtualized lists) do. That makes this behave like a real wheel for
+ * both kinds of page.
+ */
+export function wheelAt(x: number, y: number, deltaX: number, deltaY: number, modifiers: ModifierState = NO_MODIFIERS): WheelResult {
+  const { element, localX, localY } = elementAtPoint(x, y);
+  const event = new WheelEvent("wheel", {
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    view: window,
+    clientX: localX,
+    clientY: localY,
+    deltaX,
+    deltaY,
+    deltaMode: 0,
+    ...modifiers,
+  });
+  const notPrevented = element.dispatchEvent(event);
+
+  if (!notPrevented) {
+    return { target: briefSummary(element), scrolled: { window: true, x: scrollX, y: scrollY }, defaultPrevented: true };
+  }
+
+  const container = scrollableAncestor(element, deltaX, deltaY);
+  if (container) {
+    container.scrollBy({ left: deltaX, top: deltaY, behavior: "instant" as ScrollBehavior });
+    return {
+      target: briefSummary(element),
+      scrolled: { element: selectorFor(container), left: container.scrollLeft, top: container.scrollTop },
+      defaultPrevented: false,
+    };
+  }
+
+  window.scrollBy({ left: deltaX, top: deltaY, behavior: "instant" as ScrollBehavior });
+  return { target: briefSummary(element), scrolled: { window: true, x: scrollX, y: scrollY }, defaultPrevented: false };
+}
+
+// ---- pointer drag -------------------------------------------------------------
+
+export interface DragOptions {
+  steps?: number;
+  /** Pause after pressing down, before moving (drag handles often need it). */
+  holdMs?: number;
+  /** Pause before releasing, so drop targets can register the hover. */
+  settleMs?: number;
+  button?: MouseButtonName;
+  modifiers?: ModifierState;
+}
+
+/**
+ * Press at `from`, move to `to` in steps, release.
+ *
+ * This is the pointer-based drag every modern DnD library (dnd-kit, sliders,
+ * canvas editors, resizable panes) listens for. The HTML5 `DragEvent` path is
+ * dispatched too when the source is `draggable`, so legacy drag targets keep
+ * working from the same tool.
+ */
+export async function dragPointer(from: { x: number; y: number }, to: { x: number; y: number }, opts: DragOptions = {}): Promise<Record<string, unknown>> {
+  const button = opts.button ?? "left";
+  const modifiers = opts.modifiers ?? NO_MODIFIERS;
+  const mask = MOUSE_BUTTON_MASKS[button];
+  const steps = Math.max(1, Math.min(60, Math.floor(opts.steps ?? 12)));
+  const holdMs = numberArg(opts.holdMs, 60, 0, 5000);
+  const settleMs = numberArg(opts.settleMs, 60, 0, 5000);
+
+  const source = elementAtPoint(from.x, from.y).element;
+  const base: PointerOptions = { button, modifiers };
+
+  focusElement(source);
+  dispatchPointerLike(source, "pointerover", { ...base, point: from, buttons: 0 });
+  source.dispatchEvent(new MouseEvent("mousemove", mouseInit(from, { ...base, buttons: 0 })));
+  dispatchPointerLike(source, "pointerdown", { ...base, point: from, detail: 1, buttons: mask });
+  source.dispatchEvent(new MouseEvent("mousedown", mouseInit(from, { ...base, detail: 1, buttons: mask })));
+  if (holdMs) await sleep(holdMs);
+
+  // HTML5 drag-and-drop targets need the DragEvent family; only start it when
+  // the source actually opts into it, so we don't confuse pointer-only widgets.
+  const html5 = source instanceof HTMLElement && source.draggable;
+  const dataTransfer = html5 ? new DataTransfer() : undefined;
+  if (html5 && dataTransfer) {
+    source.dispatchEvent(new DragEvent("dragstart", { bubbles: true, cancelable: true, composed: true, clientX: from.x, clientY: from.y, dataTransfer }));
+  }
+
+  let last: Element = source;
+  for (let step = 1; step <= steps; step += 1) {
+    const progress = step / steps;
+    const point = { x: Math.round(from.x + (to.x - from.x) * progress), y: Math.round(from.y + (to.y - from.y) * progress) };
+    let current: Element;
+    try {
+      current = elementAtPoint(point.x, point.y).element;
+    } catch {
+      current = last;
+    }
+    if (current !== last) {
+      dispatchPointerLike(last, "pointerout", { ...base, point, buttons: mask });
+      last.dispatchEvent(new MouseEvent("mouseout", mouseInit(point, { ...base, buttons: mask })));
+      dispatchPointerLike(current, "pointerover", { ...base, point, buttons: mask });
+      current.dispatchEvent(new MouseEvent("mouseover", mouseInit(point, { ...base, buttons: mask })));
+      if (html5 && dataTransfer) {
+        last.dispatchEvent(new DragEvent("dragleave", { bubbles: true, cancelable: true, composed: true, clientX: point.x, clientY: point.y, dataTransfer }));
+        current.dispatchEvent(new DragEvent("dragenter", { bubbles: true, cancelable: true, composed: true, clientX: point.x, clientY: point.y, dataTransfer }));
+      }
+      last = current;
+    }
+    dispatchPointerLike(current, "pointermove", { ...base, point, buttons: mask });
+    current.dispatchEvent(new MouseEvent("mousemove", mouseInit(point, { ...base, buttons: mask })));
+    if (html5 && dataTransfer) {
+      current.dispatchEvent(new DragEvent("dragover", { bubbles: true, cancelable: true, composed: true, clientX: point.x, clientY: point.y, dataTransfer }));
+    }
+    // A frame per step keeps requestAnimationFrame-driven drag handlers in sync.
+    await sleep(steps > 1 ? 8 : 0);
+  }
+
+  if (settleMs) await sleep(settleMs);
+
+  const target = last;
+  dispatchPointerLike(target, "pointerup", { ...base, point: to, detail: 1, buttons: 0 });
+  target.dispatchEvent(new MouseEvent("mouseup", mouseInit(to, { ...base, detail: 1, buttons: 0 })));
+  if (html5 && dataTransfer) {
+    target.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, composed: true, clientX: to.x, clientY: to.y, dataTransfer }));
+    source.dispatchEvent(new DragEvent("dragend", { bubbles: true, cancelable: true, composed: true, clientX: to.x, clientY: to.y, dataTransfer }));
+  }
+
+  return {
+    from: { point: from, element: briefSummary(source) },
+    to: { point: to, element: briefSummary(target) },
+    steps,
+    button,
+    html5DragEvents: html5,
+    via: "js",
+  };
+}
+
+/** Low-level single pointer action for custom gestures. */
+export async function mouseAction(
+  action: "down" | "up" | "move",
+  x: number,
+  y: number,
+  opts: { button?: MouseButtonName; modifiers?: ModifierState; buttonHeld?: boolean } = {},
+): Promise<Record<string, unknown>> {
+  const button = opts.button ?? "left";
+  const modifiers = opts.modifiers ?? NO_MODIFIERS;
+  const mask = MOUSE_BUTTON_MASKS[button];
+  const point = { x, y };
+  const { element } = elementAtPoint(x, y);
+  // A `move` in the middle of a drag must keep reporting the pressed button in
+  // `buttons`, or drag handlers treat it as an idle hover and bail out.
+  const held = action === "up" ? 0 : action === "down" ? mask : opts.buttonHeld ? mask : 0;
+  const base: PointerOptions = { button, modifiers, point, buttons: held };
+
+  if (action === "down") focusElement(element);
+  const pointerType = action === "down" ? "pointerdown" : action === "up" ? "pointerup" : "pointermove";
+  const mouseType = action === "down" ? "mousedown" : action === "up" ? "mouseup" : "mousemove";
+  dispatchPointerLike(element, pointerType, { ...base, detail: action === "move" ? 0 : 1 });
+  element.dispatchEvent(new MouseEvent(mouseType, mouseInit(point, { ...base, detail: action === "move" ? 0 : 1 })));
+  return { action, point, button, target: briefSummary(element), via: "js" };
 }
 
 // ---- value setters ------------------------------------------------------------
@@ -1053,10 +1724,17 @@ export interface KeyPressResult {
   key: string;
   defaultPrevented: boolean;
   applied: string | undefined;
+  /** How long the key was held down, when it was held (see holdChord). */
+  held?: number;
+  /** Auto-repeat keydowns emitted while the key was held. */
+  repeats?: number;
 }
 
-/** Dispatch one chord (keydown → optional edit → keyup) on an element. */
-export function pressChord(element: Element, chord: KeyChord, opts: { allowSubmit?: boolean } = {}): KeyPressResult {
+/**
+ * Dispatch one chord (keydown → optional edit → keyup) on an element.
+ * `skipKeyUp` leaves the key logically down so `holdChord` can release it later.
+ */
+export function pressChord(element: Element, chord: KeyChord, opts: { allowSubmit?: boolean; skipKeyUp?: boolean } = {}): KeyPressResult {
   const init = keyboardInit(chord);
   const notPrevented = element.dispatchEvent(new KeyboardEvent("keydown", init));
   let applied: string | undefined;
@@ -1089,7 +1767,7 @@ export function pressChord(element: Element, chord: KeyChord, opts: { allowSubmi
     }
   }
 
-  element.dispatchEvent(new KeyboardEvent("keyup", init));
+  if (opts.skipKeyUp !== true) element.dispatchEvent(new KeyboardEvent("keyup", init));
   return { key: chord.key, defaultPrevented: !notPrevented, applied };
 }
 
@@ -1178,17 +1856,44 @@ export async function typeText(element: Element, value: string, opts: TypeOption
   return result;
 }
 
+/**
+ * Hold one chord down for `holdMs`, then release it.
+ *
+ * Real browsers repeat `keydown` while a key is held, so we do too (~30 Hz,
+ * capped) with `repeat: true` — that is what press-and-hold handlers listen for.
+ */
+export async function holdChord(element: Element, chord: KeyChord, holdMs: number): Promise<KeyPressResult> {
+  const init = keyboardInit(chord);
+  const result = pressChord(element, chord, { skipKeyUp: true });
+  const duration = numberArg(holdMs, 0, 0, 30000);
+  const deadline = Date.now() + duration;
+  let repeats = 0;
+  while (Date.now() < deadline && repeats < 900) {
+    await sleep(Math.min(33, Math.max(0, deadline - Date.now())));
+    if (Date.now() >= deadline) break;
+    element.dispatchEvent(new KeyboardEvent("keydown", { ...init, repeat: true }));
+    repeats += 1;
+  }
+  element.dispatchEvent(new KeyboardEvent("keyup", init));
+  return { ...result, held: duration, repeats };
+}
+
 /** Press a chord sequence on an element (or the active element when omitted). */
-export async function pressKeys(target: Element | undefined, keys: string, opts: { delayMs?: number; repeat?: number } = {}): Promise<KeyPressResult[]> {
+export async function pressKeys(
+  target: Element | undefined,
+  keys: string,
+  opts: { delayMs?: number; repeat?: number; holdMs?: number } = {},
+): Promise<KeyPressResult[]> {
   const element = target ?? (document.activeElement as Element | null) ?? document.body;
   if (target) focusElement(target);
   const chords = parseKeySequence(keys);
   const repeat = numberArg(opts.repeat, 1, 1, 50);
   const delay = numberArg(opts.delayMs, 0, 0, 1000);
+  const holdMs = numberArg(opts.holdMs, 0, 0, 30000);
   const out: KeyPressResult[] = [];
   for (let round = 0; round < repeat; round += 1) {
     for (const chord of chords) {
-      out.push(pressChord(element, chord));
+      out.push(holdMs > 0 ? await holdChord(element, chord, holdMs) : pressChord(element, chord));
       if (delay) await sleep(delay);
     }
   }

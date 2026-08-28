@@ -9,7 +9,6 @@ import type { EmbeddedMcpServer, ToolResult } from "./embedded-server.js";
 import {
   actionabilityFor,
   clearSnapshotRefs,
-  clickElement,
   dispatchMouseLike,
   dispatchPointerLike,
   el,
@@ -17,7 +16,10 @@ import {
   json,
   locatorMatches,
   locatorSummary,
+  mouseAction,
   numberArg,
+  parseModifiers,
+  parseMouseButton,
   selectorFor,
   setCheckedValue,
   setTextValue,
@@ -26,6 +28,7 @@ import {
   stringArg,
   text,
   waitForLocator,
+  wheelAt,
 } from "./dom-core.js";
 import { toLogString } from "./serialize.js";
 
@@ -321,57 +324,11 @@ export function registerAutomationTools(server: EmbeddedMcpServer, opts: { extCa
   // take_snapshot lives in the core input group (input-tools.ts) — uid targeting
   // is what the core click/type_text/press_key tools build on.
 
-  server.registerTool(
-    {
-      name: "find_by_text",
-      description: "Find visible elements by text content.",
-      inputSchema: { type: "object", properties: { text: { type: "string" }, exact: { type: "boolean" }, limit: { type: "number", description: "max results (default 20)" }, includeHtml: { type: "boolean" } }, required: ["text"] },
-    },
-    (args) => {
-      const limit = numberArg(args.limit, 20, 1, 100);
-      const matches = locatorMatches({ text: args.text, exact: args.exact }, document, false);
-      return json({ count: matches.length, matches: matches.slice(0, limit).map((element) => locatorSummary(element, { includeHtml: args.includeHtml === true })) });
-    },
-  );
-
-  server.registerTool(
-    {
-      name: "find_by_role",
-      description: "Find elements by ARIA/implicit role, optionally filtered by accessible name.",
-      inputSchema: { type: "object", properties: { role: { type: "string", description: "button, link, textbox, checkbox, heading, etc." }, name: { type: "string", description: "accessible name filter" }, exact: { type: "boolean" }, limit: { type: "number", description: "max results (default 20)" }, includeHtml: { type: "boolean" } }, required: ["role"] },
-    },
-    (args) => {
-      const limit = numberArg(args.limit, 20, 1, 100);
-      const matches = locatorMatches({ role: args.role, name: args.name, exact: args.exact }, document, false);
-      return json({ count: matches.length, matches: matches.slice(0, limit).map((element) => locatorSummary(element, { includeHtml: args.includeHtml === true })) });
-    },
-  );
-
-  server.registerTool(
-    {
-      name: "find_by_label",
-      description: "Find form controls by associated label, aria-label, or placeholder.",
-      inputSchema: { type: "object", properties: { label: { type: "string" }, exact: { type: "boolean" }, limit: { type: "number", description: "max results (default 20)" }, includeHtml: { type: "boolean" } }, required: ["label"] },
-    },
-    (args) => {
-      const limit = numberArg(args.limit, 20, 1, 100);
-      const matches = locatorMatches({ label: args.label, exact: args.exact }, document, false);
-      return json({ count: matches.length, matches: matches.slice(0, limit).map((element) => locatorSummary(element, { includeHtml: args.includeHtml === true })) });
-    },
-  );
-
-  server.registerTool(
-    {
-      name: "find_by_test_id",
-      description: "Find elements by data-testid/data-test/data-cy.",
-      inputSchema: { type: "object", properties: { testId: { type: "string" }, limit: { type: "number", description: "max results (default 20)" }, includeHtml: { type: "boolean" } }, required: ["testId"] },
-    },
-    (args) => {
-      const limit = numberArg(args.limit, 20, 1, 100);
-      const matches = locatorMatches({ testId: args.testId }, document, false);
-      return json({ count: matches.length, matches: matches.slice(0, limit).map((element) => locatorSummary(element, { includeHtml: args.includeHtml === true })) });
-    },
-  );
+  // find_by_text / find_by_role / find_by_label / find_by_test_id used to live
+  // here. They were four schemas for one thing `locator_snapshot` already does
+  // with its full locator argument set — and the core `find` tool now covers the
+  // "just describe it" case. Dropping them keeps the catalog (and the agent's
+  // per-session token cost) smaller without losing any capability.
 
   server.registerTool(
     {
@@ -409,13 +366,8 @@ export function registerAutomationTools(server: EmbeddedMcpServer, opts: { extCa
     return json({ hovered: locatorSummary(element) });
   });
 
-  server.registerTool({ name: "double_click", description: "Double-click a locator after actionability checks.", inputSchema: { type: "object", properties: { uid: { type: "string", description: "element uid from take_snapshot" }, selector: { type: "string" }, text: { type: "string" }, role: { type: "string" }, name: { type: "string" }, testId: { type: "string" }, timeoutMs: { type: "number" }, force: { type: "boolean" } } } }, async (args) => {
-    const element = await waitForLocator(args, { actionable: args.force !== true });
-    clickElement(element, 1);
-    clickElement(element, 1);
-    dispatchMouseLike(element, "dblclick", { detail: 2 });
-    return json({ doubleClicked: locatorSummary(element) });
-  });
+  // double_click is gone: the core `click` tool takes clickCount 1/2/3, so a
+  // second tool for it was pure catalog overhead.
 
   server.registerTool({ name: "select_option", description: "Select one or more values on a <select> element and fire input/change events.", inputSchema: { type: "object", properties: { uid: { type: "string", description: "element uid from take_snapshot" }, selector: { type: "string" }, label: { type: "string" }, value: { description: "string or string[]" }, timeoutMs: { type: "number" } }, required: ["value"] } }, async (args) => {
     const element = await waitForLocator(args);
@@ -438,30 +390,112 @@ export function registerAutomationTools(server: EmbeddedMcpServer, opts: { extCa
     return json({ unchecked: locatorSummary(element) });
   });
 
-  server.registerTool({ name: "upload_file", description: "Attach a synthetic File to an input[type=file] from base64 or text content.", inputSchema: { type: "object", properties: { uid: { type: "string", description: "element uid from take_snapshot" }, selector: { type: "string" }, filename: { type: "string" }, mimeType: { type: "string" }, base64: { type: "string" }, text: { type: "string" } }, required: ["filename"] } }, async (args) => {
-    const element = await waitForLocator(args);
-    if (!(element instanceof HTMLInputElement) || element.type !== "file") throw new Error("Target is not input[type=file].");
-    const bytes = args.base64 !== undefined ? decodeBase64(String(args.base64)) : new TextEncoder().encode(String(args.text ?? ""));
-    const filePart = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-    const file = new File([filePart], String(args.filename), { type: String(args.mimeType ?? "application/octet-stream") });
-    const dt = new DataTransfer();
-    dt.items.add(file);
-    element.files = dt.files;
-    inputEvents(element);
-    return json({ uploaded: { name: file.name, type: file.type, size: file.size } });
-  });
+  server.registerTool(
+    {
+      name: "upload_file",
+      description:
+        "Attach a file to an input[type=file]. Give it a real path on the machine running the bridge (path), " +
+        "or synthesise one inline from base64/text. The path form needs the bridge started with --upload-dir and " +
+        "the file inside that directory; it is the only form that works for anything larger than a few KB, " +
+        "because inline content has to travel through the model's context.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          uid: { type: "string", description: "element uid from take_snapshot" },
+          selector: { type: "string" },
+          path: { type: "string", description: "file path on the bridge host, inside the configured --upload-dir" },
+          filename: { type: "string", description: "name shown to the page (defaults to the path's basename)" },
+          mimeType: { type: "string" },
+          base64: { type: "string", description: "inline content, base64 (small files only)" },
+          text: { type: "string", description: "inline content, plain text (small files only)" },
+        },
+      },
+    },
+    async (args) => {
+      const element = await waitForLocator(args);
+      if (!(element instanceof HTMLInputElement) || element.type !== "file") throw new Error("Target is not input[type=file].");
 
-  server.registerTool({ name: "drag_and_drop", description: "Dispatch drag/drop events from one locator to another (selector or uid from take_snapshot).", inputSchema: { type: "object", properties: { sourceSelector: { type: "string" }, targetSelector: { type: "string" }, sourceUid: { type: "string", description: "source element uid from take_snapshot" }, targetUid: { type: "string", description: "target element uid from take_snapshot" }, timeoutMs: { type: "number" } } } }, async (args) => {
-    const source = await waitForLocator({ selector: args.sourceSelector, uid: args.sourceUid, timeoutMs: args.timeoutMs }, { actionable: true });
-    const target = await waitForLocator({ selector: args.targetSelector, uid: args.targetUid, timeoutMs: args.timeoutMs }, { actionable: true });
-    const dataTransfer = new DataTransfer();
-    source.dispatchEvent(new DragEvent("dragstart", { bubbles: true, cancelable: true, dataTransfer }));
-    target.dispatchEvent(new DragEvent("dragenter", { bubbles: true, cancelable: true, dataTransfer }));
-    target.dispatchEvent(new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer }));
-    target.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer }));
-    source.dispatchEvent(new DragEvent("dragend", { bubbles: true, cancelable: true, dataTransfer }));
-    return json({ dragged: locatorSummary(source), droppedOn: locatorSummary(target) });
-  });
+      let bytes: Uint8Array;
+      let filename = stringArg(args.filename);
+      let mimeType = stringArg(args.mimeType);
+      let source: string;
+
+      if (args.path !== undefined) {
+        const read = (await opts.extCall("readFile", { path: String(args.path) })) as {
+          base64: string;
+          name: string;
+          mimeType?: string;
+          size: number;
+        };
+        bytes = decodeBase64(read.base64);
+        filename ??= read.name;
+        mimeType ??= read.mimeType;
+        source = `path:${args.path}`;
+      } else if (args.base64 !== undefined || args.text !== undefined) {
+        bytes = args.base64 !== undefined ? decodeBase64(String(args.base64)) : new TextEncoder().encode(String(args.text ?? ""));
+        source = args.base64 !== undefined ? "inline:base64" : "inline:text";
+      } else {
+        throw new Error("upload_file needs path, base64, or text.");
+      }
+      if (!filename) throw new Error("upload_file needs a filename when the content is given inline.");
+
+      const filePart = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+      const file = new File([filePart], filename, { type: mimeType ?? "application/octet-stream" });
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      element.files = dt.files;
+      inputEvents(element);
+      return json({ uploaded: { name: file.name, type: file.type, size: file.size, source } });
+    },
+  );
+
+  // drag_and_drop is gone: it only ever dispatched the HTML5 DragEvent sequence,
+  // which modern drag libraries (dnd-kit, sliders, canvas editors) never listen
+  // to. The core `drag` tool does a real pointer drag and still fires the HTML5
+  // events when the source is `draggable`.
+
+  server.registerTool(
+    {
+      name: "mouse",
+      description:
+        "Low-level pointer action at viewport coordinates, for gestures `drag` cannot express " +
+        "(multi-stop paths, press-move-hold-release, canvas painting). " +
+        "Sequence them: down → move → move → up. Coordinates are CSS pixels, same space as click{x,y}.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["down", "up", "move", "wheel"], description: "pointer action" },
+          x: { type: "number", description: "viewport x (CSS px)" },
+          y: { type: "number", description: "viewport y (CSS px)" },
+          button: { type: "string", enum: ["left", "middle", "right"], description: "default left" },
+          modifiers: { type: "string", description: "modifier chord held, e.g. \"shift\"" },
+          buttonHeld: { type: "boolean", description: "for move: the button is still pressed (a drag is in progress)" },
+          deltaX: { type: "number", description: "wheel only: horizontal delta in px" },
+          deltaY: { type: "number", description: "wheel only: vertical delta in px" },
+        },
+        required: ["action", "x", "y"],
+      },
+    },
+    async (args) => {
+      const action = String(args.action);
+      const x = Math.round(Number(args.x));
+      const y = Math.round(Number(args.y));
+      const modifiers = parseModifiers(args.modifiers);
+      if (action === "wheel") {
+        return json(wheelAt(x, y, Number(args.deltaX ?? 0), Number(args.deltaY ?? 0), modifiers));
+      }
+      if (action !== "down" && action !== "up" && action !== "move") {
+        throw new Error("action must be down, up, move, or wheel.");
+      }
+      return json(
+        await mouseAction(action, x, y, {
+          button: parseMouseButton(args.button),
+          modifiers,
+          buttonHeld: args.buttonHeld === true,
+        }),
+      );
+    },
+  );
 
   server.registerTool({ name: "start_network_capture", description: "Start page-level fetch/XMLHttpRequest capture (from this point forward).", inputSchema: { type: "object", properties: { clear: { type: "boolean" } } } }, (args) => {
     if (args.clear !== false) networkEntries.length = 0;

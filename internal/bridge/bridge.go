@@ -53,6 +53,11 @@ type Options struct {
 	// without a profile key (multi-user mode). Off by default so a local
 	// single-user bridge works with zero configuration.
 	RequireProfile bool
+	// UploadDir, when set, lets a connected provider ask the bridge for the
+	// contents of a file inside that directory (backing `upload_file {path}`,
+	// since a browser extension cannot read the filesystem). Empty disables the
+	// method entirely.
+	UploadDir string
 	// OnIdleShutdown is invoked after an idle-triggered shutdown completes.
 	OnIdleShutdown func()
 	Logger         *slog.Logger
@@ -645,6 +650,14 @@ func (b *Bridge) attachProvider(conn *websocket.Conn, reqURL *url.URL, profileKe
 	b.checkIdleLocked()
 	b.mu.Unlock()
 
+	// Providers may call back into the bridge for the few things a browser
+	// extension cannot do itself. Everything else is refused.
+	peer.OnRequest(func(_ context.Context, method string, params json.RawMessage) (json.RawMessage, *mcpwire.RPCError) {
+		if method == protocol.MethodReadFile {
+			return b.readUploadFile(params)
+		}
+		return nil, &mcpwire.RPCError{Code: mcpwire.CodeMethodNotFound, Message: fmt.Sprintf("method not found: %s", method)}
+	})
 	peer.OnNotification(func(method string, params json.RawMessage) {
 		switch method {
 		case "notifications/tools/list_changed":

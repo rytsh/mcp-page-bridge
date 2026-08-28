@@ -390,10 +390,11 @@ reconnects the provider so the dashboard and agent see the new namespace.
 When a tab is enabled, the extension exposes a lean **core** built-in toolset on
 the same provider (so any page is reachable even without calling `window.mcp`):
 
-`eval` (run JS in the page), `dom_query`, `get_html`, `get_page_info`,
-`take_snapshot`, `click`, `type_text`, `press_key`, `clear_value`, `set_value`,
-`scroll`, `wait_for`, `console_logs` (captured from `document_start`),
-`screenshot`, `navigate`, `reload`.
+`eval` (run JS in the page), `dom_query`, `get_html`, `get_page_text`,
+`get_page_info`, `take_snapshot`, `find`, `click`, `drag`, `type_text`,
+`press_key`, `clear_value`, `set_value`, `scroll`, `wait_for`, `console_logs`
+(captured from `document_start`), `screenshot`, `zoom`, `navigate`, `reload`,
+`list_downloads`, `wait_for_download`.
 
 **Snapshot → act → observe.** `take_snapshot` returns a compact text tree of the
 page's interactive and structural elements, each with a stable `uid`:
@@ -409,6 +410,11 @@ iframe f1 — https://payments.test/widget
   uid=f1e5 button "Pay"
 ```
 
+`take_snapshot` can also be scoped instead of paged through: `rootUid` /
+`rootSelector` snapshot a single container's subtree and `maxDepth` (default 15)
+caps the tree depth, which is how you read one panel of a large app without
+paying for the whole page.
+
 Cross-origin iframes are included: the service worker injects a small per-frame
 agent into every frame, collects each frame's lines and stitches them into one
 tree, prefixing sub-frame uids with the frame index (`f1e2`). Acting on such a
@@ -417,12 +423,33 @@ editors and ad frames are reachable — the top document keeps bare uids (`e12`)
 Pass `allFrames:false` to snapshot only the top document. Uids go stale on
 navigation and DOM changes; re-snapshot then.
 
-**Actions observe by default.** `click`, `type_text`, `press_key` and `scroll`
+**Finding things cheaply.** `take_snapshot` is the complete view; `find` is the
+cheap one. Describe the control in plain words — `"add to cart button"`,
+`"email field"`, `"pricing link"` — and it returns a handful of ranked, uid-tagged
+matches you can act on immediately. Role words in the query (`button`, `field`,
+`link`, `dropdown`, …) filter by role, the rest is matched against accessible
+names, placeholders, titles and test ids. All scoring is local; there is no extra
+model call.
+
+**Reading a page.** `get_page_text` returns the page's *rendered* text the way a
+reader sees it — visible text only, block structure kept as line breaks,
+headings marked with `#` — defaulting to the main content region. Use it instead
+of `get_html` for articles and documentation: raw HTML costs several times the
+tokens for the same information.
+
+**Actions observe by default.** `click`, `drag`, `type_text`, `press_key` and `scroll`
 append a fresh, shortened uid snapshot to their result, so "click and see what
 happened" is one call instead of three. Control it per call with `observe`:
 `"snapshot"` (default), `"screenshot"`, `"both"`, or `"none"`. Screenshots stay
 opt-in because they are expensive for agents that never look at pixels;
 `set_value` and `clear_value` default to `"none"`.
+
+An observation also carries a short **tab context** note when the ground moved
+under the agent: this tab navigated, or the action opened a new tab (with its id
+and whether the bridge is enabled on it). Without it an agent that clicks a
+`target="_blank"` link keeps driving the old tab and cannot tell why nothing
+changed. Only this tab's own navigations and the tabs it opened are reported —
+never the user's whole tab list — and each is reported once.
 
 **Screenshots.** `screenshot` captures the visible tab by default;
 `fullPage:true` captures the whole scrollable page through CDP (needs the
@@ -430,14 +457,43 @@ optional debugger permission — enable Trusted input or the CDP toolset — and
 falls back to the viewport with a note otherwise). `refs:true` labels every
 element from the last snapshot with its uid, in every frame, captures, and
 removes the labels again, so the image and the uid tree line up.
-`download:true` also saves the PNG to the browser's Downloads folder.
+`download:true` also saves the PNG to the browser's Downloads folder, and
+`maxWidth` downscales the capture so a retina screenshot stays under the model's
+image size limits.
+
+Every screenshot result states its pixel size, the CSS-pixel viewport it maps to,
+and the divisor between them. That matters because `click{x,y}` and `scroll{x,y}`
+take **CSS pixels** while the image is `devicePixelRatio` times larger; without
+the note an agent reading a position off the image would click the wrong place.
+`get_page_info` reports the same frame (viewport, scroll offset, `devicePixelRatio`).
+
+`zoom` crops a region of the viewport and returns it enlarged — for reading small
+text or checking a control's state without spending a full screenshot. Give it
+`x`/`y`/`width`/`height` or a `selector`. Coordinates you read off a zoomed image
+are still full-viewport coordinates; the crop does not move the origin.
 
 **Input primitives.** `click`, `type_text`, `press_key`, and `clear_value` share
 one locator + input engine, so every target can be given as a `uid` (from
-`take_snapshot`), a CSS `selector`, visible `text`, a `role`+`name` pair, a form
-`label`, or a `testId` — and `click` also accepts raw viewport `x`/`y`
+`take_snapshot`/`find`), a CSS `selector`, visible `text`, a `role`+`name` pair, a
+form `label`, or a `testId` — and `click` also accepts raw viewport `x`/`y`
 coordinates. `click` waits until the element is visible, enabled, stable and not
 covered before acting (`force:true` skips the checks).
+
+`click` carries a real `button` and `modifiers`, not just a target: `button:"right"`
+fires `contextmenu` (the event a custom context menu listens for), `"middle"`
+fires `auxclick`, `clickCount` 2/3 double- and triple-clicks, and
+`modifiers:"ctrl"` / `"shift"` hold keys during the click for multi- and
+range-selection. A coordinate click descends into same-origin iframes, so an
+`x`/`y` that lands inside an embedded document hits the real element rather than
+the `<iframe>` box.
+
+`drag` presses at the source, moves in steps, and releases at the target. The
+stepped pointer sequence is what modern drag-and-drop listens for — dnd-kit,
+sortable lists, sliders, canvas editors, resize handles — none of which react to
+HTML5 `DragEvent`s alone; those are fired too when the source element is
+`draggable`, so legacy drop targets keep working from the same tool. Either end
+can be a `uid`/`selector` or raw coordinates, and `steps`/`holdMs`/`settleMs`
+tune how patient the gesture is.
 
 `type_text` types character by character, dispatching the same
 `keydown`/`beforeinput`/`input`/`keyup` sequence a real keystroke produces, so
@@ -453,12 +509,32 @@ text with `<kbd>…</kbd>` markup:
 
 `press_key` takes a space-separated chord sequence — `Enter`, `Escape`,
 `Shift+Tab`, `Meta+A Backspace`, `ArrowDown ArrowDown Enter` — plus optional
-`repeat`/`delayMs`. `Meta` and `Mod` are platform-aware (Cmd on macOS, Ctrl
+`repeat`/`delayMs`/`holdMs`. `holdMs` keeps each key down (auto-repeating, like a
+real held key) before releasing it, for press-and-hold handlers. `Meta` and `Mod` are platform-aware (Cmd on macOS, Ctrl
 elsewhere) so a select-all works everywhere; `Cmd` and `Ctrl` are literal.
 Because synthetic keys don't drive the browser's default actions, the engine
 emulates the important ones: Enter submits the form from a single-line input (or
 clicks a non-editable target), Backspace/Delete edit the value at the caret, and
 `Meta/Ctrl+A` selects the field contents.
+
+**Scrolling.** `scroll` has three modes. `selector` scrolls an element into view,
+`x`+`y` scrolls the window to an offset, and `direction`+`amount` dispatches a
+real mouse **wheel** at a point. Only the wheel mode reaches inner scroll
+containers, virtualized lists, maps and carousels — they never see
+`window.scrollTo`. Because a synthetic wheel event does not scroll by itself, the
+engine applies the scroll to the nearest scrollable ancestor afterwards, unless
+the page called `preventDefault()` (which is exactly what wheel-driven UIs do).
+
+**Waiting.** `wait_for` waits for a selector to appear, for it to disappear
+(`gone:true` — spinners, overlays), or simply for a fixed `durationMs` when the
+page offers no observable marker.
+
+**Downloads.** A page action that produces a file used to be a dead end: something
+landed in the Downloads folder and the agent had no way to learn the path.
+`wait_for_download` waits for the next download to finish and returns its
+filename, size and on-disk **path**; `list_downloads` reports recent ones. The
+path is on the machine running the browser, so the agent's own filesystem tools
+can read the file it just exported.
 
 **Trusted input (opt-in).** By default these tools build the events in the page,
 so `event.isTrusted` is `false` — which some pages (canvas apps, bot-protected
@@ -498,18 +574,34 @@ immediately. With design tools off the catalog is ~12 tools; on, it adds the 21
 selection/CSS/audit tools listed below.
 
 The popup also has a separate **Automation tools** switch for Playwright-like live
-page automation. It adds locator helpers
-(`find_by_text`, `find_by_role`, `find_by_label`, `find_by_test_id`,
-`locator_snapshot`, `locator_count`), extra
-actions (`hover`, `double_click`, `select_option`, `check`, `uncheck`,
-`upload_file`, `drag_and_drop` — all accepting `uid` or a locator, and building
-on the same core `click`/`type_text`/`press_key` engine), page-level `fetch`/`XMLHttpRequest` capture
+page automation. It adds locator helpers (`locator_snapshot`, `locator_count`),
+extra actions (`hover`, `select_option`, `check`, `uncheck`, `upload_file`,
+`mouse` — all accepting `uid` or a locator, and building
+on the same core `click`/`drag`/`type_text`/`press_key` engine), page-level `fetch`/`XMLHttpRequest` capture
 (`start_network_capture`, `stop_network_capture`, `list_network_requests`,
 `wait_for_response`, `get_response_body`, `clear_network_capture`),
 storage/cookie helpers, dialog auto-handling,
 same-origin iframe helpers, and best-effort `resize_window`. This is not a full
 Playwright replacement: there is no isolated browser context, HTTP-only cookie
 access, trace viewer, or video.
+
+`mouse` is the low-level escape hatch for gestures `drag` cannot express —
+multi-stop paths, press-move-hold-release, canvas painting. Sequence it:
+`down` → `move` → `move` → `up`, all in CSS-pixel viewport coordinates.
+
+`upload_file` attaches a file to an `input[type=file]`. Small content can be
+passed inline (`base64`/`text`), but anything real should use `path`: the bridge
+daemon reads the file from disk and hands the bytes to the extension, so it never
+travels through the model's context. That form requires the daemon to be started
+with `--upload-dir <dir>` and the file to live inside it — see
+[File uploads by path](#file-uploads-by-path).
+
+Four earlier tools were removed once the core engine covered them:
+`find_by_text`/`find_by_role`/`find_by_label`/`find_by_test_id` (use `find`, or
+`locator_snapshot` with the same locator fields), `double_click` (use `click`
+with `clickCount:2`), and `drag_and_drop` (use `drag`, which does a real pointer
+drag instead of HTML5 events only). Every tool's schema costs tokens for the
+whole session, so duplicates are not free.
 
 Every built-in tool's text output is clamped (~40k characters) with an explicit
 truncation note, so one oversized `eval` result or CDP payload can't swallow the
@@ -652,6 +744,35 @@ non-loopback/shared daemon keep using `--token` (network gate) **and** TLS
 profile key is independent of `--token`: the token controls who may reach the
 daemon at all; the profile controls which tabs they can see once connected.
 
+## File uploads by path
+
+`upload_file { path }` lets an agent attach a real file from disk to a page's
+`<input type=file>` — an invoice, a fixture, a screenshot it just took. A browser
+extension has no filesystem access, so the **daemon** reads the bytes and hands
+them to the extension over the tab's own socket
+(`mcpPageBridge/readFile`). The alternative, base64 through the model's context,
+stops being practical past a few kilobytes.
+
+That is a genuine privilege escalation — any page on a bridged tab can reach the
+method — so it is **off unless you opt in**, and the daemon is the single place
+that enforces the boundary:
+
+```bash
+mcp-page-bridge --daemon --upload-dir ~/agent-uploads
+```
+
+- Without `--upload-dir` (the default) every path upload is refused.
+- The requested path is resolved **through symlinks first**, then required to
+  stay inside the directory, so a link placed in the directory cannot reach out
+  of it. Relative paths are taken relative to it.
+- Regular files only, capped at 32 MiB.
+
+Point it at a dedicated directory. In particular **do not point it at the
+browser's download folder** — otherwise every file a page can make the browser
+download becomes a file it can make the browser upload somewhere else.
+
+Env equivalent: `MCP_PAGE_BRIDGE_UPLOAD_DIR`.
+
 ## Security
 
 - The bridge binds to `127.0.0.1` by default. Binding a non-loopback host
@@ -673,6 +794,9 @@ daemon at all; the profile controls which tabs they can see once connected.
   `MCP_PAGE_BRIDGE_TLS_CA`, `MCP_PAGE_BRIDGE_TLS_INSECURE_SKIP_VERIFY`.
 - Tool calls execute code in your page; the agent gates each call behind its own
   permission prompts.
+- `upload_file { path }` is refused unless the daemon runs with `--upload-dir`,
+  and then only inside that directory — see
+  [File uploads by path](#file-uploads-by-path).
 - For sharing one daemon between several users, add a **profile key** so each
   agent only sees its own tabs — see
   [Profiles (multi-user isolation)](#profiles-multi-user-isolation).
