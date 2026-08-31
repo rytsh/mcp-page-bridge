@@ -1,6 +1,6 @@
 {
   "name": "mcp-page-bridge-dashboard",
-  "version": "0.2.5",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Status dashboard for mcp-page-bridge, built to a single HTML file embedded by both the Go and Node bridge servers",
