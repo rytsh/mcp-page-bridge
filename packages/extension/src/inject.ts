@@ -1,16 +1,25 @@
 /**
- * MAIN-world script injected at document_start on every page. Defines/reads
- * `window.mcp` so a page can expose its own MCP tools to the agent:
+ * MAIN-world script injected at document_start on every page. It wires the
+ * standard WebMCP API (`document.modelContext`) to the bridge, so a page exposes
+ * tools the way the web platform specifies:
  *
- *   // declarative (no dependency, no timing requirement):
- *   window.mcp = { label: "checkout", tools: { getCart: () => store.cart } };
+ *   await document.modelContext.registerTool({
+ *     name: "get-cart",
+ *     description: "Return the current shopping cart",
+ *     inputSchema: { type: "object", properties: {} },
+ *     execute: () => store.cart,
+ *   });
  *
- *   // imperative API (available after extension injection):
- *   window.mcp.tool({ name: "getCart", description: "..." }, () => store.cart);
+ * If the browser has no native `document.modelContext` (outside the Chrome 149 /
+ * Edge 150 origin trials) we install a spec-shaped polyfill here, at
+ * document_start, so the same code works everywhere. See ./webmcp.ts.
  *
- *   // full MCP SDK:
- *   await window.mcp.connect(myMcpServer);
- *   // or:  await myMcpServer.connect(window.mcp.transport());
+ * Bridge-specific knobs that WebMCP does not cover live on `window.mcpPageBridge`
+ * (provider label, built-in toolset, full MCP SDK transport):
+ *
+ *   window.mcpPageBridge.setLabel("checkout");
+ *   await window.mcpPageBridge.connect(myMcpSdkServer);
+ *   // or:  await myMcpSdkServer.connect(window.mcpPageBridge.transport());
  *
  * The extension also exposes built-in tools (eval, DOM, console, screenshot,
  * navigate, …) on the same provider once the tab is enabled. Nothing connects
@@ -23,11 +32,7 @@ import {
   type ControlPayload,
   type ExtResultPayload,
 } from "mcp-page-bridge-protocol";
-import {
-  EmbeddedMcpServer,
-  type ToolDefinition,
-  type ToolHandler,
-} from "./embedded-server.js";
+import { EmbeddedMcpServer } from "./embedded-server.js";
 import { TunnelTransport, allTransports, getTransport } from "./tunnel.js";
 import { teardownAutomationTools } from "./automation-tools.js";
 import {
@@ -46,7 +51,8 @@ import {
   setSelectedMarkersVisible,
   type ExtCall,
 } from "./builtins.js";
-import { normalizeDeclarativeTools } from "./declarative.js";
+import { bindModelContext, type ModelContextBinding } from "./webmcp.js";
+import { ToolMirror } from "./tool-mirror.js";
 
 interface SdkLikeServer {
   connect(transport: unknown): Promise<void>;
@@ -65,7 +71,18 @@ let trustedInputEnabled = false;
 let label = sanitizeLabel(location.host || document.title || "browser");
 
 let embedded: EmbeddedMcpServer | undefined;
-let reconnectingEmbedded = false;
+/**
+ * Bumped every time the embedded server is torn down or replaced. Async work
+ * started against an older generation (a reconnect, a tool sync) must not touch
+ * the current server. Replaces the old `reconnectingEmbedded` flag, which
+ * `embeddedServer()` also read as a connect guard — so a rebuild landing inside
+ * a reconnect window left the new server permanently unconnected.
+ */
+let embeddedGeneration = 0;
+
+// Install (or adopt) `document.modelContext` before any page script can run, so
+// a page never has to feature-detect or wait for us.
+const modelContext: ModelContextBinding = bindModelContext(document, window);
 
 // Capture console output from the very start so console_logs has history.
 // Reuse the buffer across (re-)injections so we don't double-hook console.
@@ -133,170 +150,106 @@ function embeddedServer(): EmbeddedMcpServer {
       });
     }
   }
-  if (activated && !embedded.connected && !reconnectingEmbedded) void embedded.connect(newTransport());
+  if (activated && !embedded.connected) void embedded.connect(newTransport());
   return embedded;
 }
 
+/**
+ * Tear down the current embedded server and invalidate in-flight work on it.
+ * Bumping the generation is what tells ToolMirror that anything it thinks is
+ * registered belongs to a server that no longer exists.
+ */
+function retireEmbedded(): EmbeddedMcpServer | undefined {
+  const server = embedded;
+  embedded = undefined;
+  embeddedGeneration += 1;
+  return server;
+}
+
 function activateAll(): void {
-  syncGlobalLabel();
   activated = true;
   embeddedServer(); // built-ins are available even if the page registered nothing
   for (const t of allTransports()) {
     if (t.started) t.open();
   }
-  startGlobalToolScan();
+  void toolMirror.sync();
 }
 
 function deactivateAll(): void {
   activated = false;
-  stopGlobalToolScan();
   // Restore any page patches the automation tools installed (fetch/XHR hooks,
   // alert/confirm/prompt overrides) so a disabled tab no longer affects the page.
   teardownAutomationTools();
   for (const t of allTransports()) void t.close();
 }
 
-// ---- declarative tools: read tools the page puts on `window` ------------------
+// ---- WebMCP: mirror document.modelContext into the embedded server -----------
 //
-// Instead of calling our API, a page can expose tools as plain data and we read
-// + register them ourselves (no timing dependency — works even if the value was
-// set before our extension injected):
+// The page registers tools through the standard API and we reflect the result
+// into the embedded MCP server the bridge talks to:
 //
-//   window.mcp = { label: "checkout", tools: { getCart: () => store.cart } };
-//   window.mcp = { tools: { addItem: { description, inputSchema, handler } } };
-//   window.mcp.tools = [{ name, description?, inputSchema?, handler }];
+//   await document.modelContext.registerTool({ name, description, inputSchema, execute });
 //
-// Updates are picked up by re-reassigning the value, by in-place mutation (we
-// poll while active), or instantly via window.mcp.refresh() when the injected API
-// is available.
+// `toolchange` tells us when the set changed (both natively and in our
+// polyfill), so there is no polling and no timing requirement — the polyfill is
+// installed at document_start, before any page script runs.
 
-const globalTools = new Map<string, ToolHandler>();
-let scanTimer: ReturnType<typeof setInterval> | undefined;
-let syncQueued = false;
-
-function readGlobalTools(): Array<{ def: ToolDefinition; handler: ToolHandler }> {
-  const raw = (window as unknown as { mcp?: unknown }).mcp;
-  if (!raw || typeof raw !== "object") return [];
-  const mcp = raw as Record<string, unknown>;
-  if ("tools" in mcp) return normalizeDeclarativeTools(mcp.tools);
-
-  const directTools = Object.fromEntries(
-    Object.entries(mcp).filter(([key]) => !RESERVED_MCP_KEYS.has(key)),
-  );
-  return normalizeDeclarativeTools(directTools);
-}
-
-const RESERVED_MCP_KEYS = new Set([
-  "label",
-  "name",
-  "tools",
-  "connected",
-  "setLabel",
-  "builtins",
-  "allowEval",
-  "tool",
-  "registerTool",
-  "refresh",
-  "transport",
-  "connect",
-]);
-
-function syncGlobalLabel(): boolean {
-  const raw = (window as unknown as { mcp?: unknown }).mcp;
-  if (!raw || typeof raw !== "object") return false;
-  const mcp = raw as { label?: unknown; name?: unknown };
-  const value = typeof mcp.label === "string" ? mcp.label : typeof mcp.name === "string" ? mcp.name : "";
-  if (!value.trim()) return false;
-  const next = sanitizeLabel(value);
-  if (!next || next === label) return false;
-  label = next;
-  embedded?.setServerInfo({ name: label });
-  return true;
-}
+/**
+ * Mirrors document.modelContext into the embedded server. The generation makes
+ * it safe for a sync to be in flight while the server is rebuilt.
+ */
+const toolMirror = new ToolMirror({
+  target: () =>
+    activated ? { server: embeddedServer(), generation: embeddedGeneration } : undefined,
+  read: () => modelContext.readTools(),
+  onError: (error) =>
+    console.warn("[mcp-page-bridge] could not read document.modelContext:", error),
+});
 
 /**
  * Toggle opt-in built-ins. Rebuilds the embedded server so its registered tool
- * set matches, and re-registers any page-declared tools.
+ * set matches, and re-registers the page's WebMCP tools onto the new one.
  */
 function rebuildEmbeddedForToolset(): void {
-  const server = embedded;
+  const server = retireEmbedded();
   if (!server) {
-    if (activated) embeddedServer();
+    if (activated) toolMirror.schedule();
     return;
   }
-  globalTools.clear(); // force page-declared tools to re-register on the fresh server
-  void server.close().then(() => {
-    if (embedded === server) embedded = undefined;
-    if (activated) {
-      embeddedServer(); // recreate with built-ins per the new flag (+ reconnect)
-      syncGlobalTools(); // re-register page-declared tools
-    }
+  // `embedded` is already undefined and the generation already bumped, so a
+  // sync that resumes mid-close targets the new server, not the doomed one.
+  void server.close().finally(() => {
+    if (activated) void toolMirror.sync();
   });
 }
 
 function reconnectEmbedded(): void {
   const server = embedded;
-  if (!server || !activated || !server.connected || reconnectingEmbedded) return;
-  reconnectingEmbedded = true;
-  void server
-    .close()
-    .then(() => {
-      if (activated && embedded === server) return server.connect(newTransport());
-      return undefined;
-    })
-    .finally(() => {
-      reconnectingEmbedded = false;
-    });
-}
-
-function scheduleGlobalSync(): void {
-  if (!activated || syncQueued) return;
-  syncQueued = true;
-  queueMicrotask(() => {
-    syncQueued = false;
-    syncGlobalTools();
+  if (!server || !activated || !server.connected) return;
+  const generation = embeddedGeneration;
+  void server.close().then(() => {
+    // Bail if the server was retired or replaced while we were closing.
+    if (!activated || embeddedGeneration !== generation || embedded !== server) return;
+    return server.connect(newTransport());
   });
 }
 
-function syncGlobalTools(): void {
-  if (!activated) return;
-  const wasConnected = !!embedded?.connected;
-  const labelChanged = syncGlobalLabel();
-  const server = embeddedServer();
-  const current = readGlobalTools();
-  const names = new Set(current.map((t) => t.def.name));
-  for (const name of [...globalTools.keys()]) {
-    if (!names.has(name)) {
-      server.removeTool(name);
-      globalTools.delete(name);
-    }
-  }
-  for (const { def, handler } of current) {
-    if (globalTools.get(def.name) !== handler) {
-      server.registerTool(def, handler);
-      globalTools.set(def.name, handler);
-    }
-  }
-  if (labelChanged && wasConnected) reconnectEmbedded();
-}
+// ---- window.mcpPageBridge: bridge knobs WebMCP does not cover ----------------
 
-function startGlobalToolScan(): void {
-  syncGlobalTools();
-  scanTimer ??= setInterval(syncGlobalTools, 1000);
-}
-
-function stopGlobalToolScan(): void {
-  if (scanTimer !== undefined) {
-    clearInterval(scanTimer);
-    scanTimer = undefined;
-  }
-}
-
-// ---- window.mcp API ----------------------------------------------------------
-
-const api = {
+const bridgeApi = {
+  /** True once the tab has been enabled from the popup. */
   get connected(): boolean {
     return activated;
+  },
+
+  /** The provider label the agent sees tools namespaced under (`label__tool`). */
+  get label(): string {
+    return label;
+  },
+
+  /** True when the browser has a native WebMCP implementation (not our polyfill). */
+  get nativeWebMcp(): boolean {
+    return modelContext.native;
   },
 
   setLabel(value: string): void {
@@ -317,17 +270,9 @@ const api = {
     evalEnabled = enabled;
   },
 
-  tool(def: ToolDefinition, handler: ToolHandler): () => void {
-    return embeddedServer().registerTool(def, handler);
-  },
-
-  registerTool(def: ToolDefinition, handler: ToolHandler): () => void {
-    return api.tool(def, handler);
-  },
-
-  /** Re-read tools the page declared on window.mcp / window.mcp.tools. */
+  /** Force a re-read of document.modelContext (normally driven by `toolchange`). */
   refresh(): void {
-    syncGlobalTools();
+    void toolMirror.sync();
   },
 
   transport(): TunnelTransport {
@@ -338,28 +283,6 @@ const api = {
     await server.connect(newTransport());
   },
 };
-
-function withMcpApi(value: unknown): Record<string, unknown> {
-  const target = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
-  return Object.assign(target, api);
-}
-
-function installWindowMcp(initialValue: unknown): void {
-  let current = withMcpApi(initialValue);
-  try {
-    Object.defineProperty(window, "mcp", {
-      configurable: true,
-      enumerable: true,
-      get: () => current,
-      set: (value: unknown) => {
-        current = withMcpApi(value);
-        scheduleGlobalSync();
-      },
-    });
-  } catch {
-    (window as unknown as { mcp: Record<string, unknown> }).mcp = current;
-  }
-}
 
 // ---- element picker ----------------------------------------------------------
 
@@ -490,7 +413,7 @@ function startElementPicker(opts: { append?: boolean } = {}): void {
 }
 
 interface McpPageBridgeWindow {
-  mcp?: unknown;
+  mcpPageBridge?: typeof bridgeApi;
   __mcpReady?: boolean;
   __mcpPageBridgeReadyV2?: boolean;
   __mcpPageBridgeStartElementPicker?: (opts?: { append?: boolean }) => void;
@@ -507,26 +430,35 @@ interface McpPageBridgeWindow {
   __mcpPageBridgeExportCssPatches?: () => string;
 }
 
-// Guard against double-injection (manifest content_script + runtime
-// chrome.scripting injection into an already-open tab share this MAIN world).
+// Guard against double-injection: the manifest content_script and the runtime
+// chrome.scripting injection (for tabs that were already open) share this MAIN
+// world, so this module can be evaluated twice.
+//
+// EVERYTHING that touches a global must sit inside this guard. The second
+// evaluation gets its own module scope — including builtins.ts's selected
+// elements and CSS patches — so overwriting the globals would point the popup
+// at instance #2's stores while the agent's tools still read instance #1's.
 const globalWin = window as unknown as McpPageBridgeWindow;
-globalWin.__mcpPageBridgeStartElementPicker = startElementPicker;
-globalWin.__mcpPageBridgeCancelElementPicker = () => stopElementPicker?.();
-globalWin.__mcpPageBridgeClearSelectedElements = clearSelectedElements;
-globalWin.__mcpPageBridgeGetSelectedElements = getSelectedElementSnapshots;
-globalWin.__mcpPageBridgeRemoveSelectedElement = removeSelectedElement;
-globalWin.__mcpPageBridgeSetSelectedElementMeta = setSelectedElementMeta;
-globalWin.__mcpPageBridgeSetSelectedMarkersVisible = setSelectedMarkersVisible;
-globalWin.__mcpPageBridgeGetSelectedMarkersVisible = getSelectedMarkersVisible;
-globalWin.__mcpPageBridgeGetCssPatches = getCssPatches;
-globalWin.__mcpPageBridgeRemoveCssPatch = removeCssPatch;
-globalWin.__mcpPageBridgeClearCssPatches = clearCssPatches;
-globalWin.__mcpPageBridgeExportCssPatches = exportCssPatches;
 
 if (!globalWin.__mcpPageBridgeReadyV2) {
   globalWin.__mcpPageBridgeReadyV2 = true;
   globalWin.__mcpReady = true;
-  installWindowMcp(globalWin.mcp);
+  globalWin.mcpPageBridge = bridgeApi;
+
+  globalWin.__mcpPageBridgeStartElementPicker = startElementPicker;
+  globalWin.__mcpPageBridgeCancelElementPicker = () => stopElementPicker?.();
+  globalWin.__mcpPageBridgeClearSelectedElements = clearSelectedElements;
+  globalWin.__mcpPageBridgeGetSelectedElements = getSelectedElementSnapshots;
+  globalWin.__mcpPageBridgeRemoveSelectedElement = removeSelectedElement;
+  globalWin.__mcpPageBridgeSetSelectedElementMeta = setSelectedElementMeta;
+  globalWin.__mcpPageBridgeSetSelectedMarkersVisible = setSelectedMarkersVisible;
+  globalWin.__mcpPageBridgeGetSelectedMarkersVisible = getSelectedMarkersVisible;
+  globalWin.__mcpPageBridgeGetCssPatches = getCssPatches;
+  globalWin.__mcpPageBridgeRemoveCssPatch = removeCssPatch;
+  globalWin.__mcpPageBridgeClearCssPatches = clearCssPatches;
+  globalWin.__mcpPageBridgeExportCssPatches = exportCssPatches;
+
+  modelContext.subscribe(() => toolMirror.schedule());
 
   window.addEventListener("message", (event: MessageEvent) => {
     if (event.source !== window) return;
@@ -592,6 +524,8 @@ if (!globalWin.__mcpPageBridgeReadyV2) {
     }
   });
 
-  // Notify page code that loaded before us (it can listen for "mcp:ready").
-  window.dispatchEvent(new Event("mcp:ready"));
+  // Signals that `window.mcpPageBridge` is available. Page tools do NOT need
+  // this: `document.modelContext` is installed at document_start, before any
+  // page script runs.
+  window.dispatchEvent(new Event("mcp-page-bridge:ready"));
 }

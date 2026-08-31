@@ -15,6 +15,12 @@ export const DEFAULT_PORT = 8787;
 /** Separator between a provider label and the original tool name. */
 export const NAMESPACE_SEP = "__";
 
+/**
+ * Upper bound on the agent-facing namespaced name. MCP sets no limit, but WebMCP
+ * allows 128-character tool names and many agent hosts reject anything over 64.
+ */
+export const MAX_TOOL_NAME_LEN = 64;
+
 /** Allowed characters in an MCP tool name component. */
 const DISALLOWED = /[^a-zA-Z0-9_-]/g;
 
@@ -34,9 +40,73 @@ export function sanitizeLabel(input: string | undefined | null): string {
   return base || "browser";
 }
 
-/** Build the agent-facing namespaced tool name. */
+/**
+ * UTF-8 encode without TextEncoder — this package targets plain ES2023 with no
+ * DOM or Node lib so it can be bundled anywhere, and Go slices bytes, so we need
+ * the same byte view it has.
+ */
+function utf8Bytes(input: string): number[] {
+  const out: number[] = [];
+  for (const char of input) {
+    const cp = char.codePointAt(0)!;
+    if (cp < 0x80) {
+      out.push(cp);
+    } else if (cp < 0x800) {
+      out.push(0xc0 | (cp >> 6), 0x80 | (cp & 0x3f));
+    } else if (cp < 0x10000) {
+      out.push(0xe0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+    } else {
+      out.push(
+        0xf0 | (cp >> 18),
+        0x80 | ((cp >> 12) & 0x3f),
+        0x80 | ((cp >> 6) & 0x3f),
+        0x80 | (cp & 0x3f),
+      );
+    }
+  }
+  return out;
+}
+
+/**
+ * FNV-1a over the UTF-8 bytes of `input`. Not cryptographic — it only has to
+ * make accidental collisions unlikely. Mirrors `fnv1a32` in
+ * internal/protocol/protocol.go byte for byte; keep the two in sync.
+ */
+function fnv1a32(input: string): number {
+  let hash = 0x811c9dc5;
+  for (const byte of utf8Bytes(input)) {
+    hash = (hash ^ byte) >>> 0;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash >>> 0;
+}
+
+/**
+ * Build the agent-facing namespaced tool name, clamped to MAX_TOOL_NAME_LEN.
+ *
+ * Clamping is deterministic so the agent's view is stable across reconnects and
+ * the bridge's routing table (built with the Go twin of this function) never
+ * drifts from the catalog it advertises.
+ */
 export function namespaceName(label: string, name: string): string {
-  return `${label}${NAMESPACE_SEP}${name}`;
+  const full = `${label}${NAMESPACE_SEP}${name}`;
+  if (utf8Bytes(full).length <= MAX_TOOL_NAME_LEN) return full;
+
+  const suffix = `-${fnv1a32(full).toString(16).padStart(8, "0").slice(0, 6)}`;
+  const keep = MAX_TOOL_NAME_LEN - suffix.length;
+  if (keep < 1) return suffix.slice(1);
+
+  // Take whole characters while they still fit in `keep` bytes — the Go side
+  // slices bytes then trims back to a rune boundary, which lands identically.
+  let head = "";
+  let used = 0;
+  for (const char of full) {
+    const size = utf8Bytes(char).length;
+    if (used + size > keep) break;
+    head += char;
+    used += size;
+  }
+  return head + suffix;
 }
 
 /** Metadata a provider can advertise about the page it lives in. */

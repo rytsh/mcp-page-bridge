@@ -664,3 +664,37 @@ func TestWSTokenEnforced(t *testing.T) {
 		t.Fatal("token-authenticated agent could not list tools")
 	}
 }
+
+// A browser routinely pre-opens speculative connections and sends nothing on
+// them. net/http only treats such a connection (StateNew) as idle after 5
+// seconds (golang/go#22682), so a purely graceful Shutdown sits at its full
+// deadline with nothing actually in flight. Close() must not.
+func TestCloseIsPromptWithASpeculativeConnection(t *testing.T) {
+	tb := startBridge(t, bridge.Options{}, server.Options{})
+
+	// Dial without ever sending a request: the server side stays in StateNew.
+	conn, err := net.Dial("tcp", strings.TrimPrefix(tb.url(""), "http://"))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	// Let the server accept it, so its conn goroutine is parked in readRequest
+	// with the connection in StateNew.
+	time.Sleep(150 * time.Millisecond)
+
+	done := make(chan struct{})
+	start := time.Now()
+	go func() {
+		_ = tb.srv.Close()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		if elapsed := time.Since(start); elapsed >= 5*time.Second {
+			t.Fatalf("Close() took %v — it waited out net/http's 5s StateNew threshold", elapsed)
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("Close() did not return")
+	}
+}

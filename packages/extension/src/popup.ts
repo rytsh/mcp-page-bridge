@@ -198,7 +198,7 @@ function render(status: Status): void {
   el<HTMLDivElement>("providers").innerHTML = status.enabled
     ? status.providers.length
       ? `<ul>${list}</ul>`
-      : `<p class="muted">No MCP providers on this page yet. The page can declare <code>window.mcp = { label, tools }</code> or connect an MCP server.</p>`
+      : `<p class="muted">No MCP providers on this page yet. The page can register tools with <code>document.modelContext.registerTool()</code> or connect an MCP server.</p>`
     : "";
 
   const selected = status.selectedElements ?? [];

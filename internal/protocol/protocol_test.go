@@ -3,6 +3,7 @@ package protocol
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestSanitizeLabel(t *testing.T) {
@@ -34,6 +35,68 @@ func TestSanitizeLabel(t *testing.T) {
 func TestNamespaceName(t *testing.T) {
 	if got := NamespaceName("page", "eval"); got != "page__eval" {
 		t.Errorf("NamespaceName() = %q", got)
+	}
+}
+
+func TestNamespaceNameClamps(t *testing.T) {
+	// Exactly at the limit: untouched.
+	atLimit := NamespaceName("page", strings.Repeat("a", MaxToolNameLen-len("page__")))
+	if len(atLimit) != MaxToolNameLen || strings.Contains(atLimit, "-") {
+		t.Errorf("name at the limit was rewritten: %q (len %d)", atLimit, len(atLimit))
+	}
+
+	// One over: clamped to exactly MaxToolNameLen.
+	long := strings.Repeat("a", 200)
+	got := NamespaceName("page", long)
+	if len(got) != MaxToolNameLen {
+		t.Fatalf("NamespaceName() len = %d, want %d (%q)", len(got), MaxToolNameLen, got)
+	}
+	if !strings.HasPrefix(got, "page__") {
+		t.Errorf("clamped name lost its label prefix: %q", got)
+	}
+
+	// Deterministic: the agent must see the same name after a reconnect.
+	if again := NamespaceName("page", long); again != got {
+		t.Errorf("NamespaceName() not deterministic: %q vs %q", got, again)
+	}
+
+	// Names sharing a long prefix must not collapse onto one.
+	a := NamespaceName("page", long+"-alpha")
+	b := NamespaceName("page", long+"-beta")
+	if a == b {
+		t.Errorf("distinct long names collided: %q", a)
+	}
+}
+
+// TestNamespaceNameGoldenVectors pins the exact output so the TypeScript twin
+// (packages/protocol, exercised by protocol-namespace.test.ts) cannot drift.
+// The bridge builds its routing table with this function and advertises the
+// same names, so a mismatch between the two languages makes tools unroutable.
+func TestNamespaceNameGoldenVectors(t *testing.T) {
+	tests := []struct{ label, name, want string }{
+		{"page", "eval", "page__eval"},
+		{"page", strings.Repeat("a", 200), "page__aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-324a88"},
+		{"checkout", strings.Repeat("a", 200) + "-alpha", "checkout__aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-974d86"},
+		{"checkout", strings.Repeat("a", 200) + "-beta", "checkout__aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-24e0f3"},
+		{"page", strings.Repeat("ö", 100), "page__ööööööööööööööööööööööööö-031816"},
+		{"a-very-long-label-that-is-forty-chars-ok", strings.Repeat("x", 60), "a-very-long-label-that-is-forty-chars-ok__xxxxxxxxxxxxxxx-e3a151"},
+	}
+	for _, tt := range tests {
+		if got := NamespaceName(tt.label, tt.name); got != tt.want {
+			t.Errorf("NamespaceName(%q, %.20q…) = %q, want %q", tt.label, tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestNamespaceNameKeepsValidUTF8(t *testing.T) {
+	// A non-extension provider can send a non-ASCII tool name; the byte-level
+	// cut must not split a rune.
+	got := NamespaceName("page", strings.Repeat("ö", 100))
+	if !utf8.ValidString(got) {
+		t.Errorf("NamespaceName() produced invalid UTF-8: %q", got)
+	}
+	if len(got) > MaxToolNameLen {
+		t.Errorf("NamespaceName() len = %d, want <= %d", len(got), MaxToolNameLen)
 	}
 }
 

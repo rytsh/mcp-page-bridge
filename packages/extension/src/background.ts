@@ -1524,7 +1524,7 @@ function closeAllSockets(state: TabState): void {
 /**
  * Inject the content + MAIN-world scripts into a tab that was already open
  * before the extension loaded (manifest content_scripts only run on load/nav).
- * The scripts guard against double-injection. inject.js first so window.mcp
+ * The scripts guard against double-injection. inject.js first so document.modelContext
  * exists before content.js triggers activation.
  */
 async function injectIntoTab(tabId: number): Promise<boolean> {

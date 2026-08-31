@@ -12,8 +12,9 @@ This file keeps the detailed project, authoring, and internals documentation. Th
   Bridge a <strong>live browser page's MCP server</strong> to a coding agent (opencode, Claude, …).
 </p>
 
-A page exposes its own tools with `window.mcp` (injected by the mcp-page-bridge browser
-extension). The extension tunnels them over a WebSocket to a local bridge, and
+A page exposes its own tools with [WebMCP](https://github.com/webmachinelearning/webmcp)
+(`document.modelContext`, polyfilled by the mcp-page-bridge browser extension where
+the browser has no native implementation). The extension tunnels them over a WebSocket to a local bridge, and
 the bridge re-exposes everything to the agent as a standard MCP server over
 stdio. The agent can then call the page's tools directly.
 
@@ -29,7 +30,7 @@ flowchart LR
     subgraph ext["Browser — MV3 extension"]
         SW["Service worker<br/>owns the WebSocket(s)"]
         CS["content script<br/>(ISOLATED)"]
-        IN["inject (MAIN)<br/>window.mcp"]
+        IN["inject (MAIN)<br/>document.modelContext"]
         PG["Your page / app"]
     end
 
@@ -48,9 +49,9 @@ flowchart LR
   reach `ws://127.0.0.1` due to CSP/mixed-content). The service worker owns the
   WebSocket.
 - **Two authoring paths**, same wire:
-  - **Lightweight** — `window.mcp = { label, tools }` (plain page data).
-  - **Full SDK** — `await window.mcp.connect(myMcpServer)` or
-    `myMcpServer.connect(window.mcp.transport())`.
+  - **WebMCP** — `document.modelContext.registerTool({ name, description, inputSchema, execute })`.
+  - **Full SDK** — `await window.mcpPageBridge.connect(myMcpServer)` or
+    `myMcpServer.connect(window.mcpPageBridge.transport())`.
 
 ## Repository layout
 
@@ -58,16 +59,16 @@ flowchart LR
 packages/
   protocol/    shared helpers + the internal channel envelope (dependency-free)
   server/      the mcp-page-bridge bridge: stdio MCP server + WS server + aggregating proxy
-  extension/   MV3 extension: inject (window.mcp), content relay, SW, popup
+  extension/   MV3 extension: inject (WebMCP polyfill + adapter), content relay, SW, popup
 examples/
-  demo-app/    static page exposing tools via window.mcp
-  svelte-app/  Svelte 5 (runes) app exposing its $state via window.mcp
+  demo-app/    static page exposing tools via document.modelContext
+  svelte-app/  Svelte 5 (runes) app exposing its $state via document.modelContext
 ```
 
 ## Examples
 
 - `examples/demo-app` — zero-build static page. `pnpm --filter @mcp-page-bridge/demo-app serve` → http://localhost:3000
-- `examples/svelte-app` — Svelte 5 + Vite app whose runes `$state` is driven by the agent. `pnpm --filter @mcp-page-bridge/example-svelte dev` → http://localhost:5173 (tools: `svelte__increment`, `svelte__addTodo`, `svelte__getState`, …)
+- `examples/svelte-app` — Svelte 5 + Vite app whose runes `$state` is driven by the agent. `pnpm --filter @mcp-page-bridge/example-svelte dev` → http://localhost:5173 (tools: `svelte__increment`, `svelte__add-todo`, `svelte__get-state`, …)
 
 ## Quick start
 
@@ -340,55 +341,153 @@ Endpoint behaviour:
 
 ## Authoring tools in your own page
 
-Recommended: declare a plain `window.mcp` manifest. No extension API call, no
-timing dependency; this works even if the page runs before the extension injects.
+### WebMCP (`document.modelContext`)
+
+Use the standard [WebMCP](https://github.com/webmachinelearning/webmcp) API. Tool
+names must be 1-128 characters of `[A-Za-z0-9_.-]`, and `description` is
+required.
 
 ```js
-window.mcp = {
-  label: "checkout",
-  tools: {
-    getCart: () => store.getState().cart,
-    addItem: {
-      description: "Add an item to the cart",
-      inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
-      handler: (args) => store.addItem(args.id),
-    },
+await document.modelContext.registerTool({
+  name: "add-item",
+  title: "Add item",                       // optional, for human-facing UI
+  description: "Add an item to the cart",
+  inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+  annotations: { readOnlyHint: false },    // forwarded to the agent in tools/list
+  async execute({ id }, { signal }) {
+    return store.addItem(id, { signal });
   },
-};
+});
 ```
 
-If the extension has already injected, the same object also has optional helper
-methods. They are useful for imperative integrations, but not required:
+`execute` may return anything JSON-serializable (coerced to a text content
+block), or a full MCP tool result — `{ content: [{ type: "text", text }], isError?,
+structuredContent? }`.
+
+Unregister with an `AbortSignal`; the agent's tool list updates live via
+`notifications/tools/list_changed`:
 
 ```js
-window.mcp?.setLabel("checkout");
-window.mcp?.tool(
-  { name: "getCart", description: "Return the current cart" },
-  () => store.getState().cart,
-);
+const controller = new AbortController();
+await document.modelContext.registerTool(tool, { signal: controller.signal });
+controller.abort();
 ```
 
-Full MCP SDK (resources/prompts/etc.):
+**Availability.** `document.modelContext` is native in the Chrome 149 / Edge 150
+origin trials. Everywhere else the extension installs a spec-shaped polyfill at
+`document_start` (`packages/extension/src/webmcp.ts`) — before any page script
+runs, so there is no timing dependency and no need to listen for a ready event.
+When a native implementation *is* present the extension leaves it alone and reads
+through `getTools()` / `executeTool()` / `toolchange` instead. Feature-detect with
+`if (document.modelContext)` so the page degrades cleanly when neither exists.
+
+Install TypeScript types with `npm i -D webmcp-types`.
+
+Polyfill limitations vs. the native API: `exposedTo` / `fromOrigins` are honored
+only for same-origin frames (there is no cross-origin `postMessage` plumbing), and
+the Permissions Policy `tools` feature is not consulted. The extension injects
+into the top frame only, so tools registered inside iframes are not picked up by
+the polyfill.
+
+### WebMCP is not MCP — where the bridge adapts
+
+WebMCP and MCP share a vocabulary, not a schema. MCP is the contract that is
+actually enforced: the agent's client validates every `tools/list`,
+`prompts/list` and `resources/list` response, and the bridge merges **all**
+providers in a partition into one response — so one malformed page would
+otherwise invalidate every other tab's catalog. Providers are untrusted page
+code, so the bridge repairs what it can and drops what it cannot.
+
+**1. Schema shape.** MCP requires `{"type": "object", …}` at the root of
+`inputSchema`/`outputSchema`, `properties` to be an object of objects, and
+`required` to be a `string[]`. WebMCP constrains none of this.
+
+| Page sends | Agent sees |
+| --- | --- |
+| `{type:"object", …}` | unchanged |
+| `{properties:{…}}` (no `type`) | `type:"object"` added, fields kept |
+| `{type:"string"}` | `type` corrected, fields kept |
+| `required: "name"` | promoted to `["name"]` |
+| `required: [1,2]` / `properties: []` | field dropped, rest kept |
+| non-object property values | those entries dropped, valid ones kept |
+| array / string / `null` / malformed | `{"type":"object","additionalProperties":true}` |
+| absent | `{"type":"object","additionalProperties":true}` |
+
+An unsalvageable `outputSchema` is dropped rather than advertised (it is
+optional). The extension warns in the page console
+(`packages/extension/src/webmcp.ts`); the bridge repairs again at ingest for
+providers that do not go through it — full MCP SDK servers included — and logs
+`repaired invalid MCP tool`.
+
+**Prompts and resources get the same treatment** (`internal/bridge/normalize.go`):
+a prompt's `arguments` must be an array of objects each carrying a string
+`name`; a resource's `size` must be a number. Entries that cannot be routed at
+all — a prompt without a `name`, a resource without a `uri` — are dropped and
+logged rather than shipped. A provider that returns a non-object catalog entry
+loses only that entry, not its whole catalog, and `nextCursor` pagination is
+followed instead of truncating at page one.
+
+**2. `untrustedContentHint` has no MCP slot.** WebMCP's `ToolAnnotations` is
+`{readOnlyHint, untrustedContentHint}`; MCP's is `{title, readOnlyHint,
+destructiveHint, idempotentHint, openWorldHint}`. A validating MCP client
+*silently strips* `untrustedContentHint` — the one hint that signals
+prompt-injection risk. So a tool marked untrusted also gets:
+
+- `_meta: { "webmcp/untrustedContentHint": true }` — MCP's reserved extension bag
+  is `Record<string, unknown>`, so it survives passthrough intact.
+- an `[untrusted output] ` prefix on the description, which is what the model
+  actually reads.
+
+The original `annotations` still ride along for clients that understand them.
+
+**3. Tool name length.** WebMCP allows 128-character names; the bridge prepends
+`label__` (up to 42 more). MCP sets no limit, but many agent hosts reject names
+over 64 characters. `protocol.NamespaceName` clamps to 64 with a deterministic
+`-<6 hex>` FNV-1a suffix, so the name is stable across reconnects and two long
+names sharing a prefix cannot collapse onto one. The routing table is built with
+the same function, so a clamped tool stays callable. The Go and TypeScript copies
+are pinned to identical golden vectors by `TestNamespaceNameGoldenVectors` and
+`protocol-namespace.test.ts`.
+
+**4. `exposedTo` is additive, not restrictive.** Per the spec's
+["tool is exposed to an origin"](https://webmachinelearning.github.io/webmcp/#tool-is-exposed-to-an-origin)
+algorithm, a same-origin caller is *always* allowed and `exposedTo` grants extra
+origins on top. The extension runs in the page's own world, so it is same-origin
+and sees every tool — `exposedTo` is not a way to hide a tool from the bridge.
+Use `window.mcpPageBridge.builtins(false)` or simply do not register the tool.
+
+### Bridge-specific knobs (`window.mcpPageBridge`)
+
+WebMCP has no concept of a provider label, of the extension's built-in toolset,
+or of the bridge transport. Those live on `window.mcpPageBridge`, which only
+exists when the extension is installed — always use optional chaining:
+
+```js
+window.mcpPageBridge?.setLabel("checkout"); // tools become checkout__add-item
+window.mcpPageBridge?.builtins(false);      // drop all built-in tools
+window.mcpPageBridge?.allowEval(false);     // drop just `eval`
+window.mcpPageBridge?.refresh();            // force a re-read of document.modelContext
+window.mcpPageBridge?.connected;            // true once the tab is enabled
+window.mcpPageBridge?.nativeWebMcp;         // true when not using our polyfill
+```
+
+Without `setLabel`, the label defaults to the page host. Changing it reconnects
+the provider so the dashboard and agent see the new namespace.
+
+### Full MCP SDK (resources / prompts / …)
 
 ```js
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 const server = new McpServer({ name: "checkout", version: "1.0.0" });
 server.registerTool("getCart", { /* ... */ }, async () => ({ /* ... */ }));
-await window.mcp.connect(server);
+await window.mcpPageBridge.connect(server);
+// or: await server.connect(window.mcpPageBridge.transport());
 ```
-
-If the extension isn't installed, `window.mcp` is just inert page data. When the
-extension is enabled later, it merges its helper methods onto the existing object
-without deleting `label` or `tools`.
-
-If your app later replaces `window.mcp` or mutates `window.mcp.tools`, the
-extension picks up the change while the tab is enabled. A changed `label`/`name`
-reconnects the provider so the dashboard and agent see the new namespace.
 
 ## Built-in tools
 
 When a tab is enabled, the extension exposes a lean **core** built-in toolset on
-the same provider (so any page is reachable even without calling `window.mcp`):
+the same provider (so any page is reachable even without registering WebMCP tools):
 
 `eval` (run JS in the page), `dom_query`, `get_html`, `get_page_text`,
 `get_page_info`, `take_snapshot`, `find`, `click`, `drag`, `type_text`,
@@ -649,9 +748,9 @@ yellow selected areas" in the agent chat. It works on normal `http`/`https` page
 Chromium blocks extension scripts on pages such as `chrome://`, the Chrome Web
 Store, and some restricted browser pages.
 
-Disable all built-ins per page with `window.mcp.builtins(false)` before the tab
+Disable all built-ins per page with `window.mcpPageBridge.builtins(false)` before the tab
 is enabled, or disable only the powerful `eval` tool (keeping the rest) with
-`window.mcp.allowEval(false)`. Note: `eval` is also blocked on pages with a
+`window.mcpPageBridge.allowEval(false)`. Note: `eval` is also blocked on pages with a
 strict `Content-Security-Policy` (no `unsafe-eval`), such as GitHub. On those
 pages, use the dedicated non-eval tools (`dom_query`, `get_selected_element`,
 `apply_css`, `click`, etc.) instead of injecting inline/script-tag JavaScript.
@@ -677,9 +776,9 @@ had open. Restricted pages (`chrome://`, the Web Store) are reported as
 
 ## How it connects / is detected
 
-- The extension injects `window.mcp` at `document_start` (MAIN world).
-- A page opts in by declaring `window.mcp = { label, tools }`, calling
-  `window.mcp.tool(...)`, or connecting a full MCP server with `window.mcp.connect(...)`.
+- The extension installs/adopts `document.modelContext` at `document_start` (MAIN world).
+- A page opts in by calling `document.modelContext.registerTool(...)`, or by
+  connecting a full MCP server with `window.mcpPageBridge.connect(...)`.
 - Nothing connects until the tab is **enabled** in the popup. On enable, the SW
   opens one WebSocket per provider to the bridge; the bridge runs the MCP
   `initialize` handshake and reads the provider's `serverInfo`/tools.
@@ -853,7 +952,7 @@ HTML file and embedded into the binary via `go:embed`. After changing it, run
 ## Status
 
 - [x] Bridge (Go): stdio MCP proxy, WS server, aggregating daemon, namespacing, `mcp_page_bridge_list_clients`
-- [x] Extension: `window.mcp` (lightweight + full SDK), content relay, SW WS manager (auto-reconnect), popup
+- [x] Extension: WebMCP `document.modelContext` (polyfill + native) and full-SDK connect, content relay, SW WS manager (auto-reconnect), popup
 - [x] Built-in tools (eval / DOM / console / screenshot / navigate / CSS design patches / element picker)
 - [x] Prompts + resources aggregation, logging passthrough
 - [x] Optional auth token; `npx mcp-page-bridge` launcher backed by per-platform binary packages

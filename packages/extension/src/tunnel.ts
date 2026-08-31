@@ -87,6 +87,11 @@ export class TunnelTransport implements MinimalTransport {
   /** The SW reported the socket closed remotely. */
   remoteClosed(): void {
     this.opened = false;
+    // Retire it exactly like close() does. Leaving it in the registry means the
+    // next activateAll() sees `started === true` and asks the SW to open a
+    // socket for a provider no server is attached to any more — a phantom that
+    // never answers `initialize` and pins a bridge goroutine until it times out.
+    registry.delete(this.providerId);
     this.onclose?.();
   }
 }

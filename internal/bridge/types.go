@@ -78,6 +78,18 @@ type Provider struct {
 	tools     []rawObj
 	prompts   []rawObj
 	resources []rawObj
+
+	// catalog refresh coalescing, one per catalog (guarded by Bridge.mu).
+	toolSync     catalogSync
+	promptSync   catalogSync
+	resourceSync catalogSync
+}
+
+// catalogSync collapses a burst of list_changed notifications into at most one
+// in-flight fetch plus one trailing re-run. See Bridge.refreshCatalog.
+type catalogSync struct {
+	inFlight bool
+	dirty    bool
 }
 
 type nameRoute struct {

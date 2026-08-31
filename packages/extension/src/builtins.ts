@@ -823,7 +823,7 @@ export function registerBuiltins(
 
   if (opts.coreTools !== false) {
     // `eval` runs arbitrary JS in the page. It's the most powerful built-in, so a
-    // page can opt out of it (window.mcp.allowEval(false)) while keeping the other
+    // page can opt out of it (window.mcpPageBridge.allowEval(false)) while keeping the other
     // built-ins. Defaults to on to preserve existing behavior.
     if (opts.includeEval !== false) {
     server.registerTool(

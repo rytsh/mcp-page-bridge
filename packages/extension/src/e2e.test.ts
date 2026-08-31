@@ -5,11 +5,11 @@ import { EmbeddedMcpServer, type MinimalTransport } from "./embedded-server.js";
 import { startGoBridge, type GoBridge } from "./go-bridge.test-helper.js";
 
 /**
- * Full lightweight-path integration against the REAL (Go) bridge: the
- * EmbeddedMcpServer (what window.mcp builds) talks raw MCP JSON-RPC over a real
- * WebSocket to a spawned bridge daemon, exactly as the service worker pipes it.
- * Proves an agent can discover + call a tool a page registered with
- * window.mcp.tool().
+ * Full integration against the REAL (Go) bridge: the EmbeddedMcpServer (what
+ * inject.ts builds out of `document.modelContext`) talks raw MCP JSON-RPC over a
+ * real WebSocket to a spawned bridge daemon, exactly as the service worker pipes
+ * it. Proves an agent can discover + call a tool a page registered with
+ * document.modelContext.registerTool().
  */
 
 async function waitFor<T>(
@@ -55,7 +55,7 @@ async function connectAgent(port: number): Promise<Client> {
   return agent;
 }
 
-describe("lightweight window.mcp wire (EmbeddedMcpServer over WebSocket)", () => {
+describe("WebMCP wire (EmbeddedMcpServer over WebSocket)", () => {
   it("agent discovers and calls a tool registered via the embedded server", async () => {
     bridge = await startGoBridge();
     const agent = await connectAgent(bridge.port);
@@ -107,5 +107,71 @@ describe("lightweight window.mcp wire (EmbeddedMcpServer over WebSocket)", () =>
       (r) => r.tools.some((t) => t.name === "live__now"),
     );
     expect(listed.tools.map((t) => t.name)).toContain("live__now");
+  });
+});
+
+describe("bridge hardening against a malformed provider", () => {
+  it("one bad inputSchema does not take down every other tab's tools", async () => {
+    bridge = await startGoBridge();
+    const agent = await connectAgent(bridge.port);
+
+    // A well-behaved page.
+    const good = new EmbeddedMcpServer({ name: "good-app", version: "1.0.0" });
+    good.registerTool({ name: "ping", description: "Ping" }, () => "pong");
+    await good.connect(
+      new WebSocketClientTransport(new URL(`ws://127.0.0.1:${bridge.port}`)) as unknown as MinimalTransport,
+    );
+    cleanups.push(() => good.close());
+
+    // A page whose schema violates MCP (root must be `{"type":"object"}`). The
+    // agent parses the MERGED tools/list in one shot, so without the bridge
+    // repairing this, `good-app__ping` disappears too.
+    const bad = new EmbeddedMcpServer({ name: "bad-app", version: "1.0.0" });
+    bad.registerTool(
+      { name: "broken", description: "Bad schema", inputSchema: { type: "string" } },
+      () => "still works",
+    );
+    await bad.connect(
+      new WebSocketClientTransport(new URL(`ws://127.0.0.1:${bridge.port}`)) as unknown as MinimalTransport,
+    );
+    cleanups.push(() => bad.close());
+
+    const listed = await waitFor(
+      () => agent.listTools(),
+      (r) => r.tools.some((t) => t.name === "bad-app__broken"),
+    );
+    const names = listed.tools.map((t) => t.name);
+    expect(names).toContain("good-app__ping");
+    expect(names).toContain("bad-app__broken");
+
+    // The repaired tool is still callable, and its schema now satisfies MCP.
+    const repaired = listed.tools.find((t) => t.name === "bad-app__broken")!;
+    expect(repaired.inputSchema.type).toBe("object");
+    expect(textOf(await agent.callTool({ name: "bad-app__broken", arguments: {} }))).toBe(
+      "still works",
+    );
+  });
+
+  it("clamps a namespaced tool name past the 64-char limit and still routes it", async () => {
+    bridge = await startGoBridge();
+    const agent = await connectAgent(bridge.port);
+
+    const longName = "a".repeat(120);
+    const server = new EmbeddedMcpServer({ name: "long-app", version: "1.0.0" });
+    server.registerTool({ name: longName, description: "Long" }, () => "reached");
+    await server.connect(
+      new WebSocketClientTransport(new URL(`ws://127.0.0.1:${bridge.port}`)) as unknown as MinimalTransport,
+    );
+    cleanups.push(() => server.close());
+
+    const listed = await waitFor(
+      () => agent.listTools(),
+      (r) => r.tools.some((t) => t.name.startsWith("long-app__")),
+    );
+    const exposed = listed.tools.find((t) => t.name.startsWith("long-app__"))!;
+    expect(exposed.name.length).toBeLessThanOrEqual(64);
+
+    // The routing table is built from the same clamped name, so it resolves.
+    expect(textOf(await agent.callTool({ name: exposed.name, arguments: {} }))).toBe("reached");
   });
 });

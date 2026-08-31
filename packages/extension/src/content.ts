@@ -1,6 +1,6 @@
 /**
  * Content script (ISOLATED world). Pure relay between the page's MAIN-world
- * `window.mcp` tunnel and the service worker's per-tab Port. It parses nothing
+ * WebMCP tunnel and the service worker's per-tab Port. It parses nothing
  * — it just shuttles ChannelMessages in both directions.
  *
  * Guarded against double-injection for the current script generation: the

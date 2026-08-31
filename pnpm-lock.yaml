@@ -25,6 +25,9 @@ importers:
       vite:
         specifier: ^8.0.16
         version: 8.0.16(@types/node@22.19.19)
+      webmcp-types:
+        specifier: ^0.1.5
+        version: 0.1.5
 
   packages/dashboard:
     devDependencies:
@@ -1463,6 +1466,9 @@ packages:
       jsdom:
         optional: true
 
+  webmcp-types@0.1.5:
+    resolution: {integrity: sha512-QAfuzNJ+hiY2JLpPbD/6xZruLQlsqtWUDqQCRruqD0dbtZHDg6IUZ2K0zctlRokwuscGlr47i6hKv8mQPSQLhw==}
+
   which@2.0.2:
     resolution: {integrity: sha512-BLI3Tl1TW3Pvl70l3yq3Y64i+awpwXqsGBYWkkqMtnbXgrMD+yj7rhW0kuEDxzJaYXGjEW5ogapKNMEKNMjibA==}
     engines: {node: '>= 8'}
@@ -2655,6 +2661,8 @@ snapshots:
       - sugarss
       - supports-color
       - terser
+
+  webmcp-types@0.1.5: {}
 
   which@2.0.2:
     dependencies:

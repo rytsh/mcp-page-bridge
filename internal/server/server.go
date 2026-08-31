@@ -132,10 +132,28 @@ func Start(ctx context.Context, b *bridge.Bridge, opts Options) (*Server, error)
 func (s *Server) Port() int { return s.port }
 
 // Close shuts the HTTP server and the bridge down.
+// shutdownGrace bounds how long Close() waits for in-flight requests to finish
+// before connections are dropped.
+//
+// It is deliberately short. net/http only treats a connection it has not read a
+// request from as idle after 5 seconds (golang/go#22682), and browsers routinely
+// pre-open speculative connections to a host — so a graceful Shutdown alone can
+// sit at its full deadline with nothing actually in flight.
+const shutdownGrace = time.Second
+
 func (s *Server) Close() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 	defer cancel()
+
 	err := s.httpServer.Shutdown(ctx)
+	if errors.Is(err, context.DeadlineExceeded) {
+		// Speculative or long-lived connections (dashboard polling, SSE
+		// sessions) will not drain on their own. Drop them rather than delay
+		// process exit indefinitely.
+		s.logger.Debug("graceful shutdown timed out, closing connections", "grace", shutdownGrace)
+		err = s.httpServer.Close()
+	}
+
 	s.bridge.Close()
 	return err
 }

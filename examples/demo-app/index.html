@@ -18,9 +18,10 @@
   <body>
     <h1>mcp-page-bridge demo app</h1>
     <p class="muted">
-      This page registers MCP tools via <code>window.mcp</code>. Run
-      <code>npx mcp-page-bridge</code>, load the extension, enable it on this tab, then ask
-      your agent to call <code>&lt;label&gt;__increment</code>, etc.
+      This page registers MCP tools via the WebMCP API,
+      <code>document.modelContext</code>. Run <code>npx mcp-page-bridge</code>, load the
+      extension, enable it on this tab, then ask your agent to call
+      <code>&lt;label&gt;__increment</code>, etc.
     </p>
 
     <div class="card">
@@ -32,12 +33,12 @@
     <div class="card">
       <strong>Registered tools:</strong>
       <ul>
-        <li><code>getCount</code> — returns the current counter value</li>
-        <li><code>setCount</code> — sets the counter (<code>{ value: number }</code>)</li>
+        <li><code>get-count</code> — returns the current counter value</li>
+        <li><code>set-count</code> — sets the counter (<code>{ value: number }</code>)</li>
         <li><code>increment</code> — adds <code>{ by?: number }</code> (default 1)</li>
-        <li><code>getState</code> — returns the whole app state object</li>
+        <li><code>get-state</code> — returns the whole app state object</li>
       </ul>
-      <div id="mcp-status" class="muted">window.mcp manifest declared.</div>
+      <div id="mcp-status" class="muted">Registering WebMCP tools…</div>
     </div>
 
     <script>
@@ -52,32 +53,62 @@
       document.getElementById("inc").onclick = () => setCount(state.count + 1);
       document.getElementById("dec").onclick = () => setCount(state.count - 1);
 
-      // --- expose tools to the agent via a plain window.mcp manifest ---
-      const mcp = window.mcp && typeof window.mcp === "object" ? window.mcp : {};
-      window.mcp = Object.assign(mcp, {
-        label: "demo",
-        tools: {
-          getCount: { description: "Get the current counter value", handler: () => state.count },
-          setCount: {
-            description: "Set the counter to a specific value",
-            inputSchema: {
-              type: "object",
-              properties: { value: { type: "number" } },
-              required: ["value"],
-            },
-            handler: (args) => `count is now ${setCount(args.value)}`,
+      // --- expose tools to the agent with WebMCP (document.modelContext) ---
+      // The extension polyfills document.modelContext at document_start, so this
+      // works with or without native browser support.
+      async function registerTools() {
+        const mc = document.modelContext;
+        if (!mc) throw new Error("No WebMCP support. Install/enable the mcp-page-bridge extension.");
+
+        await mc.registerTool({
+          name: "get-count",
+          description: "Get the current counter value",
+          annotations: { readOnlyHint: true },
+          execute: () => state.count,
+        });
+
+        await mc.registerTool({
+          name: "set-count",
+          description: "Set the counter to a specific value",
+          inputSchema: {
+            type: "object",
+            properties: { value: { type: "number" } },
+            required: ["value"],
           },
-          increment: {
-            description: "Increment the counter",
-            inputSchema: {
-              type: "object",
-              properties: { by: { type: "number", description: "amount (default 1)" } },
-            },
-            handler: (args) => `count is now ${setCount(state.count + (args.by ?? 1))}`,
+          execute: ({ value }) => `count is now ${setCount(value)}`,
+        });
+
+        await mc.registerTool({
+          name: "increment",
+          description: "Increment the counter",
+          inputSchema: {
+            type: "object",
+            properties: { by: { type: "number", description: "amount (default 1)" } },
           },
-          getState: { description: "Return the full app state", handler: () => state },
+          execute: ({ by }) => `count is now ${setCount(state.count + (by ?? 1))}`,
+        });
+
+        await mc.registerTool({
+          name: "get-state",
+          description: "Return the full app state",
+          annotations: { readOnlyHint: true },
+          execute: () => state,
+        });
+      }
+
+      const statusEl = document.getElementById("mcp-status");
+      registerTools().then(
+        () => {
+          // Optional: name the provider the agent sees (tools become demo__get-count).
+          window.mcpPageBridge?.setLabel("demo");
+          statusEl.textContent = window.mcpPageBridge?.nativeWebMcp
+            ? "WebMCP tools registered (native document.modelContext)."
+            : "WebMCP tools registered (mcp-page-bridge polyfill).";
         },
-      });
+        (error) => {
+          statusEl.textContent = String(error.message ?? error);
+        },
+      );
     </script>
   </body>
 </html>

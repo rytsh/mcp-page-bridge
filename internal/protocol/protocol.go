@@ -5,8 +5,10 @@ package protocol
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // Version is the bridge version reported in MCP handshakes and /api/health.
@@ -24,6 +26,13 @@ const (
 
 	// NamespaceSep separates a provider label from the original tool name.
 	NamespaceSep = "__"
+
+	// MaxToolNameLen bounds the agent-facing namespaced name. The MCP schema
+	// itself sets no limit, but WebMCP allows 128-character tool names and many
+	// agent hosts (and the function-calling layers behind them) reject anything
+	// over 64. Clamping here is better than letting a host silently drop the
+	// tool — or reject the whole catalog.
+	MaxToolNameLen = 64
 
 	// DashboardHeader is sent by the local dashboard on state-changing HTTP
 	// requests. Cross-origin pages cannot set custom headers without a CORS
@@ -92,9 +101,44 @@ func SanitizeLabel(input string) string {
 	return base
 }
 
-// NamespaceName builds the agent-facing namespaced tool name.
+// NamespaceName builds the agent-facing namespaced tool name, clamped to
+// MaxToolNameLen.
+//
+// Clamping is deterministic — the same label+name always yields the same result
+// — so the agent's view stays stable across reconnects, and the bridge's routing
+// table (built with this same function) never drifts from the catalog it
+// advertises. The digest suffix keeps two long names that share a prefix from
+// collapsing onto one.
 func NamespaceName(label, name string) string {
-	return label + NamespaceSep + name
+	full := label + NamespaceSep + name
+	if len(full) <= MaxToolNameLen {
+		return full
+	}
+
+	suffix := "-" + fmt.Sprintf("%08x", fnv1a32(full))[:6]
+	keep := MaxToolNameLen - len(suffix)
+	if keep < 1 {
+		return suffix[1:]
+	}
+	head := full[:keep]
+	// A provider outside the extension can send non-ASCII names; never cut a
+	// multi-byte rune in half.
+	for len(head) > 0 && !utf8.ValidString(head) {
+		head = head[:len(head)-1]
+	}
+	return head + suffix
+}
+
+// fnv1a32 is FNV-1a over the UTF-8 bytes of s. It is not cryptographic — it only
+// has to make accidental collisions unlikely — and is deliberately simple enough
+// to reimplement identically in TypeScript (see packages/protocol namespaceName).
+func fnv1a32(s string) uint32 {
+	h := uint32(2166136261)
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= 16777619
+	}
+	return h
 }
 
 // HashProfile derives the opaque partition key from a profile secret. Clients

@@ -304,11 +304,36 @@ func providerContext(p *Provider) string {
 	return ctx
 }
 
+// sortedProvidersLocked returns every provider in a stable order: oldest
+// connection first, id as tiebreak. Call with b.mu held.
+//
+// Go randomizes map iteration, so without a fixed order (a) exposedResources'
+// "first wins" dedupe and rebuildRoutesLocked's route winner could pick
+// DIFFERENT providers for the same URI — listing one tab's metadata while
+// reading from another's — and (b) tools/list would reorder on every call,
+// defeating client-side caching.
+func (b *Bridge) sortedProvidersLocked() []*Provider {
+	out := make([]*Provider, 0, len(b.providers))
+	for _, p := range b.providers {
+		out = append(out, p)
+	}
+	slices.SortFunc(out, func(a, c *Provider) int {
+		if a.connectedAt.Equal(c.connectedAt) {
+			return strings.Compare(a.id, c.id)
+		}
+		if a.connectedAt.Before(c.connectedAt) {
+			return -1
+		}
+		return 1
+	})
+	return out
+}
+
 func (b *Bridge) exposedTools(profileKey string) []rawObj {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	out := metaTools()
-	for _, p := range b.providers {
+	for _, p := range b.sortedProvidersLocked() {
 		if p.profileKey != profileKey {
 			continue
 		}
@@ -337,7 +362,7 @@ func (b *Bridge) exposedPrompts(profileKey string) []rawObj {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	out := []rawObj{}
-	for _, p := range b.providers {
+	for _, p := range b.sortedProvidersLocked() {
 		if p.profileKey != profileKey {
 			continue
 		}
@@ -362,7 +387,7 @@ func (b *Bridge) exposedResources(profileKey string) []rawObj {
 	defer b.mu.Unlock()
 	out := []rawObj{}
 	seen := map[string]bool{}
-	for _, p := range b.providers {
+	for _, p := range b.sortedProvidersLocked() {
 		if p.profileKey != profileKey {
 			continue
 		}
@@ -487,7 +512,9 @@ func (b *Bridge) rebuildRoutesLocked() {
 	b.toolRoutes = map[string]nameRoute{}
 	b.promptRoutes = map[string]nameRoute{}
 	b.resourceRoutes = map[string]string{}
-	for _, p := range b.providers {
+	// Same order as exposedResources, so the resource whose metadata is
+	// advertised is the one resources/read routes to.
+	for _, p := range b.sortedProvidersLocked() {
 		for _, t := range p.tools {
 			name := objString(t, "name")
 			key := routeKey(p.profileKey, protocol.NamespaceName(p.label, name))
@@ -699,53 +726,176 @@ func (b *Bridge) attachProvider(conn *websocket.Conn, reqURL *url.URL, profileKe
 	b.refreshResources(provider)
 }
 
-func (b *Bridge) refreshTools(p *Provider) {
-	if !p.caps.tools {
-		return
+// catalogKind bundles everything that differs between the three catalogs so
+// fetching, normalizing, coalescing and storing can be written once.
+type catalogKind struct {
+	singular  string
+	key       string // "tools" | "prompts" | "resources"
+	method    string
+	idField   string // field to name the entry by in log lines
+	normalize func(rawObj) (repaired []string, drop bool)
+	store     func(*Provider, []rawObj)
+	state     func(*Provider) *catalogSync
+}
+
+var (
+	toolCatalog = catalogKind{
+		singular: "tool", key: "tools", method: "tools/list", idField: "name",
+		normalize: normalizeToolSchemas,
+		store:     func(p *Provider, items []rawObj) { p.tools = items },
+		state:     func(p *Provider) *catalogSync { return &p.toolSync },
 	}
-	tools := b.fetchCatalog(p, "tools/list", "tools")
-	b.mu.Lock()
-	p.tools = tools
-	b.mu.Unlock()
-	b.notifyChanged(p.profileKey, "tools")
+	promptCatalog = catalogKind{
+		singular: "prompt", key: "prompts", method: "prompts/list", idField: "name",
+		normalize: normalizePrompt,
+		store:     func(p *Provider, items []rawObj) { p.prompts = items },
+		state:     func(p *Provider) *catalogSync { return &p.promptSync },
+	}
+	resourceCatalog = catalogKind{
+		singular: "resource", key: "resources", method: "resources/list", idField: "uri",
+		normalize: normalizeResource,
+		store:     func(p *Provider, items []rawObj) { p.resources = items },
+		state:     func(p *Provider) *catalogSync { return &p.resourceSync },
+	}
+)
+
+func (b *Bridge) refreshTools(p *Provider) {
+	if p.caps.tools {
+		b.refreshCatalog(p, toolCatalog)
+	}
 }
 
 func (b *Bridge) refreshPrompts(p *Provider) {
-	if !p.caps.prompts {
-		return
+	if p.caps.prompts {
+		b.refreshCatalog(p, promptCatalog)
 	}
-	prompts := b.fetchCatalog(p, "prompts/list", "prompts")
-	b.mu.Lock()
-	p.prompts = prompts
-	b.mu.Unlock()
-	b.notifyChanged(p.profileKey, "prompts")
 }
 
 func (b *Bridge) refreshResources(p *Provider) {
-	if !p.caps.resources {
-		return
+	if p.caps.resources {
+		b.refreshCatalog(p, resourceCatalog)
 	}
-	resources := b.fetchCatalog(p, "resources/list", "resources")
-	b.mu.Lock()
-	p.resources = resources
-	b.mu.Unlock()
-	b.notifyChanged(p.profileKey, "resources")
 }
 
+// refreshCatalog re-fetches one of a provider's catalogs.
+//
+// Refreshes are coalesced: at most one fetch per kind per provider is in
+// flight, and list_changed notifications arriving during it queue exactly one
+// trailing re-run. Without this, a page registering N tools in a loop triggers
+// N concurrent tools/list round-trips whose responses can commit OUT OF ORDER,
+// leaving the bridge permanently advertising a stale catalog.
+func (b *Bridge) refreshCatalog(p *Provider, kind catalogKind) {
+	state := kind.state(p)
+
+	b.mu.Lock()
+	if state.inFlight {
+		state.dirty = true // fold into the run already underway
+		b.mu.Unlock()
+		return
+	}
+	state.inFlight = true
+	b.mu.Unlock()
+
+	for {
+		items := b.normalizeCatalog(p, kind, b.fetchCatalog(p, kind.method, kind.key))
+
+		b.mu.Lock()
+		kind.store(p, items)
+		again := state.dirty
+		state.dirty = false
+		if !again {
+			state.inFlight = false
+		}
+		b.mu.Unlock()
+
+		b.notifyChanged(p.profileKey, kind.key)
+		if !again {
+			return
+		}
+	}
+}
+
+// normalizeCatalog repairs (or drops) page-supplied entries as they enter the
+// shared catalog, so one bad provider cannot invalidate the merged list the
+// agent parses. See internal/bridge/normalize.go.
+func (b *Bridge) normalizeCatalog(p *Provider, kind catalogKind, items []rawObj) []rawObj {
+	out := items[:0] // in-place filter: we only ever read ahead of where we write
+	for _, item := range items {
+		clone := cloneObj(item)
+		repaired, drop := kind.normalize(clone)
+		if drop {
+			b.logger.Warn("dropped unusable MCP "+kind.singular,
+				"provider", p.label, kind.idField, objString(item, kind.idField))
+			continue
+		}
+		if len(repaired) > 0 {
+			b.logger.Warn("repaired invalid MCP "+kind.singular,
+				"provider", p.label,
+				kind.idField, objString(item, kind.idField),
+				"fields", strings.Join(repaired, ","))
+			out = append(out, clone)
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+// maxCatalogPages bounds pagination so a provider that returns a cursor forever
+// cannot pin a goroutine.
+const maxCatalogPages = 50
+
+// fetchCatalog reads a provider's full catalog, following MCP pagination.
+//
+// It decodes entry by entry: a single malformed element is skipped and logged
+// rather than discarding the provider's whole catalog, which is what a
+// []rawObj unmarshal of the entire array would do.
 func (b *Bridge) fetchCatalog(p *Provider, method, key string) []rawObj {
-	result, err := p.peer.Call(context.Background(), method, nil, 0)
-	if err != nil {
-		return nil
+	var (
+		out    []rawObj
+		cursor string
+	)
+
+	for page := 0; page < maxCatalogPages; page++ {
+		var params json.RawMessage
+		if cursor != "" {
+			params, _ = json.Marshal(map[string]string{"cursor": cursor})
+		}
+
+		result, err := p.peer.Call(context.Background(), method, params, 0)
+		if err != nil {
+			return out
+		}
+		var parsed map[string]json.RawMessage
+		if err := json.Unmarshal(result, &parsed); err != nil {
+			return out
+		}
+
+		var items []json.RawMessage
+		if err := json.Unmarshal(parsed[key], &items); err != nil {
+			b.logger.Warn("provider sent a non-array catalog",
+				"provider", p.label, "method", method, "error", err)
+			return out
+		}
+		for _, item := range items {
+			var obj rawObj
+			if err := json.Unmarshal(item, &obj); err != nil || obj == nil {
+				b.logger.Warn("skipped malformed catalog entry",
+					"provider", p.label, "method", method)
+				continue
+			}
+			out = append(out, obj)
+		}
+
+		cursor = objString(parsed, "nextCursor")
+		if cursor == "" {
+			return out
+		}
 	}
-	var parsed map[string]json.RawMessage
-	if err := json.Unmarshal(result, &parsed); err != nil {
-		return nil
-	}
-	var items []rawObj
-	if err := json.Unmarshal(parsed[key], &items); err != nil {
-		return nil
-	}
-	return items
+
+	b.logger.Warn("catalog pagination stopped at the page limit",
+		"provider", p.label, "method", method, "pages", maxCatalogPages)
+	return out
 }
 
 func (b *Bridge) forwardLogging(p *Provider, params json.RawMessage) {

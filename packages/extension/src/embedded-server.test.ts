@@ -83,4 +83,42 @@ describe("EmbeddedMcpServer", () => {
     const { client } = await setup(() => {});
     await expect(client.ping()).resolves.toBeDefined();
   });
+
+  it("forwards WebMCP tool annotations to tools/list", async () => {
+    const { client } = await setup((s) => {
+      s.registerTool(
+        { name: "read-cart", description: "Read", annotations: { readOnlyHint: true } },
+        () => "ok",
+      );
+      s.registerTool({ name: "plain" }, () => "ok");
+    });
+
+    const { tools } = await client.listTools();
+    expect(tools.find((t) => t.name === "read-cart")?.annotations).toMatchObject({
+      readOnlyHint: true,
+    });
+    expect(tools.find((t) => t.name === "plain")?.annotations).toBeUndefined();
+  });
+
+  it("hands each tool call an AbortSignal, aborted when the transport closes", async () => {
+    let signal: AbortSignal | undefined;
+    const { server, client } = await setup((s) => {
+      s.registerTool({ name: "hang" }, (_args, options) => {
+        signal = options.signal;
+        return new Promise((resolve) => {
+          options.signal.addEventListener("abort", () => resolve("cancelled"));
+        });
+      });
+    });
+
+    // The call never gets a response (the transport dies under it); swallow it.
+    client.callTool({ name: "hang", arguments: {} }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 20));
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal!.aborted).toBe(false);
+
+    await server.close();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(signal!.aborted).toBe(true);
+  });
 });

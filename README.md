@@ -31,7 +31,7 @@ flowchart LR
     subgraph ext["Browser — MV3 extension"]
         SW["Service worker<br/>owns the WebSocket(s)<br/>trusted input · CDP"]
         CS["content script<br/>(ISOLATED)"]
-        IN["inject (MAIN)<br/>window.mcp + built-ins"]
+        IN["inject (MAIN)<br/>document.modelContext + built-ins"]
         FR["frame agent (MAIN)<br/>every iframe"]
         PG["Your page / app"]
     end
@@ -425,33 +425,64 @@ Use **Shutdown bridge** there when you want to stop the background daemon.
 > to mirror it as Chrome tab groups. See
 > [DETAILS.md](DETAILS.md#per-tab-bridges-profiles-and-tab-groups).
 
-## Expose your page's own tools — `window.mcp`
+## Expose your page's own tools — WebMCP
 
-The extension injects a `window.mcp` API into enabled tabs, so your app can
-publish **its own** MCP tools to the agent. The simplest form is a plain
-manifest — no imports, no extension API, no timing dependency (it works even if
-the page runs before the extension injects):
+Pages publish **their own** MCP tools with
+[WebMCP](https://github.com/webmachinelearning/webmcp), the W3C proposal for
+handing client-side functionality to agents:
 
 ```js
-window.mcp = {
-  label: "checkout", // tool namespace → checkout__getCart
-  tools: {
-    getCart: () => store.getState().cart,
-    addItem: {
-      description: "Add an item to the cart",
-      inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
-      handler: (args) => store.addItem(args.id),
-    },
+await document.modelContext.registerTool({
+  name: "add-item",
+  description: "Add an item to the cart",
+  inputSchema: {
+    type: "object",
+    properties: { id: { type: "string" } },
+    required: ["id"],
   },
-};
+  annotations: { readOnlyHint: false },
+  async execute({ id }, { signal }) {
+    return store.addItem(id, { signal });
+  },
+});
 ```
 
-If the extension is not installed, `window.mcp` is just inert page data — safe
-to ship in production. Tool changes are picked up live while the tab is enabled.
+The agent sees it namespaced by provider label, e.g. `checkout__add-item`.
+
+`document.modelContext` is native in the Chrome 149 / Edge 150 origin trials.
+**Everywhere else the extension polyfills it** at `document_start`, so the same
+code works in any Chromium — feature-detect with `if (document.modelContext)` and
+your page degrades cleanly when neither is available.
+
+Unregister by aborting a signal; the agent's tool list updates live:
+
+```js
+const controller = new AbortController();
+await document.modelContext.registerTool(tool, { signal: controller.signal });
+controller.abort(); // tool disappears from the agent
+```
+
+Types: `npm i -D webmcp-types`.
+
+### Bridge-specific knobs — `window.mcpPageBridge`
+
+WebMCP has no notion of a provider label or of the extension's built-in toolset,
+so those live on a separate global that only exists when the extension is
+installed:
+
+```js
+window.mcpPageBridge?.setLabel("checkout"); // tools become checkout__add-item
+window.mcpPageBridge?.allowEval(false);     // drop the `eval` built-in
+window.mcpPageBridge?.builtins(false);      // drop all built-ins
+
+// Full MCP SDK server instead of individual tools:
+await window.mcpPageBridge.connect(myMcpSdkServer);
+```
+
 More in [DETAILS.md](DETAILS.md#authoring-tools-in-your-own-page); working examples:
 [`examples/demo-app`](examples/demo-app) (vanilla) and
 [`examples/svelte-app`](examples/svelte-app) (Svelte 5 runes).
 
 ## More Details
 
-The full list of built-in tools (design/automation/CDP toolsets), advanced `window.mcp` usage, multi-agent behaviour, security notes, and development details are in [DETAILS.md](DETAILS.md).
+The full list of built-in tools (design/automation/CDP toolsets), advanced WebMCP usage, multi-agent behaviour, security notes, and development details are in [DETAILS.md](DETAILS.md).
