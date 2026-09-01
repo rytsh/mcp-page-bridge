@@ -14,8 +14,8 @@ import (
 // Version is the bridge version reported in MCP handshakes and /api/health.
 // Overridden at build time via:
 //
-//	-ldflags "-X github.com/rytsh/mcp-page-bridge/internal/protocol.Version=v0.3.0"
-var Version = "0.3.0"
+//	-ldflags "-X github.com/rytsh/mcp-page-bridge/internal/protocol.Version=v0.3.1"
+var Version = "0.3.1"
 
 const (
 	// WSSubprotocol is negotiated between the browser client and the bridge.
