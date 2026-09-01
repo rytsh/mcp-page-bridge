@@ -516,14 +516,29 @@ const UNTRUSTED_PREFIX = "[untrusted output] ";
  */
 function normalizeInputSchema(
   name: string,
-  schema: Record<string, unknown> | undefined,
+  schema: unknown,
 ): Record<string, unknown> | undefined {
   if (schema === undefined) return undefined;
-  if (schema.type === "object") return schema;
+  let parsed: unknown = schema;
+  if (typeof parsed === "string") {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch {
+      parsed = undefined;
+    }
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    console.warn(
+      `[mcp-page-bridge] tool "${name}": inputSchema must be a JSON object for MCP; using a permissive schema.`,
+    );
+    return { type: "object", additionalProperties: true };
+  }
+  const objectSchema = parsed as Record<string, unknown>;
+  if (objectSchema.type === "object") return objectSchema;
   console.warn(
     `[mcp-page-bridge] tool "${name}": inputSchema root must be {"type":"object"} for MCP; coercing.`,
   );
-  return { ...schema, type: "object" };
+  return { ...objectSchema, type: "object" };
 }
 
 function toDefinition(tool: RegisteredTool): ToolDefinition {
@@ -573,6 +588,9 @@ export function bindModelContext(doc: Document = document, win: Window = window)
   const latest = new Map<string, RegisteredTool>();
   /** Last successful read; reused when a transient getTools() failure occurs. */
   let lastTools: RegisteredTool[] = [];
+  // Early native implementations expose schemas and invocation arguments as
+  // JSON strings. The current draft exposes both as objects.
+  let legacyNative = native && context.executeTool.length === 2;
 
   const handlerFor = (name: string): ToolHandler => {
     const cached = handlers.get(name);
@@ -587,7 +605,13 @@ export function bindModelContext(doc: Document = document, win: Window = window)
       if (polyfill) {
         return (await polyfill.executeLocal(tool, args ?? {}, options.signal)) as ToolHandlerReturn;
       }
-      const json = await context.executeTool(tool, args ?? {}, { signal: options.signal });
+      const json = legacyNative
+        ? await (
+            context as unknown as {
+              executeTool(tool: RegisteredTool, inputArguments: string): Promise<string>;
+            }
+          ).executeTool(tool, JSON.stringify(args ?? {}))
+        : await context.executeTool(tool, args ?? {}, { signal: options.signal });
       return parseExecuteToolResult(json) as ToolHandlerReturn;
     };
     handlers.set(name, handler);
@@ -605,6 +629,9 @@ export function bindModelContext(doc: Document = document, win: Window = window)
       tools = lastTools;
     }
     lastTools = tools;
+    if (native && tools.some((tool) => typeof tool.inputSchema === "string")) {
+      legacyNative = true;
+    }
 
     latest.clear();
     for (const tool of tools) latest.set(tool.name, tool);

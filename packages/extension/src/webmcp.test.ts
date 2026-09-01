@@ -383,6 +383,65 @@ describe("bindModelContext", () => {
     expect(executeTool).toHaveBeenCalledWith(registered, { a: 1 }, { signal });
   });
 
+  it("parses a JSON-stringified inputSchema returned by a native context", async () => {
+    const registered = {
+      name: "native-tool",
+      description: "From the browser",
+      inputSchema: '{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}',
+      window: fakeWindow(),
+      origin: "https://app.example",
+    } as unknown as RegisteredTool;
+    const executeTool = vi.fn(async () => "null");
+    const nativeContext = Object.assign(new EventTarget(), {
+      registerTool: async () => undefined,
+      getTools: async () => [registered],
+      executeTool,
+    }) as unknown as ModelContextLike;
+
+    const binding = bindModelContext(
+      { modelContext: nativeContext } as unknown as Document,
+      fakeWindow(),
+    );
+    const [entry] = await binding.readTools();
+
+    expect(entry!.def.inputSchema).toEqual({
+      type: "object",
+      properties: { id: { type: "string" } },
+      required: ["id"],
+    });
+    await entry!.handler({ id: "note-1" }, { signal: new AbortController().signal });
+    expect(executeTool).toHaveBeenCalledWith(registered, '{"id":"note-1"}');
+  });
+
+  it("detects a legacy native context with only schemaless tools by executeTool arity", async () => {
+    const registered: RegisteredTool = {
+      name: "list-items",
+      description: "List items",
+      window: fakeWindow(),
+      origin: "https://app.example",
+    };
+    const executeTool = vi.fn(async function executeTool(
+      _tool: RegisteredTool,
+      _inputArguments: string,
+    ) {
+      return "[]";
+    });
+    const nativeContext = Object.assign(new EventTarget(), {
+      registerTool: async () => undefined,
+      getTools: async () => [registered],
+      executeTool,
+    }) as unknown as ModelContextLike;
+
+    const binding = bindModelContext(
+      { modelContext: nativeContext } as unknown as Document,
+      fakeWindow(),
+    );
+    const [entry] = await binding.readTools();
+    await entry!.handler({}, { signal: new AbortController().signal });
+
+    expect(executeTool).toHaveBeenCalledWith(registered, "{}");
+  });
+
   it("returns no tools when a native getTools() rejects", async () => {
     const nativeContext = Object.assign(new EventTarget(), {
       registerTool: async () => undefined,
