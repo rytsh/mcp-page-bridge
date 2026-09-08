@@ -40,6 +40,9 @@ jobs:
       - name: Build
         run: pnpm -r --if-present build
 
+      - name: Build Firefox extension
+        run: pnpm --filter @mcp-page-bridge/extension build:firefox
+
       - name: Verify dashboard embed is in sync
         run: |
           git diff --exit-code internal/server/assets/dashboard.html || {

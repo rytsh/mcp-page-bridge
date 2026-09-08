@@ -13,6 +13,7 @@
     "check": "pnpm typecheck && pnpm test && pnpm build",
     "server": "go run ./cmd/mcp-page-bridge --daemon",
     "pack:extension": "node scripts/pack-extension.mjs",
+    "pack:extension:firefox": "node scripts/pack-extension.mjs --firefox",
     "build:binaries": "goreleaser release --clean --skip=publish,announce,validate --snapshot",
     "build:npm-packages": "node scripts/build-npm-packages.mjs",
     "publish:extension": "pnpm pack:extension",

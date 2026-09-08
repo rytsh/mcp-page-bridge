@@ -131,6 +131,9 @@ jobs:
           cd packages/extension/dist
           zip -r "$GITHUB_WORKSPACE/mcp-page-bridge-extension-${GITHUB_REF_NAME}.zip" .
 
+      - name: Package Firefox extension
+        run: pnpm pack:extension:firefox
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -138,6 +141,7 @@ jobs:
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then PRERELEASE="--prerelease"; else PRERELEASE=""; fi
           gh release create "$GITHUB_REF_NAME" \
             "mcp-page-bridge-extension-${GITHUB_REF_NAME}.zip" \
+            "mcp-page-bridge-extension-firefox-${GITHUB_REF_NAME}.zip" \
             dist/mcp-page-bridge-*.tar.gz \
             dist/mcp-page-bridge-*.zip \
             dist/checksums.txt \

@@ -1,5 +1,5 @@
 import * as esbuild from "esbuild";
-import { cp, mkdir, rm } from "node:fs/promises";
+import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 
 const ASSETS = "../../assets";
 const ICONS = [
@@ -11,7 +11,8 @@ const ICONS = [
 ];
 
 const watch = process.argv.includes("--watch");
-const outdir = "dist";
+const firefox = process.argv.includes("--firefox");
+const outdir = firefox ? "dist-firefox" : "dist";
 
 await rm(outdir, { recursive: true, force: true });
 await mkdir(outdir, { recursive: true });
@@ -20,7 +21,7 @@ await mkdir(outdir, { recursive: true });
 const common = {
   bundle: true,
   format: "iife",
-  target: ["chrome116"],
+  target: [firefox ? "firefox140" : "chrome116"],
   sourcemap: true,
   logLevel: "info",
 };
@@ -35,7 +36,25 @@ const entries = {
 };
 
 async function copyStatic() {
-  await cp("manifest.json", `${outdir}/manifest.json`);
+  const manifest = JSON.parse(await readFile("manifest.json", "utf8"));
+  if (firefox) {
+    delete manifest.minimum_chrome_version;
+    delete manifest.optional_permissions;
+    manifest.background = { scripts: ["background.js"] };
+    manifest.browser_specific_settings = {
+      gecko: {
+        id: "mcp-page-bridge@rytsh",
+        strict_min_version: "140.0",
+        data_collection_permissions: {
+          required: ["websiteContent", "browsingActivity"],
+        },
+      },
+      gecko_android: {
+        strict_min_version: "142.0",
+      },
+    };
+  }
+  await writeFile(`${outdir}/manifest.json`, JSON.stringify(manifest, null, 2) + "\n");
   await cp("src/popup.html", `${outdir}/popup.html`);
   await mkdir(`${outdir}/icons`, { recursive: true });
   for (const [src, dest] of ICONS) {

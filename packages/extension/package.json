@@ -6,7 +6,9 @@
   "description": "mcp-page-bridge browser extension (MV3): exposes a page's MCP server to the agent via the bridge",
   "scripts": {
     "build": "node build.mjs",
+    "build:firefox": "node build.mjs --firefox",
     "dev": "node build.mjs --watch",
+    "dev:firefox": "node build.mjs --firefox --watch",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json"
   },

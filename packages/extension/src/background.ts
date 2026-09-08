@@ -17,6 +17,7 @@ import {
   type ExtCallPayload,
 } from "mcp-page-bridge-protocol";
 import { BrowserProvider } from "./browser-provider.js";
+import { extensionApi, hasDebuggerPermission } from "./extension-api.js";
 import {
   parseProfiles,
   profileLabel,
@@ -27,6 +28,8 @@ import {
   type BridgeConfig,
   type BridgeProfile,
 } from "./bridge-profiles.js";
+
+const chrome = extensionApi();
 
 interface SocketEntry {
   ws?: WebSocket;
@@ -352,10 +355,6 @@ function cdpSession(tabId: number): CdpSession {
     cdpSessions.set(tabId, session);
   }
   return session;
-}
-
-async function hasDebuggerPermission(): Promise<boolean> {
-  return chrome.permissions.contains({ permissions: ["debugger"] });
 }
 
 async function sendCdpCommand<T = unknown>(tabId: number, command: string, params?: Record<string, unknown>): Promise<T> {
@@ -812,9 +811,9 @@ if (chrome.downloads?.onCreated) {
   chrome.downloads.onChanged.addListener((delta) => {
     // A delta only carries what changed; re-query so the size/path stay accurate.
     recordDownload(delta);
-    chrome.downloads.search({ id: delta.id }, (items) => {
+    void chrome.downloads.search({ id: delta.id }).then((items) => {
       for (const item of items) recordDownload(item);
-    });
+    }).catch(() => undefined); // The download may have been removed meanwhile.
   });
 }
 
@@ -828,12 +827,8 @@ async function runDownloads(args: Record<string, unknown>): Promise<unknown> {
   const action = strArg(args.action, "list");
   if (action === "list") {
     // Seed from Chrome's own list so downloads from before the SW woke up show.
-    await new Promise<void>((resolve) => {
-      chrome.downloads.search({ limit: DOWNLOAD_MAX_ENTRIES, orderBy: ["-startTime"] }, (items) => {
-        for (const item of items) recordDownload(item);
-        resolve();
-      });
-    });
+    const items = await chrome.downloads.search({ limit: DOWNLOAD_MAX_ENTRIES, orderBy: ["-startTime"] });
+    for (const item of items) recordDownload(item);
     const entries = downloadList(Math.max(1, Math.min(100, Math.floor(numArg(args.limit, 10)))), strArg(args.state) || undefined);
     return { count: entries.length, downloads: entries };
   }
@@ -848,12 +843,8 @@ async function runDownloads(args: Record<string, unknown>): Promise<unknown> {
   const started = Date.now();
 
   for (;;) {
-    await new Promise<void>((resolve) => {
-      chrome.downloads.search({ limit: DOWNLOAD_MAX_ENTRIES, orderBy: ["-startTime"] }, (items) => {
-        for (const item of items) recordDownload(item);
-        resolve();
-      });
-    });
+    const items = await chrome.downloads.search({ limit: DOWNLOAD_MAX_ENTRIES, orderBy: ["-startTime"] });
+    for (const item of items) recordDownload(item);
     const match = [...downloadRecords.values()]
       .sort((a, b) => b.id - a.id)
       .find(

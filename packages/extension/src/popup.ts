@@ -1,4 +1,7 @@
 /** Popup UI: enable/disable mcp-page-bridge for the active tab and show provider status. */
+import { extensionApi, supportsDebugger } from "./extension-api.js";
+
+const chrome = extensionApi();
 
 interface ProviderStatus {
   id: string;
@@ -169,8 +172,11 @@ function render(status: Status): void {
   el<HTMLInputElement>("coreTools").checked = status.coreTools !== false;
   el<HTMLInputElement>("designTools").checked = !!status.designTools;
   el<HTMLInputElement>("automationTools").checked = !!status.automationTools;
-  el<HTMLInputElement>("cdpTools").checked = !!status.cdpTools;
-  el<HTMLInputElement>("trustedInput").checked = !!status.trustedInput;
+  const debuggerSupported = supportsDebugger();
+  el<HTMLInputElement>("cdpTools").disabled = !debuggerSupported;
+  el<HTMLInputElement>("trustedInput").disabled = !debuggerSupported;
+  el<HTMLInputElement>("cdpTools").checked = debuggerSupported && !!status.cdpTools;
+  el<HTMLInputElement>("trustedInput").checked = debuggerSupported && !!status.trustedInput;
   el<HTMLParagraphElement>("trustedInputHint").textContent = status.trustedInput
     ? "click / type_text / press_key dispatch real events via the debugger. The tab is focused briefly for each action."
     : "Off: input uses synthetic DOM events (isTrusted:false). Turn on for pages that ignore them; needs the debugger permission.";
@@ -179,6 +185,10 @@ function render(status: Status): void {
     : status.cdpDebuggerPermission
       ? "Debugger permission granted. Enable only when you need CDP-level control."
       : "Requires optional debugger permission. Chrome shows a debugging banner while attached.";
+  if (!debuggerSupported) {
+    el<HTMLParagraphElement>("cdpHint").textContent = "Unavailable in Firefox: this browser does not support the debugger API.";
+    el<HTMLParagraphElement>("trustedInputHint").textContent = "Unavailable in Firefox: trusted input requires the debugger API. Input uses synthetic DOM events (isTrusted:false).";
+  }
   // The picker + CSS-patch panels only matter when the design/selection tools
   // are enabled (otherwise the agent can't act on a selection), so hide them.
   el<HTMLDivElement>("designPanel").style.display = status.designTools ? "" : "none";
@@ -256,6 +266,7 @@ function selectionEditFocused(): boolean {
 }
 
 async function ensureDebuggerPermission(): Promise<boolean> {
+  if (!supportsDebugger()) return false;
   const request = { permissions: ["debugger"] };
   if (await chrome.permissions.contains(request)) return true;
   return chrome.permissions.request(request);

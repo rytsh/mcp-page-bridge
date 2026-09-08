@@ -6,6 +6,7 @@ npm-dist/
 .DS_Store
 *.tsbuildinfo
 packages/extension/dist/
+packages/extension/dist-firefox/
 packages/extension/.output/
 
 # Local, machine-specific opencode config used for manual testing

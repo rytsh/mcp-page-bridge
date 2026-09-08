@@ -17,7 +17,7 @@
 `mcp-page-bridge` lets an MCP client/agent use tools exposed by the active browser page. It has two parts:
 
 - A local MCP server (a single Go binary) started by your agent — via `npx`, or as a standalone download.
-- A Chromium extension installed from the Chrome Web Store (or manually from GitHub Releases).
+- A browser extension for Chromium (Chrome Web Store or manual installation) or Firefox 140+ (manual development installation).
 
 ```mermaid
 flowchart LR
@@ -47,7 +47,7 @@ flowchart LR
 
 ## Install
 
-### 1. Install the Chrome extension
+### 1. Install the browser extension
 
 Add the `mcp-page-bridge` extension from the Chrome Web Store:
 
@@ -61,6 +61,43 @@ Add the `mcp-page-bridge` extension from the Chrome Web Store:
 4. Open `chrome://extensions`.
 5. Enable **Developer mode**.
 6. Click **Load unpacked** and select the unzipped extension folder containing `manifest.json`.
+
+</details>
+
+<details><summary>Firefox 140+ installation and packaging</summary>
+
+Build a separate Firefox package from the repository root:
+
+```bash
+pnpm install
+pnpm --filter mcp-page-bridge-protocol build
+pnpm pack:extension:firefox
+```
+
+This produces `packages/extension/dist-firefox/` and
+`mcp-page-bridge-extension-firefox-v<version>.zip`, without replacing the Chrome output.
+Release builds also attach the Firefox ZIP to GitHub Releases.
+
+1. Open `about:debugging#/runtime/this-firefox` in Firefox.
+2. Click **Load Temporary Add-on**.
+3. Select `packages/extension/dist-firefox/manifest.json` (or extract the Firefox ZIP and select its manifest).
+4. Grant the requested site permissions, then open the extension popup to activate a tab.
+
+Temporary add-ons are removed when Firefox restarts. The ZIP is unsigned; persistent
+installation in standard Firefox requires Mozilla signing (AMO listed or unlisted
+distribution). The Firefox manifest declares `websiteContent` and `browsingActivity`
+as required data permissions: page content (including screenshots and tool results)
+and tab URLs/titles can be forwarded through the configured bridge to your agent.
+These declarations apply even when the bridge runs on localhost. Firefox 140+
+provides the built-in installation consent prompt for these data types.
+
+For development, use `pnpm --filter @mcp-page-bridge/extension dev:firefox`, then
+reload the temporary add-on after rebuilding.
+
+Firefox uses an MV3 background event page instead of Chrome's service worker.
+CDP tools and trusted input are unavailable because Firefox does not expose
+`chrome.debugger`; synthetic DOM input remains available. Full-page screenshots
+fall back to viewport capture. The local Go bridge and agent configuration are unchanged.
 
 </details>
 

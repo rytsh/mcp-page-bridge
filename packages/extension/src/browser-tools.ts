@@ -11,6 +11,7 @@
  */
 import type { EmbeddedMcpServer, ToolResult } from "./embedded-server.js";
 import { clampToolText } from "./dom-core.js";
+import { extensionApi } from "./extension-api.js";
 
 function text(t: string): ToolResult {
   return { content: [{ type: "text", text: clampToolText(t) }] };
@@ -31,6 +32,7 @@ export interface BrowserToolDeps {
 }
 
 export function registerBrowserTools(server: EmbeddedMcpServer, deps: BrowserToolDeps): void {
+  const chrome = extensionApi();
   server.registerTool(
     {
       name: "list_tabs",
