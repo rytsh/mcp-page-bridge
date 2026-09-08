@@ -41,6 +41,10 @@ async function copyStatic() {
     delete manifest.minimum_chrome_version;
     delete manifest.optional_permissions;
     manifest.background = { scripts: ["background.js"] };
+    // Firefox's default MV3 CSP upgrades ws:// to wss://, breaking local bridges.
+    manifest.content_security_policy = {
+      extension_pages: "script-src 'self'; object-src 'self'",
+    };
     manifest.browser_specific_settings = {
       gecko: {
         id: "mcp-page-bridge@rytsh",

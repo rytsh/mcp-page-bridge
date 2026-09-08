@@ -95,6 +95,9 @@ For development, use `pnpm --filter @mcp-page-bridge/extension dev:firefox`, the
 reload the temporary add-on after rebuilding.
 
 Firefox uses an MV3 background event page instead of Chrome's service worker.
+Its explicit extension-page CSP keeps scripts restricted to the extension itself
+without upgrading local `ws://` connections to `wss://`. Local plaintext bridges
+do not require TLS; use `wss://` with a trusted certificate for remote connections.
 CDP tools and trusted input are unavailable because Firefox does not expose
 `chrome.debugger`; synthetic DOM input remains available. Full-page screenshots
 fall back to viewport capture. The local Go bridge and agent configuration are unchanged.
