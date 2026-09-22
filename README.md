@@ -11,13 +11,14 @@
 <p align="center">
   <a href="https://www.npmjs.com/package/mcp-page-bridge"><img src="https://img.shields.io/npm/v/mcp-page-bridge?style=flat-square&logo=npm&label=npm" alt="npm version" /></a>
   <a href="https://chromewebstore.google.com/detail/mcp-page-bridge/lpehmmnlgeaocbnleigemiadocgadgmo"><img src="https://img.shields.io/chrome-web-store/v/lpehmmnlgeaocbnleigemiadocgadgmo?style=flat-square&logo=googlechrome&logoColor=white&label=chrome%20web%20store" alt="Chrome Web Store" /></a>
+  <a href="https://addons.mozilla.org/firefox/addon/mcp-page-bridge/"><img src="https://img.shields.io/amo/v/mcp-page-bridge?style=flat-square&logo=firefoxbrowser&logoColor=white&label=firefox%20add-ons" alt="Firefox Add-ons" /></a>
   <a href="https://github.com/rytsh/mcp-page-bridge/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/mcp-page-bridge?style=flat-square&label=license" alt="License" /></a>
 </p>
 
 `mcp-page-bridge` lets an MCP client/agent use tools exposed by the active browser page. It has two parts:
 
 - A local MCP server (a single Go binary) started by your agent — via `npx`, or as a standalone download.
-- A browser extension for Chromium (Chrome Web Store or manual installation) or Firefox 140+ (manual development installation).
+- A browser extension for Chromium and Firefox 140+ (browser store or manual installation).
 
 ```mermaid
 flowchart LR
@@ -49,9 +50,10 @@ flowchart LR
 
 ### 1. Install the browser extension
 
-Add the `mcp-page-bridge` extension from the Chrome Web Store:
+Add the `mcp-page-bridge` extension from your browser's extension store:
 
-> https://chromewebstore.google.com/detail/mcp-page-bridge/lpehmmnlgeaocbnleigemiadocgadgmo
+- [Chrome Web Store](https://chromewebstore.google.com/detail/mcp-page-bridge/lpehmmnlgeaocbnleigemiadocgadgmo)
+- [Firefox Add-ons](https://addons.mozilla.org/firefox/addon/mcp-page-bridge/) (Firefox 140+)
 
 <details><summary>Alternative manual installation from GitHub Releases</summary>
 
@@ -64,7 +66,7 @@ Add the `mcp-page-bridge` extension from the Chrome Web Store:
 
 </details>
 
-<details><summary>Firefox 140+ installation and packaging</summary>
+<details><summary>Firefox 140+ development installation and packaging</summary>
 
 Build a separate Firefox package from the repository root:
 
