@@ -120,6 +120,9 @@ jobs:
             echo "mcp-page-bridge@$VERSION already exists; skipping"
             exit 0
           fi
+          # build-npm-packages.mjs injects optionalDependencies after the initial
+          # frozen install, so refresh pnpm's lock/install state before publishing.
+          pnpm install --no-frozen-lockfile
           if [[ "$VERSION" == *-* ]]; then DIST_TAG=next; else DIST_TAG=latest; fi
           echo "Publishing mcp-page-bridge@$VERSION with dist-tag '$DIST_TAG'"
           (cd packages/server && pnpm publish --access public --no-git-checks --provenance --tag "$DIST_TAG")
