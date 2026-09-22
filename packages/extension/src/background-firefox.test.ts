@@ -21,7 +21,7 @@ it("keeps saved and requested debugger flags off in Firefox without querying per
       },
       session: { get: sessionGet, set: vi.fn().mockResolvedValue(undefined) },
     },
-    tabs: { onRemoved: { addListener: vi.fn() } },
+    tabs: { query: vi.fn().mockResolvedValue([]), onRemoved: { addListener: vi.fn() } },
     alarms: { create: vi.fn(), onAlarm: { addListener: vi.fn() } },
   });
   await import("./background.js");

@@ -229,7 +229,7 @@ function browserToolDepsFor(route: TabRoute): BrowserToolDeps {
       await booted;
       // Set before enabling, so the page's very first `open` is already routed
       // to the right consumer and no socket is dialled only to be torn down.
-      if (!(await writeTabRoute(tabId, route))) return false;
+       if (!(await setTabRoute(tabId, route)).ok) return false;
 
       const state = await ensureEnabledTab(tabId);
       if (!state) {
@@ -340,13 +340,14 @@ async function writeTabRoute(tabId: number, route: TabRoute): Promise<boolean> {
  * between the daemon and an agent. Doing it per origin keeps that guarantee
  * when there is more than one agent.
  */
-async function webAgentTabIds(origin: string): Promise<number[]> {
+async function webAgentTabIds(origin: string, agentTabId?: number): Promise<number[]> {
   const normalized = normalizeOrigin(origin);
   if (!normalized) return [];
   const enabled = await getEnabledSet();
   return [...enabled].filter((tabId) => {
     const route = tabRoute(tabId);
-    return route.mode === TAB_MODE_WEB_AGENT && route.origin === normalized;
+    return route.mode === TAB_MODE_WEB_AGENT && route.origin === normalized &&
+      (route.agentTabId === undefined || route.agentTabId === agentTabId);
   });
 }
 
@@ -358,8 +359,9 @@ async function webAgentTabIds(origin: string): Promise<number[]> {
  * transport instead of a WebSocket, so both consumers share one registry and
  * one set of semantics rather than drifting apart.
  */
-function webAgentClient(origin: string): LoopbackMcpClient {
-  let client = webAgentMcp.get(origin);
+function webAgentClient(origin: string, agentTabId?: number): LoopbackMcpClient {
+  const key = `${origin}#${agentTabId ?? "legacy"}`;
+  let client = webAgentMcp.get(key);
   if (!client) {
     const server = new EmbeddedMcpServer({
       name: "browser",
@@ -369,9 +371,9 @@ function webAgentClient(origin: string): LoopbackMcpClient {
     // One server per origin, because `enable_tab` has to bind the tab to *this*
     // caller. A shared instance would give whichever agent asked last the tabs
     // the others enabled.
-    registerBrowserTools(server, browserToolDepsFor(webAgentRoute(origin)));
+    registerBrowserTools(server, browserToolDepsFor(webAgentRoute(origin, agentTabId)));
     client = new LoopbackMcpClient(server);
-    webAgentMcp.set(origin, client);
+    webAgentMcp.set(key, client);
   }
   return client;
 }
@@ -385,8 +387,8 @@ function webAgentClient(origin: string): LoopbackMcpClient {
 // has seen the daemon's catalog reads this one without relearning anything.
 
 /** Every page provider on the tabs this origin is being served. */
-async function webAgentPageClients(origin: string): Promise<PageProviderClient[]> {
-  const tabIds = await webAgentTabIds(origin);
+async function webAgentPageClients(origin: string, agentTabId?: number): Promise<PageProviderClient[]> {
+  const tabIds = await webAgentTabIds(origin, agentTabId);
   const clients: PageProviderClient[] = [];
   for (const tabId of tabIds) {
     const state = tabs.get(tabId);
@@ -436,13 +438,13 @@ function isRecordValue(value: unknown): value is Record<string, unknown> {
  * A page that fails to answer is skipped rather than fatal: one wedged tab must
  * not cost the agent the browser toolset it would need to close that very tab.
  */
-async function webAgentToolList(origin: string): Promise<{ tools: unknown[] }> {
+async function webAgentToolList(origin: string, agentTabId?: number): Promise<{ tools: unknown[] }> {
   const tools: unknown[] = [];
 
-  const browser = await webAgentClient(origin).listTools();
+  const browser = await webAgentClient(origin, agentTabId).listTools();
   if (isRecordValue(browser) && Array.isArray(browser.tools)) tools.push(...browser.tools);
 
-  const clients = await webAgentPageClients(origin);
+  const clients = await webAgentPageClients(origin, agentTabId);
   assignLabels(clients);
   const listings = await Promise.all(
     clients.map(async (client) => {
@@ -475,8 +477,8 @@ async function webAgentToolList(origin: string): Promise<{ tools: unknown[] }> {
  * prefix is reported as an unknown tool rather than silently tried on the
  * browser server.
  */
-async function webAgentCallTool(origin: string, name: string, args: Record<string, unknown>): Promise<unknown> {
-  const clients = await webAgentPageClients(origin);
+async function webAgentCallTool(origin: string, name: string, args: Record<string, unknown>, agentTabId?: number): Promise<unknown> {
+  const clients = await webAgentPageClients(origin, agentTabId);
   assignLabels(clients);
 
   for (const client of clients) {
@@ -496,7 +498,7 @@ async function webAgentCallTool(origin: string, name: string, args: Record<strin
     }
   }
 
-  return webAgentClient(origin).callTool(name, args);
+  return webAgentClient(origin, agentTabId).callTool(name, args);
 }
 
 /**
@@ -526,9 +528,44 @@ async function tabOrigin(tabId: number): Promise<string> {
   }
 }
 
+/** Ask live documents, rather than treating remembered approvals as agents. */
+async function discoverWebAgents(): Promise<Array<{ tabId: number; origin: string; name: string; title: string }>> {
+  const openTabs = await chrome.tabs.query({}).catch(() => []);
+  const found = await Promise.all(openTabs.map(async (tab) => {
+    const origin = normalizeOrigin(tab.url);
+    if (tab.id === undefined || !origin) return undefined;
+    try {
+      const probe = () => chrome.tabs.sendMessage(tab.id!, { type: "discoverWebAgent" }, { frameId: 0 });
+      let presence = await probe().catch(() => undefined);
+      if (!presence || typeof presence.name !== "string") {
+        // Tabs open before installation/reload still need the current relay.
+        await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] });
+        presence = await probe();
+      }
+      if (typeof presence?.name !== "string" || !presence.name) return undefined;
+      return { tabId: tab.id, origin, name: presence.name, title: tab.title || presence.name };
+    } catch {
+      return undefined;
+    }
+  }));
+  return found.filter((agent): agent is NonNullable<typeof agent> => !!agent);
+}
+
+/** Selecting a live chat in the popup is also the user's connection consent. */
+async function connectSelectedAgent(route: TabRoute): Promise<void> {
+  if (route.mode !== TAB_MODE_WEB_AGENT) return;
+  if (route.agentTabId === undefined) throw new Error("Choose an open agent with Web connection enabled.");
+  const agents = await discoverWebAgents();
+  if (!agents.some((agent) => agent.tabId === route.agentTabId && agent.origin === route.origin)) {
+    throw new Error("This agent is no longer available. Enable Web connection in its chat and try again.");
+  }
+  if (!originApproved(route.origin, webAgentOrigins)) await setWebAgentOrigin(route.origin, true);
+}
+
 async function handleWebAgentRequest(
   req: { method?: string; params?: unknown },
   origin: string,
+  agentTabId?: number,
 ): Promise<WebAgentBackendReply> {
   // The approved origins live in storage, and this worker is usually cold when
   // the request arrives: MV3 evicts it aggressively, and the wake-up dispatches
@@ -548,18 +585,18 @@ async function handleWebAgentRequest(
         return {
           result: webAgentDescriptor({
             enabledTabs: (await getEnabledSet()).size,
-            webAgentTabs: (await webAgentTabIds(origin)).length,
+            webAgentTabs: (await webAgentTabIds(origin, agentTabId)).length,
           }),
         };
       case WEB_AGENT_METHOD_LIST_TOOLS:
-        return { result: await webAgentToolList(origin) };
+        return { result: await webAgentToolList(origin, agentTabId) };
       case WEB_AGENT_METHOD_CALL_TOOL: {
         const params = (req.params ?? {}) as { name?: unknown; arguments?: unknown };
         if (typeof params.name !== "string" || !params.name) {
           return { error: "tools/call needs a tool name" };
         }
         const args = (params.arguments ?? {}) as Record<string, unknown>;
-        return { result: await webAgentCallTool(origin, params.name, args) };
+        return { result: await webAgentCallTool(origin, params.name, args, agentTabId) };
       }
       default:
         return { error: `unknown method: ${String(req.method)}` };
@@ -596,17 +633,21 @@ async function setWebAgentOrigin(origin: string, connected: boolean): Promise<vo
   await chrome.storage.local.set({ [WEB_AGENT_ORIGINS_KEY]: webAgentOrigins });
 
   if (!connected) {
-    // Tabs pointed here now serve nobody. Leaving them in that state is the
-    // worst of both: no daemon socket and no agent to answer, so they would sit
-    // enabled with their tools going nowhere and no sign of why. Hand them back
-    // to the daemon, which is what "not serving a web agent" has always meant.
+    // Disconnect means stop serving, never silently switch to a daemon.
     for (const [tabId, route] of [...tabModes]) {
       if (route.mode !== TAB_MODE_WEB_AGENT || route.origin !== normalized) continue;
-      await setTabRoute(tabId, daemonRoute());
+      await setEnabled(tabId, false);
+      const state = tabs.get(tabId);
+      if (state) {
+        sendControl(state, "deactivate");
+        closeAllPageClients(state, "the agent was disconnected");
+      }
+      void updateActionIcon(tabId, false);
+      void ungroupManagedTab(tabId);
     }
     // Its browser-toolset client can go too; a later reconnect builds a fresh
     // one rather than inheriting a handshake from the old approval.
-    webAgentMcp.delete(normalized);
+    for (const key of webAgentMcp.keys()) if (key.startsWith(`${normalized}#`)) webAgentMcp.delete(key);
   }
 
   // `goodbye` first tells the page to stop offering the tools; the agent also
@@ -650,7 +691,7 @@ async function setTabRoute(tabId: number, route: TabRoute): Promise<{ ok: boolea
   // "already there" and skip the teardown a real switch needs.
   await booted;
   const previous = tabRoute(tabId);
-  if (previous.mode === route.mode && previous.origin === route.origin) return { ok: true };
+  if (previous.mode === route.mode && previous.origin === route.origin && previous.agentTabId === route.agentTabId) return { ok: true };
 
   if (!(await writeTabRoute(tabId, route))) {
     return { ok: false, error: "That site is no longer connected. Connect it again from this popup first." };
@@ -796,6 +837,10 @@ async function syncTabGroups(): Promise<void> {
     // Collect live tab info once.
     const liveTabs: Array<{ tabId: number; windowId: number; groupId: number; profile: BridgeProfile }> = [];
     for (const tabId of enabledSet) {
+      if (tabMode(tabId) === TAB_MODE_WEB_AGENT) {
+        await ungroupManagedTab(tabId);
+        continue;
+      }
       const tab = await chrome.tabs.get(tabId).catch(() => undefined);
       if (!tab || tab.windowId === undefined || tab.pinned) continue; // grouping would unpin
       liveTabs.push({ tabId, windowId: tab.windowId, groupId: tab.groupId ?? TAB_GROUP_NONE, profile: bridgeConfigFor(tabId) });
@@ -2602,7 +2647,7 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
       return false;
     }
     void (async () => {
-      sendResponse(await handleWebAgentRequest(req, senderOrigin(sender)));
+      sendResponse(await handleWebAgentRequest(req, senderOrigin(sender), sender.tab?.id));
     })();
     return true;
   }
@@ -2653,6 +2698,7 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
       const enabledSet = await getEnabledSet();
       const tabCounts = new Map<string, number>();
       for (const id of enabledSet) {
+        if (tabMode(id) !== TAB_MODE_DAEMON) continue;
         const cfg = bridgeConfigFor(id);
         tabCounts.set(cfg.id, (tabCounts.get(cfg.id) ?? 0) + 1);
       }
@@ -2668,17 +2714,18 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
         tabMode: mode,
         /** For a webAgent tab, which connected site it serves. */
         tabWebAgentOrigin: route.origin,
+        tabWebAgentTabId: route.agentTabId,
         /**
          * The sites the person has connected, newest first, with how many tabs
          * each is already being served. This is the web-agent half of the
          * `profiles` list below: both modes pick a destination, and the popup
          * shows one list or the other.
          */
-        webAgents: webAgentOrigins.map((connectedOrigin) => ({
-          origin: connectedOrigin,
+        webAgents: (await discoverWebAgents()).map((agent) => ({
+          ...agent,
           tabs: [...enabledSet].filter((id) => {
             const r = tabRoute(id);
-            return r.mode === TAB_MODE_WEB_AGENT && r.origin === connectedOrigin;
+            return r.mode === TAB_MODE_WEB_AGENT && r.origin === agent.origin && r.agentTabId === agent.tabId;
           }).length,
         })),
         providers,
@@ -2726,7 +2773,7 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
     }
 
     if (req?.type === "setTabMode") {
-      const route = parseTabRoute({ mode: req.mode, origin: req.origin });
+      const route = parseTabRoute({ mode: req.mode, origin: req.origin, agentTabId: req.agentTabId });
       if (!route) {
         sendResponse({
           ok: false,
@@ -2736,6 +2783,7 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
         });
         return;
       }
+      await connectSelectedAgent(route);
       sendResponse(await setTabRoute(req.tabId as number, route));
       return;
     }
@@ -2748,8 +2796,10 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
         // socket is dialled to a daemon only to be torn down a moment later —
         // which is also the window in which the choice used to appear to
         // revert on its own.
-        const route = parseTabRoute({ mode: req.mode, origin: req.origin }) ?? daemonRoute();
-        if (!(await writeTabRoute(tabId, route))) {
+        const route = parseTabRoute({ mode: req.mode, origin: req.origin, agentTabId: req.agentTabId });
+        if (!route) throw new Error("Choose Agent or Daemon and a valid connection target first.");
+        await connectSelectedAgent(route);
+        if (!(await setTabRoute(tabId, route)).ok) {
           sendResponse({
             ok: false,
             error: "That site is no longer connected. Connect it again from this popup first.",
@@ -2996,7 +3046,7 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
     }
 
     sendResponse({ ok: false, error: "unknown request" });
-  })();
+  })().catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }));
   return true; // keep the channel open for the async response
 });
 

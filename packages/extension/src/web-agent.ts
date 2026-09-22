@@ -162,14 +162,16 @@ export interface TabRoute {
   mode: TabMode;
   /** For `webAgent`: the single origin served. Empty for `daemon`. */
   origin: string;
+  /** The open chat tab selected by the user. Absent for legacy origin routes. */
+  agentTabId?: number;
 }
 
 export function daemonRoute(): TabRoute {
   return { mode: TAB_MODE_DAEMON, origin: "" };
 }
 
-export function webAgentRoute(origin: string): TabRoute {
-  return { mode: TAB_MODE_WEB_AGENT, origin: normalizeOrigin(origin) };
+export function webAgentRoute(origin: string, agentTabId?: number): TabRoute {
+  return { mode: TAB_MODE_WEB_AGENT, origin: normalizeOrigin(origin), ...(agentTabId !== undefined ? { agentTabId } : {}) };
 }
 
 /**
@@ -187,7 +189,9 @@ export function parseTabRoute(value: unknown): TabRoute | null {
   if (!isTabMode(mode)) return null;
   if (mode === TAB_MODE_DAEMON) return daemonRoute();
   const normalized = normalizeOrigin(typeof origin === "string" ? origin : "");
-  return normalized ? { mode: TAB_MODE_WEB_AGENT, origin: normalized } : null;
+  if (!normalized) return null;
+  if (value.agentTabId !== undefined && (!Number.isInteger(value.agentTabId) || (value.agentTabId as number) < 0)) return null;
+  return webAgentRoute(normalized, value.agentTabId as number | undefined);
 }
 
 /** Reads the persisted `tabId -> route` map, dropping anything malformed. */

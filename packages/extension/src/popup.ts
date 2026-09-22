@@ -53,11 +53,15 @@ interface Status {
   tabMode?: "daemon" | "webAgent";
   /** For a webAgent tab, the connected site it serves. */
   tabWebAgentOrigin?: string;
+  tabWebAgentTabId?: number;
   /** Sites connected for web agents, with how many tabs each already serves. */
   webAgents?: WebAgentStatus[];
 }
 
 interface WebAgentStatus {
+  tabId: number;
+  name: string;
+  title: string;
   origin: string;
   tabs: number;
 }
@@ -100,18 +104,14 @@ let settingsDirty = false;
 /** Latest profile list from getStatus; backs the recent-servers dropdown. */
 let knownProfiles: ProfileStatus[] = [];
 
-/**
- * The consumer a *disabled* tab will be enabled into.
- *
- * A tab that is off has no mode in the worker — there is nothing to hold one
- * for — so the choice lives here until the enable button spends it. Kept out of
- * storage deliberately: it is the state of this popup session, and a stale
- * intent silently applying to some later tab is exactly the confusion the
- * explicit choice is meant to remove.
- */
+/** Draft connection, applied explicitly so polling cannot undo a user's choice. */
 let pendingTabMode: "daemon" | "webAgent" = "daemon";
+let routeInitialized = false;
+let pendingAgentTabId = "";
+let knownWebAgents: WebAgentStatus[] = [];
+let connectionBusy = false;
 
-/** The site a disabled tab will be enabled into; "" until one is picked. */
+/** Origin of the selected live chat. */
 let pendingWebAgentOrigin = "";
 
 function setSettingsInput(id: "host" | "port" | "token" | "profileKey", value: string): void {
@@ -160,7 +160,7 @@ function renderBridgeSummary(status: Status): void {
   const summary = el<HTMLParagraphElement>("bridgeSummary");
   // A web-agent tab has no bridge. Reporting one it is not using — and could
   // not be reached on — is the kind of detail that reads as a live connection.
-  if (!status.enabled || status.tabMode === "webAgent") {
+  if (!status.enabled || status.tabMode === "webAgent" || pendingTabMode !== "daemon") {
     summary.style.display = "none";
     return;
   }
@@ -182,14 +182,7 @@ async function getStatus(tabId: number): Promise<Status> {
   return chrome.runtime.sendMessage({ type: "getStatus", tabId });
 }
 
-/**
- * The per-site switch for an agent running in the page itself.
- *
- * Until the site is connected the extension does not answer it at all — not
- * even to say it exists — so this panel is the only place the connection can
- * be made, and it is deliberately about the site in front of the person rather
- * than a list of origins typed in from memory.
- */
+/** Connect the current site independently of assigning page tools to a chat. */
 function renderWebAgent(status: Status): void {
   const origin = status.webAgentOrigin ?? "";
   const connected = !!status.webAgentConnected;
@@ -222,11 +215,12 @@ function renderWebAgent(status: Status): void {
 function renderTabMode(status: Status): void {
   const select = el<HTMLSelectElement>("tabMode");
   const target = el<HTMLSelectElement>("webAgentTarget");
-  const mode = status.tabMode ?? pendingTabMode;
+  const mode = pendingTabMode;
   const sites = status.webAgents ?? [];
-  const chosen = status.tabWebAgentOrigin || pendingWebAgentOrigin;
+  knownWebAgents = sites;
+  const chosen = pendingAgentTabId;
 
-  el<HTMLLabelElement>("tabModeLabel").textContent = status.enabled ? "Serving" : "Serve";
+  el<HTMLLabelElement>("tabModeLabel").textContent = "Connect";
   // Never clobber a selection mid-interaction: the 1.5s poll would otherwise
   // snap a dropdown back while it is open.
   if (document.activeElement !== select) select.value = mode;
@@ -238,40 +232,37 @@ function renderTabMode(status: Status): void {
   if (mode === "webAgent" && document.activeElement !== target) {
     const options = sites.length
       ? sites.map((site) => {
-          const label = shortUrl(site.origin);
+          const label = `${site.title} — ${shortUrl(site.origin)} (tab ${site.tabId})`;
           const suffix = site.tabs ? ` · ${site.tabs} tab${site.tabs > 1 ? "s" : ""}` : "";
-          return `<option value="${escapeHtml(site.origin)}">${escapeHtml(label + suffix)}</option>`;
+          return `<option value="${site.tabId}">${escapeHtml(label + suffix)}</option>`;
         })
-      : [`<option value="">No connected sites</option>`];
-    target.innerHTML = options.join("");
-    // Default to the only candidate rather than making the person choose from
-    // a list of one — but never invent a choice when there are several.
-    const fallback = sites.length === 1 ? sites[0]!.origin : "";
-    target.value = sites.some((s) => s.origin === chosen) ? chosen : fallback;
+      : [];
+    target.innerHTML = `<option value="">${sites.length ? "Choose an agent…" : "No agents with Web connection enabled"}</option>` + options.join("");
+    // A disappeared chat must not silently select another destination.
+    target.value = sites.some((s) => String(s.tabId) === chosen) ? chosen : "";
     target.disabled = sites.length === 0;
-    if (!status.enabled) pendingWebAgentOrigin = target.value;
+    pendingAgentTabId = target.value;
+    pendingWebAgentOrigin = sites.find((site) => String(site.tabId) === target.value)?.origin ?? "";
   }
 
-  const site = target.value ? shortUrl(target.value) : "";
-  el<HTMLParagraphElement>("tabModeHint").textContent = status.enabled
-    ? mode === "webAgent"
-      ? `This tab's page tools go to ${site || "a connected site"}. No daemon connection is made.`
-      : "This tab connects to the bridge daemon for a coding agent. Its page tools are not offered to web agents."
-    : mode === "webAgent"
-      ? sites.length === 0
-        ? "No sites are connected yet. Open the web agent's tab and connect it below, then come back here."
-        : `Enabling will serve this tab's page tools to ${site || "the site you pick"}. No daemon connection is made.`
-      : "Enabling will connect this tab to the bridge daemon for a coding agent.";
+  el<HTMLParagraphElement>("tabModeHint").textContent = mode === "webAgent"
+    ? "Open AT Chat and turn on Web connection, then select that chat here. No daemon is needed."
+    : "Connect to a bridge daemon using the settings below.";
 }
 
 function render(status: Status): void {
+  if (!routeInitialized) {
+    pendingTabMode = status.enabled ? status.tabMode ?? "daemon" : "daemon";
+    pendingAgentTabId = status.tabWebAgentTabId === undefined ? "" : String(status.tabWebAgentTabId);
+    pendingWebAgentOrigin = status.tabWebAgentOrigin ?? "";
+    routeInitialized = true;
+  }
   const conn = el<HTMLSpanElement>("conn");
   conn.textContent = status.enabled ? "enabled" : "disabled";
   conn.className = `pill ${status.enabled ? "on" : ""}`;
 
-  el<HTMLButtonElement>("toggle").textContent = status.enabled
-    ? "Disable on this tab"
-    : "Enable on this tab";
+  el<HTMLButtonElement>("toggle").textContent = status.enabled ? "Apply connection" : "Connect this tab";
+  el<HTMLButtonElement>("disconnect").style.display = status.enabled ? "" : "none";
 
   setSettingsInput("host", status.host ?? "127.0.0.1");
   setSettingsInput("port", String(status.port));
@@ -304,15 +295,20 @@ function render(status: Status): void {
   }
   renderWebAgent(status);
   renderTabMode(status);
+  el<HTMLButtonElement>("toggle").disabled = connectionBusy || !pendingTabMode || (pendingTabMode === "webAgent" && !pendingAgentTabId);
   // The picker + CSS-patch panels only matter when the design/selection tools
   // are enabled (otherwise the agent can't act on a selection), so hide them.
   el<HTMLDivElement>("designPanel").style.display = status.designTools ? "" : "none";
-  el<HTMLDivElement>("cssPanel").style.display = status.designTools ? "" : "none";
+  el<HTMLDetailsElement>("cssPanel").style.display = status.designTools ? "" : "none";
   // Host/port/token configure a daemon connection. A tab set to serve the web
   // agent will not make one, so the fields are not merely unused — filling them
   // in would have no effect, and offering them says otherwise.
-  const daemonSettings = !status.enabled && (status.tabMode ?? pendingTabMode) === "daemon";
+  const daemonSettings = pendingTabMode === "daemon";
   el<HTMLDivElement>("settings").style.display = daemonSettings ? "flex" : "none";
+  el<HTMLButtonElement>("openDashboard").style.display = daemonSettings ? "" : "none";
+  el<HTMLElement>("daemonHint").style.display = daemonSettings ? "" : "none";
+  el<HTMLElement>("daemonOptions").style.display = daemonSettings ? "" : "none";
+  el<HTMLElement>("webAgentPanel").style.display = pendingTabMode === "webAgent" && status.webAgentConnected ? "" : "none";
   el<HTMLInputElement>("viewSelection").checked = status.selectionMarkersVisible !== false;
 
   const list = status.providers.map(renderProvider).join("");
@@ -454,26 +450,29 @@ async function main(): Promise<void> {
   if (tabId === undefined) return;
 
   el<HTMLButtonElement>("toggle").addEventListener("click", async () => {
-    const status = await getStatus(tabId);
-    if (!status.enabled && pendingTabMode === "webAgent" && !pendingWebAgentOrigin) {
-      el<HTMLParagraphElement>("tabModeHint").textContent =
-        "Pick which connected site this tab should serve first.";
-      return;
+    if (connectionBusy || !pendingTabMode) return;
+    connectionBusy = true;
+    el<HTMLButtonElement>("toggle").disabled = true;
+    el<HTMLParagraphElement>("connectionError").textContent = "";
+    try {
+      if (pendingTabMode === "daemon") await saveBridge();
+      const reply: RuntimeResponse = await chrome.runtime.sendMessage({
+        type: "setEnabled", tabId, enabled: true, mode: pendingTabMode,
+        origin: pendingWebAgentOrigin,
+        agentTabId: pendingTabMode === "webAgent" && pendingAgentTabId ? Number(pendingAgentTabId) : undefined,
+      });
+      if (!reply?.ok) throw new Error(reply?.error || "Could not connect this tab.");
+    } catch (error) {
+      el<HTMLParagraphElement>("connectionError").textContent = (error as Error).message;
+    } finally {
+      connectionBusy = false;
+      await refresh();
     }
-    // The route rides along with the enable, so the tab comes up on the right
-    // consumer from its very first provider announcement — no socket is dialled
-    // only to be torn down, and there is no window where the tab is live on the
-    // wrong one.
-    const reply: RuntimeResponse = await chrome.runtime.sendMessage({
-      type: "setEnabled",
-      tabId,
-      enabled: !status.enabled,
-      mode: pendingTabMode,
-      origin: pendingWebAgentOrigin,
-    });
-    if (reply?.error) el<HTMLParagraphElement>("tabModeHint").textContent = reply.error;
-    // Give the page a moment to (de)activate + connect, then refresh.
-    setTimeout(refresh, 250);
+  });
+
+  el<HTMLButtonElement>("disconnect").addEventListener("click", async () => {
+    const reply: RuntimeResponse = await chrome.runtime.sendMessage({ type: "setEnabled", tabId, enabled: false });
+    el<HTMLParagraphElement>("connectionError").textContent = reply?.error ?? "";
     await refresh();
   });
 
@@ -484,34 +483,14 @@ async function main(): Promise<void> {
    * visible before the `tabId === undefined` guard above, so TypeScript widens
    * the captured `tabId` back to `number | undefined`.
    */
-  const applyRoute = async (patch: { mode?: "daemon" | "webAgent"; origin?: string }): Promise<void> => {
+  const applyRoute = async (patch: { mode?: "daemon" | "webAgent"; agentTabId?: string }): Promise<void> => {
     if (patch.mode !== undefined) pendingTabMode = patch.mode;
-    if (patch.origin !== undefined) pendingWebAgentOrigin = patch.origin;
-
-    // A tab that is off has no route to set: the choice is spent by the enable
-    // button instead. Telling the worker now would create an entry for a tab
-    // that is not serving anyone.
-    const status = await getStatus(tabId);
-    if (!status.enabled) {
-      render(status);
-      return;
+    if (patch.agentTabId !== undefined) {
+      pendingAgentTabId = patch.agentTabId;
+      pendingWebAgentOrigin = knownWebAgents.find((agent) => String(agent.tabId) === patch.agentTabId)?.origin ?? "";
     }
-
-    const mode = patch.mode ?? status.tabMode ?? "daemon";
-    const origin = patch.origin ?? status.tabWebAgentOrigin ?? pendingWebAgentOrigin;
-    // Switching to web-agent mode with nothing chosen yet is not an error; the
-    // site picker has just appeared and is waiting to be used.
-    if (mode === "webAgent" && !origin) {
-      render(status);
-      return;
-    }
-
-    const reply: RuntimeResponse = await chrome.runtime.sendMessage({ type: "setTabMode", tabId, mode, origin });
-    if (reply?.error) el<HTMLParagraphElement>("tabModeHint").textContent = reply.error;
-    // The page is deactivated and reactivated behind this, so the providers
-    // take a moment to re-announce under the new consumer.
-    setTimeout(refresh, 250);
-    await refresh();
+    el<HTMLParagraphElement>("connectionError").textContent = "";
+    render(await getStatus(tabId));
   };
 
   el<HTMLSelectElement>("tabMode").addEventListener("change", (event) => {
@@ -519,7 +498,7 @@ async function main(): Promise<void> {
   });
 
   el<HTMLSelectElement>("webAgentTarget").addEventListener("change", (event) => {
-    void applyRoute({ origin: (event.target as HTMLSelectElement).value });
+    void applyRoute({ agentTabId: (event.target as HTMLSelectElement).value });
   });
 
   el<HTMLButtonElement>("webAgentToggle").addEventListener("click", async () => {
@@ -529,7 +508,7 @@ async function main(): Promise<void> {
       tabId,
       connected: !status.webAgentConnected,
     });
-    if (reply?.error) el<HTMLParagraphElement>("webAgentHint").textContent = reply.error;
+    el<HTMLParagraphElement>("connectionError").textContent = reply?.error ?? "";
     await refresh();
   });
 
@@ -570,7 +549,8 @@ async function main(): Promise<void> {
   // Identical configs auto-group into one bridge; the most recent one becomes
   // the default new tabs inherit. No manual "custom bridge" toggle needed.
   async function saveBridge(): Promise<void> {
-    await chrome.runtime.sendMessage({ type: "setTabBridge", tabId, ...readBridge() });
+    const reply: RuntimeResponse = await chrome.runtime.sendMessage({ type: "setTabBridge", tabId, ...readBridge() });
+    if (reply?.error) throw new Error(reply.error);
     settingsDirty = false;
     await refresh();
   }

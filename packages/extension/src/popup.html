@@ -253,81 +253,21 @@
       <span id="conn" class="pill">…</span>
     </header>
 
-    <!-- Which consumer this tab's page tools go to. A tab serves one of them:
-         the daemon dials a local port, the web agent is answered in-browser.
-
-         Above the button, and shown while the tab is still off, because it
-         decides what the button is about to do. Choosing after the fact meant
-         enabling into the wrong consumer and then tearing that down — a
-         round-trip with nothing to recommend it over just asking first. -->
+    <!-- Choose the connection type before showing its destination settings. -->
     <div class="field" id="tabModeRow">
-      <label for="tabMode" id="tabModeLabel">Serve</label>
+      <label for="tabMode" id="tabModeLabel">Connect</label>
       <select id="tabMode">
-        <option value="daemon">the bridge daemon</option>
-        <option value="webAgent">a web agent</option>
+        <option value="daemon" selected>Daemon</option>
+        <option value="webAgent">Agent</option>
       </select>
     </div>
 
-    <!-- Both modes name a destination. The daemon's is configured below in
-         Settings; a web agent's is picked from the sites already connected,
-         because approving a site and serving a tab to it are two decisions and
-         only the second one belongs to this tab. -->
-    <div class="field" id="webAgentTargetRow">
-      <label for="webAgentTarget">Site</label>
+    <div class="field" id="webAgentTargetRow" style="display: none">
+      <label for="webAgentTarget">Agent</label>
       <select id="webAgentTarget"></select>
     </div>
 
-    <div class="row">
-      <button id="toggle" class="primary">Enable on this tab</button>
-      <button id="openDashboard">Dashboard ↗</button>
-    </div>
-    <p id="tabModeHint" class="muted"></p>
-
-    <!-- An agent running in this page talks to the extension directly, with no
-         daemon. It is connected per site, here, on the tab being looked at —
-         and until it is, the extension does not answer that site at all.
-
-         Collapsed by default: most people drive this extension from a coding
-         agent and will never connect a site, so this costs one line until it
-         is wanted. The pill stays on the summary, so the state is still
-         readable without opening it. -->
-    <details class="panel" id="webAgentPanel">
-      <summary>
-        <strong>Web agent on this site</strong>
-        <span id="webAgentPill" class="pill">…</span>
-      </summary>
-      <p id="webAgentOrigin" class="muted title"></p>
-      <button id="webAgentToggle" class="full">Connect this site</button>
-      <p id="webAgentHint" class="muted"></p>
-    </details>
-
-    <div class="panel" id="designPanel">
-      <div class="picker-actions">
-        <button id="pickElement">Pick element</button>
-        <button id="addElement">Add another</button>
-        <button id="clearSelection" class="wide">Clear selection</button>
-      </div>
-      <label class="switch-row">
-        <span>View selection</span>
-        <input id="viewSelection" type="checkbox" checked />
-      </label>
-      <div id="selectedElements" class="selection-list"></div>
-      <p id="pickerHint" class="muted">
-        Pick replaces current selection. Add another keeps existing yellow markers.
-      </p>
-    </div>
-
-    <div class="panel" id="cssPanel">
-      <div class="row" style="justify-content: space-between; margin-top: 0">
-        <strong>CSS patches</strong>
-        <button id="clearCssPatches">Clear all</button>
-      </div>
-      <div id="cssPatches" class="selection-list"></div>
-    </div>
-
-    <p id="bridgeSummary" class="muted" style="display: none"></p>
-
-    <div id="settings" class="settings">
+    <div id="settings" class="settings" style="display: none">
       <div class="field" id="recentRow" style="display: none">
         <label for="recentServers">Bridge</label>
         <select id="recentServers"></select>
@@ -360,6 +300,47 @@
       </label>
     </div>
 
+    <p id="tabModeHint" class="muted"></p>
+    <div class="row">
+      <button id="toggle" class="primary" disabled>Connect this tab</button>
+      <button id="disconnect" style="display: none">Disconnect</button>
+      <button id="openDashboard" style="display: none">Dashboard ↗</button>
+    </div>
+    <p id="connectionError" role="alert" style="color: #d32f2f"></p>
+    <p id="bridgeSummary" class="muted" style="display: none"></p>
+
+    <details class="panel" id="webAgentPanel" style="display: none">
+      <summary>
+        <strong>Web agent on this site</strong>
+        <span id="webAgentPill" class="pill">…</span>
+      </summary>
+      <p id="webAgentOrigin" class="muted title"></p>
+      <button id="webAgentToggle" class="full">Disconnect this site</button>
+      <p id="webAgentHint" class="muted"></p>
+    </details>
+
+    <div class="panel" id="designPanel" style="display: none">
+      <div class="picker-actions">
+        <button id="pickElement">Pick element</button>
+        <button id="addElement">Add another</button>
+        <button id="clearSelection" class="wide">Clear selection</button>
+      </div>
+      <label class="switch-row">
+        <span>View selection</span>
+        <input id="viewSelection" type="checkbox" checked />
+      </label>
+      <div id="selectedElements" class="selection-list"></div>
+      <p id="pickerHint" class="muted">
+        Pick replaces current selection. Add another keeps existing yellow markers.
+      </p>
+    </div>
+
+    <details class="panel" id="cssPanel" style="display: none">
+      <summary><strong>CSS patches</strong></summary>
+      <button id="clearCssPatches">Clear all</button>
+      <div id="cssPatches" class="selection-list"></div>
+    </details>
+
     <div class="row">
       <label><input id="coreTools" type="checkbox" checked /> Core tools (default MCPs)</label>
     </div>
@@ -384,17 +365,18 @@
     </div>
     <p id="cdpHint" class="muted">CDP tools require an optional debugger permission.</p>
 
-    <div class="row">
-      <label><input id="browserControl" type="checkbox" /> Browser control (all tabs)</label>
-    </div>
-
-    <div class="row">
-      <label><input id="tabGroups" type="checkbox" /> Group tabs by bridge (visual tab groups)</label>
+    <div id="daemonOptions" style="display: none">
+      <div class="row">
+        <label><input id="browserControl" type="checkbox" /> Browser control (all tabs)</label>
+      </div>
+      <div class="row">
+        <label><input id="tabGroups" type="checkbox" /> Group tabs by bridge (visual tab groups)</label>
+      </div>
     </div>
 
     <div id="providers"></div>
 
-    <p class="muted">
+    <p class="muted" id="daemonHint" style="display: none">
       Run the bridge: <code>npx mcp-page-bridge</code>. Pages expose tools via
       <code>document.modelContext</code> (WebMCP).
     </p>

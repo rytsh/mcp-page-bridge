@@ -11,13 +11,14 @@
 import { EXTENSION_MARK_ATTRIBUTE, MCP_PAGE_BRIDGE_VERSION, type ChannelMessage } from "mcp-page-bridge-protocol";
 import {
   WEB_AGENT_CHANNEL,
+  WEB_AGENT_PROTOCOL_VERSION,
   createWebAgentResponder,
   type WebAgentBackendReply,
   type WebAgentEventName,
   type WebAgentRequest,
 } from "./web-agent.js";
 
-const CONTENT_GUARD_KEY = "__mcpPageBridgeContentV2";
+const CONTENT_GUARD_KEY = "__mcpPageBridgeContentV3";
 const guard = window as unknown as Record<string, unknown>;
 
 /**
@@ -102,7 +103,7 @@ if (!guard[CONTENT_GUARD_KEY]) {
     post: (message, targetOrigin) => window.postMessage(message, targetOrigin),
     ask: (request: WebAgentRequest, origin: string) =>
       new Promise<WebAgentBackendReply>((resolve) => {
-        const sent = guarded(() =>
+        const sent = guarded(() => {
           chrome.runtime.sendMessage(
             { type: "webAgent", method: request.method, params: request.params, origin },
             (reply?: WebAgentBackendReply) => {
@@ -113,8 +114,10 @@ if (!guard[CONTENT_GUARD_KEY]) {
               void chrome.runtime.lastError;
               resolve(reply ?? { silent: true });
             },
-          ),
-        );
+          );
+          // The callback overload returns void even when successfully sent.
+          return true;
+        });
         // An orphaned script never gets a callback, so the promise has to be
         // settled here or the agent waits out its full deadline for an answer
         // that a live sibling script is already giving it.
@@ -122,6 +125,7 @@ if (!guard[CONTENT_GUARD_KEY]) {
       }),
   });
 
+  let agentName = "";
   window.addEventListener("message", (event: MessageEvent) => {
     // Cheap synchronous discriminator. This listener runs on every page, and
     // a busy one posts messages constantly; without it each unrelated message
@@ -129,14 +133,29 @@ if (!guard[CONTENT_GUARD_KEY]) {
     // only ever skip traffic that is not ours.
     const data = event.data as { channel?: unknown } | null;
     if (!data || typeof data !== "object" || data.channel !== WEB_AGENT_CHANNEL) return;
+    if (event.source === window && event.origin === location.origin) {
+      const presence = data as { v?: number; dir?: string; event?: string; name?: string };
+      if (presence.v === WEB_AGENT_PROTOCOL_VERSION && presence.dir === "agent") {
+        if (presence.event === "announce") agentName = String(presence.name || "Web agent").slice(0, 80);
+        if (presence.event === "goodbye") agentName = "";
+        return;
+      }
+    }
     void webAgent.handle(event);
   });
 
   // The worker pushes these when the person connects or disconnects this
   // origin from the popup, so an open tab updates without a reload.
   guarded(() =>
-    chrome.runtime.onMessage.addListener((message: { type?: string; event?: WebAgentEventName }) => {
+    chrome.runtime.onMessage.addListener((message: { type?: string; event?: WebAgentEventName }, _sender, reply) => {
       if (message?.type === "webAgentEvent" && message.event) webAgent.emit(message.event);
+      if (message?.type === "discoverWebAgent") {
+        agentName = "";
+        window.postMessage({ channel: WEB_AGENT_CHANNEL, v: WEB_AGENT_PROTOCOL_VERSION, dir: "agent", event: "discover" }, location.origin);
+        setTimeout(() => reply({ name: agentName }), 100);
+        return true;
+      }
+      return false;
     }),
   );
 

@@ -543,11 +543,21 @@ flowchart LR
     SW <-->|"Port, no socket"| PT
 ```
 
-Connect it once, per site:
+Connect directly to an open chat:
 
-1. Open the web app's tab.
-2. Click the `mcp-page-bridge` extension icon.
-3. Under **Web agent on this site**, click **Connect this site**.
+1. In AT Chat's tools panel, turn on **Web connection** under **Browser extensions**.
+2. Open the tab whose page tools you want to share and click the extension icon.
+3. Choose **Agent**, select the open chat, and click **Connect this tab**.
+4. In AT, enable **MCP Page Bridge** in the browser-extension tool list.
+
+Only open chats answering Web connection discovery appear in the Agent list.
+Turning the switch off or leaving Chat removes it from discovery. The switch is
+per open Chat page and starts off after a reload. Previously approved sites alone
+are not listed as available agents.
+
+For a tab without an active connection, the popup defaults to **Daemon**.
+The **CSS patches** panel starts collapsed and is shown only with Design tools
+enabled.
 
 The app then discovers the extension and can call the browser toolset
 (`list_tabs`, `open_tab`, `activate_tab`, `navigate_tab`, `enable_tab`,
@@ -557,21 +567,22 @@ The app then discovers the extension and can call the browser toolset
 
 Page tools — `take_snapshot`, `click`, `type_text` — live in the tabs
 themselves, and an enabled tab serves **one** consumer: the bridge daemon, or
-**one** connected site. Never two.
+**one** selected chat tab. Never two. Two chats on the same origin are separate
+destinations.
 
 Both modes name a destination, and the popup asks before it acts:
 
 ```
-Serve  [ a web agent ▾ ]
-Site   [ at.example · 2 tabs ▾ ]
-[ Enable on this tab ]
+Connect [ Agent ▾ ]
+Agent   [ AT Chat — at.example (tab 7) ▾ ]
+[ Connect this tab ]
 ```
 
-Picking `the bridge daemon` shows the host/port/token settings instead. The
+Picking **Daemon** shows the host/port/token settings and dashboard instead. The
 choice sits above the enable button and says what that button is about to do,
 so the tab comes up on the right destination from its first provider
 announcement rather than being enabled into one and moved to the other.
-Changing it on an already-enabled tab still works, and moves it. `enable_tab`
+Changing it on an already-enabled tab takes effect with **Apply connection**. `enable_tab`
 and `open_tab` bind the tab to whoever called them, so a web agent that opens a
 tab gets that tab's tools rather than watching it dial a port nobody is
 listening on.
@@ -583,8 +594,8 @@ invalidates the first one's uids. That is as true of two web agents as it is of
 an agent and the daemon, which is why the site is picked per tab rather than
 every connected site seeing every tab.
 
-Disconnecting a site hands its tabs back to the daemon. Leaving them pointed at
-a revoked site would strand them: enabled, no socket, and no agent to answer.
+Disconnecting a site disables its shared tabs; it never silently redirects them
+to a daemon.
 
 Page tools arrive namespaced per tab, exactly as the daemon namespaces them —
 `github__click`, `docs__take_snapshot` — so an agent that has seen the daemon's
@@ -596,15 +607,15 @@ Three properties are deliberate:
   would still confirm the extension is installed, turning this into a
   fingerprinting signal for every site the content script runs on. This is the
   same reasoning behind marking `<html>` only on loopback origins.
-- **Approval is per origin**, given in the popup on the tab you are looking at,
+- **Approval is per origin**, given when connecting to a selected live chat,
   and the service worker takes the origin from `sender`, never from the message.
   The page never touches `chrome.*`; the content script only relays.
 - **The page does not know which consumer it has.** It speaks its normal
   transport either way; the service worker either forwards to a socket or is
   itself the MCP client. One page implementation, two consumers.
-- **Each connected site sees only its own tabs.** `tools/list` is answered from
-  the asking origin, so two agents cannot collide on one tab — and cannot
-  enumerate each other's.
+- **Each selected chat sees its assigned page tools.** Routing checks both the
+  asking origin and its browser-provided tab ID. Legacy origin-only routes retain
+  their old scope until a specific chat is selected.
 
 The protocol is vendor-neutral: the agent broadcasts `describe` and every
 extension implementing it answers with its own id and capabilities, so an app
@@ -616,6 +627,15 @@ can offer several extensions side by side. Envelope (`channel:
 | agent → extension | `{channel, v, dir:"request", id, extension?, method, params?}` |
 | extension → agent | `{channel, v, dir:"response", id, extension, result?, error?}` |
 | extension → agent | `{channel, v, dir:"event", extension, event}` |
+| agent → extension | `{channel, v, dir:"agent", event:"announce", name}` |
+| agent → extension | `{channel, v, dir:"agent", event:"goodbye"}` |
+| extension → agent | `{channel, v, dir:"agent", event:"discover"}` |
+
+While Web connection is enabled, the chat announces itself and answers each
+`discover` probe with `announce`. Disabling/disposal emits `goodbye`. These
+presence messages advertise availability only; selecting and connecting in the
+extension popup grants access. Probing live documents also recovers discovery
+after extension or service-worker restarts.
 
 Methods are `describe`, `tools/list` and `tools/call` (`{name, arguments}`);
 events are `announce`, `tools_changed` and `goodbye`. A request with no
