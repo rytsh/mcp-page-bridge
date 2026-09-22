@@ -523,6 +523,66 @@ More in [DETAILS.md](DETAILS.md#authoring-tools-in-your-own-page); working examp
 [`examples/demo-app`](examples/demo-app) (vanilla) and
 [`examples/svelte-app`](examples/svelte-app) (Svelte 5 runes).
 
+## Web agents — no daemon at all
+
+Everything above assumes the agent is a **separate program**: it reaches the
+browser through the daemon, over stdio or HTTP. When the agent is a **web app
+you already have open** — an in-browser chat that runs its own tool loop — that
+detour buys nothing. It is on the same machine, in the same tab strip, and a
+page and an extension can talk directly.
+
+```mermaid
+flowchart LR
+    WA["Web agent<br/>a chat app in this browser"]
+    CS["content script<br/>(ISOLATED)"]
+    SW["Service worker<br/>browser toolset"]
+
+    WA <-->|"postMessage<br/>at.extension.bridge"| CS
+    CS <-->|"chrome.runtime"| SW
+```
+
+Connect it once, per site:
+
+1. Open the web app's tab.
+2. Click the `mcp-page-bridge` extension icon.
+3. Under **Web agent on this site**, click **Connect this site**.
+
+The app then discovers the extension and can call the browser toolset
+(`list_tabs`, `open_tab`, `activate_tab`, `navigate_tab`, `enable_tab`,
+`close_tab`, `close_agent_tabs`). No daemon, no port, no token.
+
+Three properties are deliberate:
+
+- **An unconnected site is answered with silence**, not a refusal. A refusal
+  would still confirm the extension is installed, turning this into a
+  fingerprinting signal for every site the content script runs on. This is the
+  same reasoning behind marking `<html>` only on loopback origins.
+- **Approval is per origin**, given in the popup on the tab you are looking at,
+  and the service worker takes the origin from `sender`, never from the message.
+  The page never touches `chrome.*`; the content script only relays.
+- **Page tools still come from the daemon.** The web-agent path serves the
+  browser-level toolset. `take_snapshot`, `click` and `type_text` live in the
+  tabs themselves and are aggregated by the daemon, so the descriptor says so
+  rather than letting a short tool list read as a fault.
+
+The protocol is vendor-neutral: the agent broadcasts `describe` and every
+extension implementing it answers with its own id and capabilities, so an app
+can offer several extensions side by side. Envelope (`channel:
+"at.extension.bridge"`, `v: 1`):
+
+| Direction | Shape |
+|---|---|
+| agent → extension | `{channel, v, dir:"request", id, extension?, method, params?}` |
+| extension → agent | `{channel, v, dir:"response", id, extension, result?, error?}` |
+| extension → agent | `{channel, v, dir:"event", extension, event}` |
+
+Methods are `describe`, `tools/list` and `tools/call` (`{name, arguments}`);
+events are `announce`, `tools_changed` and `goodbye`. A request with no
+`extension` field is a broadcast. The implementation is
+[`packages/extension/src/web-agent.ts`](packages/extension/src/web-agent.ts);
+[AT](https://github.com/rakunlabs/at) implements the agent side in its Chats
+surface.
+
 ## More Details
 
 The full list of built-in tools (design/automation/CDP toolsets), advanced WebMCP usage, multi-agent behaviour, security notes, and development details are in [DETAILS.md](DETAILS.md).

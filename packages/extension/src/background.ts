@@ -11,13 +11,31 @@ import {
   MCP_PAGE_BRIDGE_DASHBOARD_ACTIVATE_TAB,
   MCP_PAGE_BRIDGE_DASHBOARD_CLOSE_TAB,
   MCP_PAGE_BRIDGE_READ_FILE,
+  MCP_PAGE_BRIDGE_VERSION,
   type ChannelMessage,
   type ControlAction,
   type ControlPayload,
   type ExtCallPayload,
 } from "mcp-page-bridge-protocol";
 import { BrowserProvider } from "./browser-provider.js";
+import { registerBrowserTools, type BrowserToolDeps } from "./browser-tools.js";
+import { EmbeddedMcpServer } from "./embedded-server.js";
 import { extensionApi, hasDebuggerPermission } from "./extension-api.js";
+import {
+  LoopbackMcpClient,
+  WEB_AGENT_METHOD_CALL_TOOL,
+  WEB_AGENT_METHOD_DESCRIBE,
+  WEB_AGENT_METHOD_LIST_TOOLS,
+  WEB_AGENT_ORIGINS_KEY,
+  addOrigin,
+  normalizeOrigin,
+  originApproved,
+  parseOrigins,
+  removeOrigin,
+  webAgentDescriptor,
+  type WebAgentBackendReply,
+  type WebAgentEventName,
+} from "./web-agent.js";
 import {
   parseProfiles,
   profileLabel,
@@ -166,9 +184,10 @@ function bounceTabSockets(state: TabState): void {
   }
 }
 
-// Optional, opt-in "browser" provider (controls all tabs, not just one page).
-// It is not tab-scoped, so it always talks to the default profile's daemon.
-const browserProvider = new BrowserProvider(() => wsUrl(defaultBridgeProfile()), {
+// The browser-level toolset's dependencies, shared by both consumers: the
+// daemon-connected "browser" provider below and the in-browser web agent. One
+// object, so `enable_tab` means the same thing however the call arrived.
+const browserToolDeps: BrowserToolDeps = {
   enableTab: async (tabId) => {
     const state = await ensureEnabledTab(tabId);
     if (!state) {
@@ -192,13 +211,136 @@ const browserProvider = new BrowserProvider(() => wsUrl(defaultBridgeProfile()),
     for (const tabId of tabIds) set.delete(tabId);
     await saveAgentTabs(set);
   },
-});
+};
+
+// Optional, opt-in "browser" provider (controls all tabs, not just one page).
+// It is not tab-scoped, so it always talks to the default profile's daemon.
+const browserProvider = new BrowserProvider(() => wsUrl(defaultBridgeProfile()), browserToolDeps);
+
+// ---- web agents ---------------------------------------------------------------
+//
+// An agent running inside a web app asks this worker for tools directly — no
+// daemon, no socket. Only origins the person connected from the popup are
+// served, and everything else is answered with silence. See web-agent.ts.
+
+let webAgentOrigins: string[] = [];
+let webAgentMcp: LoopbackMcpClient | undefined;
+
+/**
+ * The web agent's view of the browser toolset.
+ *
+ * Built lazily and kept for the worker's lifetime: it is the same
+ * `EmbeddedMcpServer` the daemon path exposes, reached over a loopback
+ * transport instead of a WebSocket, so both consumers share one registry and
+ * one set of semantics rather than drifting apart.
+ */
+function webAgentClient(): LoopbackMcpClient {
+  if (!webAgentMcp) {
+    const server = new EmbeddedMcpServer({
+      name: "browser",
+      version: MCP_PAGE_BRIDGE_VERSION,
+      title: "Browser control",
+    });
+    registerBrowserTools(server, browserToolDeps);
+    webAgentMcp = new LoopbackMcpClient(server);
+  }
+  return webAgentMcp;
+}
+
+/**
+ * The origin is taken from the sender, never from the message.
+ *
+ * The content script is our own code, but the decision must not rest on a value
+ * the sender chose: `sender.origin` is filled in by the browser. Firefox leaves
+ * it unset, where the document URL is the same guarantee.
+ */
+function senderOrigin(sender: chrome.runtime.MessageSender): string {
+  return normalizeOrigin(sender.origin ?? sender.url ?? "");
+}
+
+/**
+ * Origin of a tab, or `""` when there is not one to speak of.
+ *
+ * A restricted or already-closed tab makes this fail, and that is the ordinary
+ * case rather than an error: the popup renders "no site to connect" from the
+ * empty string. The whole call is guarded because the failure can arrive either
+ * as a rejection or as a throw.
+ */
+async function tabOrigin(tabId: number): Promise<string> {
+  try {
+    return normalizeOrigin((await chrome.tabs.get(tabId))?.url);
+  } catch {
+    return "";
+  }
+}
+
+async function handleWebAgentRequest(
+  req: { method?: string; params?: unknown },
+  origin: string,
+): Promise<WebAgentBackendReply> {
+  // Not connected here: say nothing at all. A refusal would still confirm the
+  // extension is installed, which is what an unconnected origin must not learn.
+  if (!originApproved(origin, webAgentOrigins)) return { silent: true };
+
+  try {
+    switch (req.method) {
+      case WEB_AGENT_METHOD_DESCRIBE:
+        return { result: webAgentDescriptor({ enabledTabs: (await getEnabledSet()).size }) };
+      case WEB_AGENT_METHOD_LIST_TOOLS:
+        return { result: await webAgentClient().listTools() };
+      case WEB_AGENT_METHOD_CALL_TOOL: {
+        const params = (req.params ?? {}) as { name?: unknown; arguments?: unknown };
+        if (typeof params.name !== "string" || !params.name) {
+          return { error: "tools/call needs a tool name" };
+        }
+        const args = (params.arguments ?? {}) as Record<string, unknown>;
+        return { result: await webAgentClient().callTool(params.name, args) };
+      }
+      default:
+        return { error: `unknown method: ${String(req.method)}` };
+    }
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
+ * Tell the open tabs on one origin that their access changed, so a page that is
+ * already open picks it up without a reload — which is what makes connecting
+ * from the popup feel immediate.
+ */
+async function notifyWebAgentTabs(origin: string, event: WebAgentEventName): Promise<void> {
+  if (!origin) return;
+  const all = await chrome.tabs.query({});
+  for (const tab of all) {
+    if (tab.id === undefined || normalizeOrigin(tab.url) !== origin) continue;
+    try {
+      await chrome.tabs.sendMessage(tab.id, { type: "webAgentEvent", event });
+    } catch {
+      // No content script in that tab (restricted page, not yet loaded).
+    }
+  }
+}
+
+async function setWebAgentOrigin(origin: string, connected: boolean): Promise<void> {
+  const normalized = normalizeOrigin(origin);
+  if (!normalized) return;
+  webAgentOrigins = connected
+    ? addOrigin(webAgentOrigins, normalized)
+    : removeOrigin(webAgentOrigins, normalized);
+  await chrome.storage.local.set({ [WEB_AGENT_ORIGINS_KEY]: webAgentOrigins });
+  // `goodbye` first tells the page to stop offering the tools; the agent also
+  // re-checks on its next call, so a missed event cannot leave access behind.
+  void notifyWebAgentTabs(normalized, connected ? "announce" : "goodbye");
+}
 
 void (async () => {
   const v = await chrome.storage.local.get([
     "bridgeProfiles", "defaultProfileId", "host", "port", "token", "secure",
     "browserControl", "coreTools", "designTools", "automationTools", "cdpTools", "trustedInput", "tabGroups",
+    WEB_AGENT_ORIGINS_KEY,
   ]);
+  webAgentOrigins = parseOrigins(v[WEB_AGENT_ORIGINS_KEY]);
   bridgeProfiles = parseProfiles(v.bridgeProfiles);
   defaultProfileId = typeof v.defaultProfileId === "string" ? v.defaultProfileId : "";
   if (!profileById(defaultProfileId)) {
@@ -1926,6 +2068,20 @@ async function runExt(
 // ---- popup messaging ---------------------------------------------------------
 
 chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
+  // Relayed from a content script, which is the one message a tab may send.
+  // It is handled before the guard below precisely because it comes from a
+  // tab, and it is answered only for an origin the person connected.
+  if (req?.type === "webAgent") {
+    if (sender.id !== chrome.runtime.id || !sender.tab) {
+      sendResponse({ silent: true });
+      return false;
+    }
+    void (async () => {
+      sendResponse(await handleWebAgentRequest(req, senderOrigin(sender)));
+    })();
+    return true;
+  }
+
   // Only the extension's own pages (popup) may drive these privileged commands.
   // Reject anything originating from a tab/content script or another extension.
   if (sender.id !== chrome.runtime.id || sender.tab) {
@@ -1958,9 +2114,14 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
         tabCounts.set(cfg.id, (tabCounts.get(cfg.id) ?? 0) + 1);
       }
       const effective = bridgeConfigFor(tabId);
+      // Resolved here rather than in the popup: the popup would have to hold
+      // the tabs permission to read a URL it only wants the origin of.
+      const origin = await tabOrigin(tabId);
       sendResponse({
         enabled: enabledSet.has(tabId),
         connected: !!state,
+        webAgentOrigin: origin,
+        webAgentConnected: originApproved(origin, webAgentOrigins),
         providers,
         host: effective.host,
         port: effective.port,
@@ -1991,6 +2152,17 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
         selectionMarkersVisible: design.selection.markersVisible,
         cssPatches: design.cssPatches,
       });
+      return;
+    }
+
+    if (req?.type === "setWebAgentOrigin") {
+      const origin = await tabOrigin(req.tabId as number);
+      if (!origin) {
+        sendResponse({ ok: false, error: "This page has no origin an extension can be connected to." });
+        return;
+      }
+      await setWebAgentOrigin(origin, !!req.connected);
+      sendResponse({ ok: true });
       return;
     }
 

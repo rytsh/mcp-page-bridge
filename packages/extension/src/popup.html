@@ -211,6 +211,19 @@
       <button id="openDashboard">Dashboard ↗</button>
     </div>
 
+    <!-- An agent running in this page talks to the extension directly, with no
+         daemon. It is connected per site, here, on the tab being looked at —
+         and until it is, the extension does not answer that site at all. -->
+    <div class="panel" id="webAgentPanel">
+      <div class="row" style="justify-content: space-between; margin-top: 0">
+        <strong>Web agent on this site</strong>
+        <span id="webAgentPill" class="pill">…</span>
+      </div>
+      <p id="webAgentOrigin" class="muted title"></p>
+      <button id="webAgentToggle" class="full">Connect this site</button>
+      <p id="webAgentHint" class="muted"></p>
+    </div>
+
     <div class="panel" id="designPanel">
       <div class="picker-actions">
         <button id="pickElement">Pick element</button>

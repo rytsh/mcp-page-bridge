@@ -9,6 +9,13 @@
  * reloaded extension recover from stale content scripts left in an open tab.
  */
 import { EXTENSION_MARK_ATTRIBUTE, MCP_PAGE_BRIDGE_VERSION, type ChannelMessage } from "mcp-page-bridge-protocol";
+import {
+  WEB_AGENT_CHANNEL,
+  createWebAgentResponder,
+  type WebAgentBackendReply,
+  type WebAgentEventName,
+  type WebAgentRequest,
+} from "./web-agent.js";
 
 const CONTENT_GUARD_KEY = "__mcpPageBridgeContentV2";
 const guard = window as unknown as Record<string, unknown>;
@@ -31,6 +38,48 @@ markExtensionForDashboard();
 
 if (!guard[CONTENT_GUARD_KEY]) {
   guard[CONTENT_GUARD_KEY] = true;
+
+  // ---- web agents -------------------------------------------------------
+  //
+  // An agent running in this page asks for tools directly, with no daemon and
+  // no socket. This script only relays: every decision — whether this origin
+  // was ever connected, and what it may see — is made in the service worker,
+  // which is the only context that knows. See web-agent.ts.
+  const webAgent = createWebAgentResponder({
+    origin: location.origin,
+    self: window,
+    post: (message, targetOrigin) => window.postMessage(message, targetOrigin),
+    ask: (request: WebAgentRequest, origin: string) =>
+      new Promise<WebAgentBackendReply>((resolve) => {
+        chrome.runtime.sendMessage(
+          { type: "webAgent", method: request.method, params: request.params, origin },
+          (reply?: WebAgentBackendReply) => {
+            // A recycled service worker answers `undefined` with
+            // lastError set. Staying silent is right for both cases: an
+            // unapproved origin learns nothing either way, and the agent's
+            // own deadline reports the failure it can act on.
+            void chrome.runtime.lastError;
+            resolve(reply ?? { silent: true });
+          },
+        );
+      }),
+  });
+
+  window.addEventListener("message", (event: MessageEvent) => {
+    // Cheap synchronous discriminator. This listener runs on every page, and
+    // a busy one posts messages constantly; without it each unrelated message
+    // would allocate a promise. `handle` re-checks everything, so this can
+    // only ever skip traffic that is not ours.
+    const data = event.data as { channel?: unknown } | null;
+    if (!data || typeof data !== "object" || data.channel !== WEB_AGENT_CHANNEL) return;
+    void webAgent.handle(event);
+  });
+
+  // The worker pushes these when the person connects or disconnects this
+  // origin from the popup, so an open tab updates without a reload.
+  chrome.runtime.onMessage.addListener((message: { type?: string; event?: WebAgentEventName }) => {
+    if (message?.type === "webAgentEvent" && message.event) webAgent.emit(message.event);
+  });
 
   const isChannelMessage = (value: unknown): value is ChannelMessage =>
     !!value && typeof value === "object" && (value as { __mcpPageBridge?: unknown }).__mcpPageBridge === true;

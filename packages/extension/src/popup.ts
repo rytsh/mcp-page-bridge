@@ -45,6 +45,10 @@ interface Status {
   selectedElements?: SelectedElementStatus[];
   selectionMarkersVisible?: boolean;
   cssPatches?: CssPatchStatus[];
+  /** Origin of the active tab, or "" for a page that cannot have one. */
+  webAgentOrigin?: string;
+  /** Whether an agent on that origin may ask this extension for tools. */
+  webAgentConnected?: boolean;
 }
 
 interface SelectedElementStatus {
@@ -151,6 +155,31 @@ async function getStatus(tabId: number): Promise<Status> {
   return chrome.runtime.sendMessage({ type: "getStatus", tabId });
 }
 
+/**
+ * The per-site switch for an agent running in the page itself.
+ *
+ * Until the site is connected the extension does not answer it at all — not
+ * even to say it exists — so this panel is the only place the connection can
+ * be made, and it is deliberately about the site in front of the person rather
+ * than a list of origins typed in from memory.
+ */
+function renderWebAgent(status: Status): void {
+  const origin = status.webAgentOrigin ?? "";
+  const connected = !!status.webAgentConnected;
+  const pill = el<HTMLSpanElement>("webAgentPill");
+  const button = el<HTMLButtonElement>("webAgentToggle");
+
+  el<HTMLParagraphElement>("webAgentOrigin").textContent = origin || "This page has no site to connect.";
+  pill.textContent = origin ? (connected ? "connected" : "not connected") : "unavailable";
+  pill.className = `pill ${connected ? "on" : ""}`;
+  button.disabled = !origin;
+  button.textContent = connected ? "Disconnect this site" : "Connect this site";
+  button.className = connected ? "full" : "full primary";
+  el<HTMLParagraphElement>("webAgentHint").textContent = connected
+    ? "An agent on this site can list this extension and call its browser tools. It still asks you to approve the tools on its own side."
+    : "Connect a site whose agent should use this browser — an AT Chats tab, for example. No daemon is needed, and other sites are not told this extension exists.";
+}
+
 function render(status: Status): void {
   const conn = el<HTMLSpanElement>("conn");
   conn.textContent = status.enabled ? "enabled" : "disabled";
@@ -189,6 +218,7 @@ function render(status: Status): void {
     el<HTMLParagraphElement>("cdpHint").textContent = "Unavailable in Firefox: this browser does not support the debugger API.";
     el<HTMLParagraphElement>("trustedInputHint").textContent = "Unavailable in Firefox: trusted input requires the debugger API. Input uses synthetic DOM events (isTrusted:false).";
   }
+  renderWebAgent(status);
   // The picker + CSS-patch panels only matter when the design/selection tools
   // are enabled (otherwise the agent can't act on a selection), so hide them.
   el<HTMLDivElement>("designPanel").style.display = status.designTools ? "" : "none";
@@ -290,6 +320,17 @@ async function main(): Promise<void> {
     await chrome.runtime.sendMessage({ type: "setEnabled", tabId, enabled: !status.enabled });
     // Give the page a moment to (de)activate + connect, then refresh.
     setTimeout(refresh, 250);
+    await refresh();
+  });
+
+  el<HTMLButtonElement>("webAgentToggle").addEventListener("click", async () => {
+    const status = await getStatus(tabId);
+    const reply: RuntimeResponse = await chrome.runtime.sendMessage({
+      type: "setWebAgentOrigin",
+      tabId,
+      connected: !status.webAgentConnected,
+    });
+    if (reply?.error) el<HTMLParagraphElement>("webAgentHint").textContent = reply.error;
     await refresh();
   });
 
