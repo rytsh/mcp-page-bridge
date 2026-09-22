@@ -58,8 +58,18 @@ export const WEB_AGENT_METHOD_CALL_TOOL = "tools/call";
 /** `chrome.storage.local` key holding the origins the user connected. */
 export const WEB_AGENT_ORIGINS_KEY = "webAgentOrigins";
 
+/** `chrome.storage.session` key holding the per-tab routing choice. */
+export const TAB_MODE_KEY = "tabModes";
+
+/** Upper bound on remembered per-tab routes, mirroring the origin cap. */
+const MAX_ROUTES = 256;
+
 /** Upper bound on remembered origins, so the list cannot grow without limit. */
 const MAX_ORIGINS = 32;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
 
 // ---- origins -----------------------------------------------------------------
 
@@ -109,6 +119,99 @@ export function removeOrigin(approved: string[], origin: string): string[] {
   return approved.filter((o) => o !== normalized);
 }
 
+// ---- tab mode ----------------------------------------------------------------
+
+/**
+ * Who an enabled tab's page tools are served to.
+ *
+ * A tab hosts one MCP server and one set of uid-bearing DOM state, and the two
+ * consumers drive it in ways that do not compose: the daemon expects to own the
+ * `initialize` handshake on a socket it can bounce, while a web agent expects
+ * synchronous in-worker calls. Serving both at once would mean two clients
+ * interleaving `take_snapshot` and `click` against one uid registry, where the
+ * second snapshot silently invalidates the first one's uids. So the tab picks
+ * one, and the popup says which.
+ *
+ * `"daemon"` is the default because it is what the extension was for, and
+ * because an unattended tab dialling a local port is the behaviour every
+ * existing install already depends on.
+ */
+export type TabMode = "daemon" | "webAgent";
+
+export const TAB_MODE_DAEMON: TabMode = "daemon";
+export const TAB_MODE_WEB_AGENT: TabMode = "webAgent";
+
+export function isTabMode(value: unknown): value is TabMode {
+  return value === TAB_MODE_DAEMON || value === TAB_MODE_WEB_AGENT;
+}
+
+/**
+ * Where an enabled tab's page tools go.
+ *
+ * Both modes name a destination, and saying so in one shape keeps them from
+ * drifting into two half-explained features: a daemon tab targets a bridge
+ * profile, a web-agent tab targets one connected origin. The alternative —
+ * serving every connected origin at once — puts two agents on one uid registry,
+ * which is the same thing the mode itself exists to prevent, one level up.
+ *
+ * `origin` is only meaningful for `webAgent`, and is `""` for a daemon tab. A
+ * `webAgent` route whose origin has since been disconnected serves nobody,
+ * which is the correct reading: the person revoked that site.
+ */
+export interface TabRoute {
+  mode: TabMode;
+  /** For `webAgent`: the single origin served. Empty for `daemon`. */
+  origin: string;
+}
+
+export function daemonRoute(): TabRoute {
+  return { mode: TAB_MODE_DAEMON, origin: "" };
+}
+
+export function webAgentRoute(origin: string): TabRoute {
+  return { mode: TAB_MODE_WEB_AGENT, origin: normalizeOrigin(origin) };
+}
+
+/**
+ * Reads one route, or `null` when it is not one we can honour.
+ *
+ * A `webAgent` entry without a usable origin is rejected rather than downgraded
+ * to `daemon`: silently redirecting a tab to a local port is exactly the
+ * surprise this whole mechanism is meant to remove.
+ */
+export function parseTabRoute(value: unknown): TabRoute | null {
+  // Tolerated for one upgrade: earlier builds stored a bare mode string.
+  if (isTabMode(value)) return value === TAB_MODE_DAEMON ? daemonRoute() : null;
+  if (!isRecord(value)) return null;
+  const { mode, origin } = value;
+  if (!isTabMode(mode)) return null;
+  if (mode === TAB_MODE_DAEMON) return daemonRoute();
+  const normalized = normalizeOrigin(typeof origin === "string" ? origin : "");
+  return normalized ? { mode: TAB_MODE_WEB_AGENT, origin: normalized } : null;
+}
+
+/** Reads the persisted `tabId -> route` map, dropping anything malformed. */
+export function parseTabModes(value: unknown): Map<number, TabRoute> {
+  const out = new Map<number, TabRoute>();
+  if (!isRecord(value)) return out;
+  for (const [key, entry] of Object.entries(value)) {
+    if (out.size >= MAX_ROUTES) break;
+    const tabId = Number(key);
+    // Only a real tab id, and only a route we still understand: a stale entry
+    // from an older build must not decide how a tab behaves today.
+    if (!Number.isInteger(tabId)) continue;
+    const route = parseTabRoute(entry);
+    if (route) out.set(tabId, route);
+  }
+  return out;
+}
+
+export function serializeTabModes(modes: Map<number, TabRoute>): Record<string, TabRoute> {
+  const out: Record<string, TabRoute> = {};
+  for (const [tabId, route] of modes) out[String(tabId)] = route;
+  return out;
+}
+
 // ---- envelope ----------------------------------------------------------------
 
 export interface WebAgentRequest {
@@ -117,10 +220,6 @@ export interface WebAgentRequest {
   params: unknown;
   /** Present when the agent addressed one extension; absent on a broadcast. */
   extension: string;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
 /**
@@ -179,30 +278,43 @@ export function webAgentEvent(event: WebAgentEventName): Record<string, unknown>
 // ---- descriptor --------------------------------------------------------------
 
 export interface DescriptorInput {
-  /** Tabs currently enabled for the daemon path; reported as context only. */
+  /** Tabs enabled at all, whatever they are pointed at. */
   enabledTabs: number;
+  /** Of those, the ones pointed at *this* agent. */
+  webAgentTabs: number;
 }
 
 /**
  * What the web agent lists in its extension picker.
  *
  * `notice` is rendered verbatim and exists so a connected extension that is
- * offering little does not read as broken. Today this path serves the
- * browser-level toolset (tabs); the page toolset still arrives through the
- * daemon, and saying so is better than letting the reader wonder where `click`
- * went.
+ * offering little does not read as broken. The browser toolset is always here;
+ * page tools depend on a tab having been pointed at this agent specifically,
+ * and the three cases below are genuinely different problems, so they get
+ * different sentences instead of one hedge covering all of them.
  */
 export function webAgentDescriptor(input: DescriptorInput): Record<string, unknown> {
+  const notice = (): string => {
+    if (input.webAgentTabs > 0) return "";
+    if (input.enabledTabs > 0) {
+      // The usual near-miss: tabs are enabled, but pointed elsewhere — at the
+      // daemon, or at another connected site. Naming the fix is the whole value
+      // of the message, and it is the same fix either way.
+      return `Page tools are unavailable: ${input.enabledTabs} enabled ${
+        input.enabledTabs === 1 ? "tab is" : "tabs are"
+      } serving something else. In the extension popup, set a tab to serve this site.`;
+    }
+    return "No tab is enabled. Use open_tab or enable_tab, or enable one from the extension popup with this site chosen, to get its page tools.";
+  };
+
   return {
     id: WEB_AGENT_EXTENSION_ID,
     name: "MCP Page Bridge",
     version: MCP_PAGE_BRIDGE_VERSION,
     capabilities: [WEB_AGENT_CAPABILITY_TOOLS],
-    description: "Browser control: list, open, activate, navigate and close tabs from this browser.",
-    notice:
-      input.enabledTabs > 0
-        ? ""
-        : "Page tools (snapshot, click, type) come from tabs enabled for the bridge daemon. Browser tools work without it.",
+    description:
+      "Browser control: list, open, activate, navigate and close tabs. Tabs set to serve this web agent also expose their page tools (snapshot, click, type).",
+    notice: notice(),
   };
 }
 

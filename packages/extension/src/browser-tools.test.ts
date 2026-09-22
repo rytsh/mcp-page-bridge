@@ -52,9 +52,9 @@ const deps = {
   },
 };
 
-async function setup() {
+async function setup(overrides: Partial<typeof deps> & { enabledNote?: string } = {}) {
   const server = new EmbeddedMcpServer({ name: "browser", version: "1.0.0" });
-  registerBrowserTools(server, deps);
+  registerBrowserTools(server, { ...deps, ...overrides });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   await server.connect(st as unknown as MinimalTransport);
   const client = new Client({ name: "t", version: "0" }, { capabilities: {} });
@@ -122,5 +122,28 @@ describe("browser-level tools", () => {
     const client = await setup();
     await client.callTool({ name: "close_tab", arguments: { tabId: 2 } });
     expect(removed).toContain(2);
+  });
+
+  // An enabled tab's page tools are reached differently depending on who asked:
+  // a coding agent queries the daemon's catalog, a web agent re-lists this
+  // extension. Pointing either at the other's catalog is a dead end, so the
+  // note belongs to the consumer that wired the deps rather than to the tool.
+  it("tells the caller where to find the tools in that caller's own terms", async () => {
+    const daemon = await setup({ enabledNote: "call mcp_page_bridge_list_clients to see it." });
+    const viaDaemon = JSON.parse(
+      textOf(await daemon.callTool({ name: "enable_tab", arguments: { tabId: 1 } })),
+    );
+    expect(viaDaemon).toMatchObject({ enabled: true });
+    expect(viaDaemon.note).toContain("mcp_page_bridge_list_clients");
+
+    const web = await setup({ enabledNote: "call tools/list again to see its page tools." });
+    const viaWeb = JSON.parse(textOf(await web.callTool({ name: "enable_tab", arguments: { tabId: 1 } })));
+    expect(viaWeb.note).toContain("tools/list");
+    expect(viaWeb.note).not.toContain("mcp_page_bridge_list_clients");
+
+    // A failure still reports the failure, not the consumer's happy path.
+    const failed = JSON.parse(textOf(await web.callTool({ name: "enable_tab", arguments: { tabId: 3 } })));
+    expect(failed).toMatchObject({ enabled: false });
+    expect(failed.note).toContain("restricted page");
   });
 });

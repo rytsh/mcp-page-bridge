@@ -535,10 +535,12 @@ page and an extension can talk directly.
 flowchart LR
     WA["Web agent<br/>a chat app in this browser"]
     CS["content script<br/>(ISOLATED)"]
-    SW["Service worker<br/>browser toolset"]
+    SW["Service worker<br/>browser toolset<br/>+ page tools of web-agent tabs"]
+    PT["An enabled tab<br/>set to serve the web agent"]
 
     WA <-->|"postMessage<br/>at.extension.bridge"| CS
     CS <-->|"chrome.runtime"| SW
+    SW <-->|"Port, no socket"| PT
 ```
 
 Connect it once, per site:
@@ -551,6 +553,43 @@ The app then discovers the extension and can call the browser toolset
 (`list_tabs`, `open_tab`, `activate_tab`, `navigate_tab`, `enable_tab`,
 `close_tab`, `close_agent_tabs`). No daemon, no port, no token.
 
+### A tab serves exactly one destination
+
+Page tools — `take_snapshot`, `click`, `type_text` — live in the tabs
+themselves, and an enabled tab serves **one** consumer: the bridge daemon, or
+**one** connected site. Never two.
+
+Both modes name a destination, and the popup asks before it acts:
+
+```
+Serve  [ a web agent ▾ ]
+Site   [ at.example · 2 tabs ▾ ]
+[ Enable on this tab ]
+```
+
+Picking `the bridge daemon` shows the host/port/token settings instead. The
+choice sits above the enable button and says what that button is about to do,
+so the tab comes up on the right destination from its first provider
+announcement rather than being enabled into one and moved to the other.
+Changing it on an already-enabled tab still works, and moves it. `enable_tab`
+and `open_tab` bind the tab to whoever called them, so a web agent that opens a
+tab gets that tab's tools rather than watching it dial a port nobody is
+listening on.
+
+Destinations do not compose, which is why this is a choice rather than a
+broadcast: a tab has one uid registry, and two clients interleaving
+`take_snapshot` and `click` against it means the second snapshot silently
+invalidates the first one's uids. That is as true of two web agents as it is of
+an agent and the daemon, which is why the site is picked per tab rather than
+every connected site seeing every tab.
+
+Disconnecting a site hands its tabs back to the daemon. Leaving them pointed at
+a revoked site would strand them: enabled, no socket, and no agent to answer.
+
+Page tools arrive namespaced per tab, exactly as the daemon namespaces them —
+`github__click`, `docs__take_snapshot` — so an agent that has seen the daemon's
+catalog reads this one without relearning anything.
+
 Three properties are deliberate:
 
 - **An unconnected site is answered with silence**, not a refusal. A refusal
@@ -560,10 +599,12 @@ Three properties are deliberate:
 - **Approval is per origin**, given in the popup on the tab you are looking at,
   and the service worker takes the origin from `sender`, never from the message.
   The page never touches `chrome.*`; the content script only relays.
-- **Page tools still come from the daemon.** The web-agent path serves the
-  browser-level toolset. `take_snapshot`, `click` and `type_text` live in the
-  tabs themselves and are aggregated by the daemon, so the descriptor says so
-  rather than letting a short tool list read as a fault.
+- **The page does not know which consumer it has.** It speaks its normal
+  transport either way; the service worker either forwards to a socket or is
+  itself the MCP client. One page implementation, two consumers.
+- **Each connected site sees only its own tabs.** `tools/list` is answered from
+  the asking origin, so two agents cannot collide on one tab — and cannot
+  enumerate each other's.
 
 The protocol is vendor-neutral: the agent broadcasts `describe` and every
 extension implementing it answers with its own id and capabilities, so an app
@@ -578,7 +619,11 @@ can offer several extensions side by side. Envelope (`channel:
 
 Methods are `describe`, `tools/list` and `tools/call` (`{name, arguments}`);
 events are `announce`, `tools_changed` and `goodbye`. A request with no
-`extension` field is a broadcast. The implementation is
+`extension` field is a broadcast. `tools_changed` reaches the sites whose tabs
+actually changed — enabled, disabled, closed or re-pointed — so an agent holding
+a listed catalog is told when it went stale, and is not woken by a change to
+somebody else's tabs.
+The implementation is
 [`packages/extension/src/web-agent.ts`](packages/extension/src/web-agent.ts);
 [AT](https://github.com/rakunlabs/at) implements the agent side in its Chats
 surface.

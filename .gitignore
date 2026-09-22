@@ -12,4 +12,4 @@ packages/extension/.output/
 # Local, machine-specific opencode config used for manual testing
 /opencode.json
 /opencode.jsonc
-/mcp-page-bridge
+/mcp-page-bridge*

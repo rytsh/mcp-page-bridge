@@ -93,7 +93,17 @@
         width: 46px;
         opacity: 0.8;
       }
-      .field input {
+      /* "Serve" / "Serving" both have to sit on one line, and the word is wider
+         than the 46px the host/port fields are aligned to. These are their own
+         rows, so widening the label costs that alignment nothing. The two share
+         a width so the dropdowns below each other line up. */
+      #tabModeRow label,
+      #webAgentTargetRow label {
+        width: 52px;
+        flex: 0 0 auto;
+      }
+      .field input,
+      .field select {
         flex: 1;
         min-width: 0;
       }
@@ -188,6 +198,11 @@
         border: 1px solid #8883;
         border-radius: 8px;
         margin-bottom: 5px;
+        /* The popup is a fixed 320px and a URL has no spaces to wrap at, so
+           without this a long one widens the row and the whole body scrolls
+           sideways. Children still elide; this stops the row itself growing. */
+        min-width: 0;
+        overflow: hidden;
       }
       .muted {
         opacity: 0.6;
@@ -197,6 +212,38 @@
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+        /* Ellipsis only happens if the box is allowed to be narrower than its
+           content, which a flex/grid child is not by default. */
+        min-width: 0;
+      }
+      /* A panel that stays shut until asked for. The marker is the only
+         affordance, so the summary must still read as a row: the pill sits at
+         the far end exactly as it does in an always-open panel. */
+      details.panel > summary {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        cursor: pointer;
+        list-style: none;
+        user-select: none;
+      }
+      details.panel > summary::-webkit-details-marker {
+        display: none;
+      }
+      details.panel > summary::after {
+        content: "▸";
+        opacity: 0.5;
+        font-size: 10px;
+      }
+      details.panel[open] > summary::after {
+        content: "▾";
+      }
+      details.panel > summary strong {
+        flex: 1;
+      }
+      details.panel[open] > summary {
+        margin-bottom: 8px;
       }
     </style>
   </head>
@@ -206,23 +253,53 @@
       <span id="conn" class="pill">…</span>
     </header>
 
+    <!-- Which consumer this tab's page tools go to. A tab serves one of them:
+         the daemon dials a local port, the web agent is answered in-browser.
+
+         Above the button, and shown while the tab is still off, because it
+         decides what the button is about to do. Choosing after the fact meant
+         enabling into the wrong consumer and then tearing that down — a
+         round-trip with nothing to recommend it over just asking first. -->
+    <div class="field" id="tabModeRow">
+      <label for="tabMode" id="tabModeLabel">Serve</label>
+      <select id="tabMode">
+        <option value="daemon">the bridge daemon</option>
+        <option value="webAgent">a web agent</option>
+      </select>
+    </div>
+
+    <!-- Both modes name a destination. The daemon's is configured below in
+         Settings; a web agent's is picked from the sites already connected,
+         because approving a site and serving a tab to it are two decisions and
+         only the second one belongs to this tab. -->
+    <div class="field" id="webAgentTargetRow">
+      <label for="webAgentTarget">Site</label>
+      <select id="webAgentTarget"></select>
+    </div>
+
     <div class="row">
       <button id="toggle" class="primary">Enable on this tab</button>
       <button id="openDashboard">Dashboard ↗</button>
     </div>
+    <p id="tabModeHint" class="muted"></p>
 
     <!-- An agent running in this page talks to the extension directly, with no
          daemon. It is connected per site, here, on the tab being looked at —
-         and until it is, the extension does not answer that site at all. -->
-    <div class="panel" id="webAgentPanel">
-      <div class="row" style="justify-content: space-between; margin-top: 0">
+         and until it is, the extension does not answer that site at all.
+
+         Collapsed by default: most people drive this extension from a coding
+         agent and will never connect a site, so this costs one line until it
+         is wanted. The pill stays on the summary, so the state is still
+         readable without opening it. -->
+    <details class="panel" id="webAgentPanel">
+      <summary>
         <strong>Web agent on this site</strong>
         <span id="webAgentPill" class="pill">…</span>
-      </div>
+      </summary>
       <p id="webAgentOrigin" class="muted title"></p>
       <button id="webAgentToggle" class="full">Connect this site</button>
       <p id="webAgentHint" class="muted"></p>
-    </div>
+    </details>
 
     <div class="panel" id="designPanel">
       <div class="picker-actions">

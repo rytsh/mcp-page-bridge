@@ -23,6 +23,14 @@ function json(v: unknown): ToolResult {
 export interface BrowserToolDeps {
   /** Enable the bridge on a tab (same path as the popup's toggle). */
   enableTab(tabId: number): Promise<boolean>;
+  /**
+   * How this consumer finds the page tools of a tab it just enabled.
+   *
+   * The two differ: a coding agent asks the daemon's catalog, a web agent
+   * re-lists this extension's tools. Sending either one after the other's
+   * catalog is a dead end, so the answer comes from whoever wired these deps.
+   */
+  enabledNote?: string;
   /** Is the bridge enabled on this tab? */
   isTabEnabled(tabId: number): Promise<boolean>;
   /** Remember/forget/list tabs this agent opened. */
@@ -92,7 +100,7 @@ export function registerBrowserTools(server: EmbeddedMcpServer, deps: BrowserToo
         enabled,
         openedByAgent: true,
         note: enabled
-          ? "Page tools for this tab are namespaced by its label; call mcp_page_bridge_list_clients to see it."
+          ? deps.enabledNote
           : "Could not enable the bridge on this tab (restricted page, or it is still loading).",
       });
     },
@@ -149,7 +157,9 @@ export function registerBrowserTools(server: EmbeddedMcpServer, deps: BrowserToo
       return json({
         tabId,
         enabled,
-        note: enabled ? undefined : "Could not enable the bridge (restricted page such as chrome:// or the Web Store).",
+        note: enabled
+          ? deps.enabledNote
+          : "Could not enable the bridge (restricted page such as chrome:// or the Web Store).",
       });
     },
   );

@@ -49,6 +49,17 @@ interface Status {
   webAgentOrigin?: string;
   /** Whether an agent on that origin may ask this extension for tools. */
   webAgentConnected?: boolean;
+  /** Which consumer this tab's page tools are served to. */
+  tabMode?: "daemon" | "webAgent";
+  /** For a webAgent tab, the connected site it serves. */
+  tabWebAgentOrigin?: string;
+  /** Sites connected for web agents, with how many tabs each already serves. */
+  webAgents?: WebAgentStatus[];
+}
+
+interface WebAgentStatus {
+  origin: string;
+  tabs: number;
 }
 
 interface SelectedElementStatus {
@@ -88,6 +99,20 @@ let settingsDirty = false;
 
 /** Latest profile list from getStatus; backs the recent-servers dropdown. */
 let knownProfiles: ProfileStatus[] = [];
+
+/**
+ * The consumer a *disabled* tab will be enabled into.
+ *
+ * A tab that is off has no mode in the worker — there is nothing to hold one
+ * for — so the choice lives here until the enable button spends it. Kept out of
+ * storage deliberately: it is the state of this popup session, and a stale
+ * intent silently applying to some later tab is exactly the confusion the
+ * explicit choice is meant to remove.
+ */
+let pendingTabMode: "daemon" | "webAgent" = "daemon";
+
+/** The site a disabled tab will be enabled into; "" until one is picked. */
+let pendingWebAgentOrigin = "";
 
 function setSettingsInput(id: "host" | "port" | "token" | "profileKey", value: string): void {
   const input = el<HTMLInputElement>(id);
@@ -133,7 +158,9 @@ function renderRecentServers(status: Status): void {
 
 function renderBridgeSummary(status: Status): void {
   const summary = el<HTMLParagraphElement>("bridgeSummary");
-  if (!status.enabled) {
+  // A web-agent tab has no bridge. Reporting one it is not using — and could
+  // not be reached on — is the kind of detail that reads as a live connection.
+  if (!status.enabled || status.tabMode === "webAgent") {
     summary.style.display = "none";
     return;
   }
@@ -180,6 +207,63 @@ function renderWebAgent(status: Status): void {
     : "Connect a site whose agent should use this browser — an AT Chats tab, for example. No daemon is needed, and other sites are not told this extension exists.";
 }
 
+/**
+ * Which consumer this tab's page tools are served to.
+ *
+ * Shown whether or not the tab is enabled, because it is the choice the enable
+ * button acts on. While the tab is off this is a pending intent and nothing has
+ * happened yet; once it is on, changing it moves a live tab and the wording
+ * says so.
+ *
+ * The hint names the consequence rather than the mechanism, because the failure
+ * it prevents is the quiet one — a tab switched on for an in-browser agent that
+ * instead sits retrying a local port nobody is listening on.
+ */
+function renderTabMode(status: Status): void {
+  const select = el<HTMLSelectElement>("tabMode");
+  const target = el<HTMLSelectElement>("webAgentTarget");
+  const mode = status.tabMode ?? pendingTabMode;
+  const sites = status.webAgents ?? [];
+  const chosen = status.tabWebAgentOrigin || pendingWebAgentOrigin;
+
+  el<HTMLLabelElement>("tabModeLabel").textContent = status.enabled ? "Serving" : "Serve";
+  // Never clobber a selection mid-interaction: the 1.5s poll would otherwise
+  // snap a dropdown back while it is open.
+  if (document.activeElement !== select) select.value = mode;
+
+  // The site picker only exists for the web-agent mode; in daemon mode the
+  // destination is the bridge configured in Settings.
+  el<HTMLDivElement>("webAgentTargetRow").style.display = mode === "webAgent" ? "" : "none";
+
+  if (mode === "webAgent" && document.activeElement !== target) {
+    const options = sites.length
+      ? sites.map((site) => {
+          const label = shortUrl(site.origin);
+          const suffix = site.tabs ? ` · ${site.tabs} tab${site.tabs > 1 ? "s" : ""}` : "";
+          return `<option value="${escapeHtml(site.origin)}">${escapeHtml(label + suffix)}</option>`;
+        })
+      : [`<option value="">No connected sites</option>`];
+    target.innerHTML = options.join("");
+    // Default to the only candidate rather than making the person choose from
+    // a list of one — but never invent a choice when there are several.
+    const fallback = sites.length === 1 ? sites[0]!.origin : "";
+    target.value = sites.some((s) => s.origin === chosen) ? chosen : fallback;
+    target.disabled = sites.length === 0;
+    if (!status.enabled) pendingWebAgentOrigin = target.value;
+  }
+
+  const site = target.value ? shortUrl(target.value) : "";
+  el<HTMLParagraphElement>("tabModeHint").textContent = status.enabled
+    ? mode === "webAgent"
+      ? `This tab's page tools go to ${site || "a connected site"}. No daemon connection is made.`
+      : "This tab connects to the bridge daemon for a coding agent. Its page tools are not offered to web agents."
+    : mode === "webAgent"
+      ? sites.length === 0
+        ? "No sites are connected yet. Open the web agent's tab and connect it below, then come back here."
+        : `Enabling will serve this tab's page tools to ${site || "the site you pick"}. No daemon connection is made.`
+      : "Enabling will connect this tab to the bridge daemon for a coding agent.";
+}
+
 function render(status: Status): void {
   const conn = el<HTMLSpanElement>("conn");
   conn.textContent = status.enabled ? "enabled" : "disabled";
@@ -219,21 +303,19 @@ function render(status: Status): void {
     el<HTMLParagraphElement>("trustedInputHint").textContent = "Unavailable in Firefox: trusted input requires the debugger API. Input uses synthetic DOM events (isTrusted:false).";
   }
   renderWebAgent(status);
+  renderTabMode(status);
   // The picker + CSS-patch panels only matter when the design/selection tools
   // are enabled (otherwise the agent can't act on a selection), so hide them.
   el<HTMLDivElement>("designPanel").style.display = status.designTools ? "" : "none";
   el<HTMLDivElement>("cssPanel").style.display = status.designTools ? "" : "none";
-  el<HTMLDivElement>("settings").style.display = status.enabled ? "none" : "flex";
+  // Host/port/token configure a daemon connection. A tab set to serve the web
+  // agent will not make one, so the fields are not merely unused — filling them
+  // in would have no effect, and offering them says otherwise.
+  const daemonSettings = !status.enabled && (status.tabMode ?? pendingTabMode) === "daemon";
+  el<HTMLDivElement>("settings").style.display = daemonSettings ? "flex" : "none";
   el<HTMLInputElement>("viewSelection").checked = status.selectionMarkersVisible !== false;
 
-  const list = status.providers
-    .map(
-      (p) => `<li>
-        <div class="title">${escapeHtml(p.title || p.url || p.id)}</div>
-        <div class="muted">${p.open ? "● connected" : "○ connecting"} — ${escapeHtml(p.url || "")}</div>
-      </li>`,
-    )
-    .join("");
+  const list = status.providers.map(renderProvider).join("");
 
   el<HTMLDivElement>("providers").innerHTML = status.enabled
     ? status.providers.length
@@ -251,6 +333,62 @@ function render(status: Status): void {
   el<HTMLDivElement>("cssPatches").innerHTML = patches.length
     ? `<ul>${patches.map(renderCssPatch).join("")}</ul>`
     : `<p class="muted">No temporary CSS patches.</p>`;
+}
+
+/**
+ * Shortens a URL to what identifies the page in a 320px popup.
+ *
+ * The host is the part that says *where* this provider is, and it is the part a
+ * long URL pushes out of view, so it leads. The path is kept only if it fits,
+ * elided from the middle when it does not: the tail of a path is usually the
+ * page (`/pull/1423`), while the middle is usually scaffolding.
+ */
+const URL_BUDGET = 42;
+
+function shortUrl(raw: string): string {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return raw;
+  }
+
+  let host = url.host.replace(/^www\./, "");
+  // A deep corporate subdomain can exhaust the budget on its own. The right end
+  // is the registrable part that says which service this is, so that is what
+  // survives.
+  if (host.length > URL_BUDGET) host = `…${host.slice(-(URL_BUDGET - 1))}`;
+
+  const path = `${url.pathname}${url.search}`.replace(/\/$/, "");
+  if (!path) return host;
+
+  const room = URL_BUDGET - host.length;
+  if (path.length <= room) return host + path;
+  // Too little room left to say anything useful about the path, and a two-
+  // character stub reads as truncation damage rather than as information.
+  if (room < 12) return host;
+  const head = Math.ceil((room - 1) / 2);
+  return `${host}${path.slice(0, head)}…${path.slice(-(room - 1 - head))}`;
+}
+
+/**
+ * One provider row: what it is, then how it is doing.
+ *
+ * The URL is the fallback identity, not a second line to repeat — a page with
+ * no title would otherwise print the same long string twice and push the status
+ * off the edge. So the second line carries the status and only adds the URL
+ * when the first line is not already showing it.
+ */
+function renderProvider(p: ProviderStatus): string {
+  const short = p.url ? shortUrl(p.url) : "";
+  const title = p.title || short || p.id;
+  const status = p.open ? "● connected" : "○ connecting";
+  const detail = short && p.title ? `${status} — ${short}` : status;
+  // `title` attributes give back the full text the elision drops, on hover.
+  return `<li>
+    <div class="title"${p.url ? ` title="${escapeHtml(p.url)}"` : ""}>${escapeHtml(title)}</div>
+    <div class="muted title"${p.url ? ` title="${escapeHtml(p.url)}"` : ""}>${escapeHtml(detail)}</div>
+  </li>`;
 }
 
 function renderSelection(item: SelectedElementStatus): string {
@@ -317,10 +455,71 @@ async function main(): Promise<void> {
 
   el<HTMLButtonElement>("toggle").addEventListener("click", async () => {
     const status = await getStatus(tabId);
-    await chrome.runtime.sendMessage({ type: "setEnabled", tabId, enabled: !status.enabled });
+    if (!status.enabled && pendingTabMode === "webAgent" && !pendingWebAgentOrigin) {
+      el<HTMLParagraphElement>("tabModeHint").textContent =
+        "Pick which connected site this tab should serve first.";
+      return;
+    }
+    // The route rides along with the enable, so the tab comes up on the right
+    // consumer from its very first provider announcement — no socket is dialled
+    // only to be torn down, and there is no window where the tab is live on the
+    // wrong one.
+    const reply: RuntimeResponse = await chrome.runtime.sendMessage({
+      type: "setEnabled",
+      tabId,
+      enabled: !status.enabled,
+      mode: pendingTabMode,
+      origin: pendingWebAgentOrigin,
+    });
+    if (reply?.error) el<HTMLParagraphElement>("tabModeHint").textContent = reply.error;
     // Give the page a moment to (de)activate + connect, then refresh.
     setTimeout(refresh, 250);
     await refresh();
+  });
+
+  /**
+   * Both selects write the same route; only the field they change differs.
+   *
+   * An arrow const rather than a declaration: a hoisted function would be
+   * visible before the `tabId === undefined` guard above, so TypeScript widens
+   * the captured `tabId` back to `number | undefined`.
+   */
+  const applyRoute = async (patch: { mode?: "daemon" | "webAgent"; origin?: string }): Promise<void> => {
+    if (patch.mode !== undefined) pendingTabMode = patch.mode;
+    if (patch.origin !== undefined) pendingWebAgentOrigin = patch.origin;
+
+    // A tab that is off has no route to set: the choice is spent by the enable
+    // button instead. Telling the worker now would create an entry for a tab
+    // that is not serving anyone.
+    const status = await getStatus(tabId);
+    if (!status.enabled) {
+      render(status);
+      return;
+    }
+
+    const mode = patch.mode ?? status.tabMode ?? "daemon";
+    const origin = patch.origin ?? status.tabWebAgentOrigin ?? pendingWebAgentOrigin;
+    // Switching to web-agent mode with nothing chosen yet is not an error; the
+    // site picker has just appeared and is waiting to be used.
+    if (mode === "webAgent" && !origin) {
+      render(status);
+      return;
+    }
+
+    const reply: RuntimeResponse = await chrome.runtime.sendMessage({ type: "setTabMode", tabId, mode, origin });
+    if (reply?.error) el<HTMLParagraphElement>("tabModeHint").textContent = reply.error;
+    // The page is deactivated and reactivated behind this, so the providers
+    // take a moment to re-announce under the new consumer.
+    setTimeout(refresh, 250);
+    await refresh();
+  };
+
+  el<HTMLSelectElement>("tabMode").addEventListener("change", (event) => {
+    void applyRoute({ mode: (event.target as HTMLSelectElement).value as "daemon" | "webAgent" });
+  });
+
+  el<HTMLSelectElement>("webAgentTarget").addEventListener("change", (event) => {
+    void applyRoute({ origin: (event.target as HTMLSelectElement).value });
   });
 
   el<HTMLButtonElement>("webAgentToggle").addEventListener("click", async () => {

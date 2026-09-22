@@ -12,6 +12,9 @@ import {
   MCP_PAGE_BRIDGE_DASHBOARD_CLOSE_TAB,
   MCP_PAGE_BRIDGE_READ_FILE,
   MCP_PAGE_BRIDGE_VERSION,
+  NAMESPACE_SEP,
+  namespaceName,
+  sanitizeLabel,
   type ChannelMessage,
   type ControlAction,
   type ControlPayload,
@@ -23,16 +26,27 @@ import { EmbeddedMcpServer } from "./embedded-server.js";
 import { extensionApi, hasDebuggerPermission } from "./extension-api.js";
 import {
   LoopbackMcpClient,
+  TAB_MODE_DAEMON,
+  TAB_MODE_KEY,
+  TAB_MODE_WEB_AGENT,
   WEB_AGENT_METHOD_CALL_TOOL,
   WEB_AGENT_METHOD_DESCRIBE,
   WEB_AGENT_METHOD_LIST_TOOLS,
   WEB_AGENT_ORIGINS_KEY,
   addOrigin,
+  daemonRoute,
+  isTabMode,
   normalizeOrigin,
   originApproved,
   parseOrigins,
+  parseTabModes,
+  parseTabRoute,
   removeOrigin,
+  serializeTabModes,
   webAgentDescriptor,
+  webAgentRoute,
+  type TabMode,
+  type TabRoute,
   type WebAgentBackendReply,
   type WebAgentEventName,
 } from "./web-agent.js";
@@ -65,6 +79,15 @@ interface TabState {
   tabId: number;
   port: chrome.runtime.Port;
   sockets: Map<string, SocketEntry>;
+  /**
+   * Providers this tab announced while serving the web agent.
+   *
+   * In `daemon` mode a provider's RPC goes straight out its socket and nothing
+   * here needs to remember it. In `webAgent` mode there is no socket, and the
+   * service worker is itself the MCP client, so it has to keep the pending
+   * requests somewhere — that is what a `PageProviderClient` is.
+   */
+  pageClients: Map<string, PageProviderClient>;
 }
 
 const tabs = new Map<number, TabState>();
@@ -184,34 +207,58 @@ function bounceTabSockets(state: TabState): void {
   }
 }
 
-// The browser-level toolset's dependencies, shared by both consumers: the
-// daemon-connected "browser" provider below and the in-browser web agent. One
-// object, so `enable_tab` means the same thing however the call arrived.
-const browserToolDeps: BrowserToolDeps = {
-  enableTab: async (tabId) => {
-    const state = await ensureEnabledTab(tabId);
-    if (!state) {
-      // Restricted page: don't leave a tab marked enabled that can never connect.
-      await setEnabled(tabId, false);
-      void updateActionIcon(tabId, false);
-      return false;
-    }
-    void syncTabGroups();
-    return true;
-  },
-  isTabEnabled: (tabId) => isEnabled(tabId),
-  trackAgentTab: async (tabId) => {
-    const set = await getAgentTabs();
-    set.add(tabId);
-    await saveAgentTabs(set);
-  },
-  listAgentTabs: async () => [...(await getAgentTabs())],
-  forgetAgentTabs: async (tabIds) => {
-    const set = await getAgentTabs();
-    for (const tabId of tabIds) set.delete(tabId);
-    await saveAgentTabs(set);
-  },
-};
+/**
+ * The browser-level toolset's dependencies.
+ *
+ * Both consumers get the same object except for one thing: which mode a tab
+ * they enable lands in. `enable_tab` reads identically from either side — "make
+ * this tab's page tools available to me" — and answering it by connecting to
+ * somebody else is the one way this tool can be actively wrong. A web agent
+ * that enables a tab and watches it dial a daemon port got the opposite of what
+ * it asked for, so the caller's own mode is what the tab is set to.
+ */
+function browserToolDepsFor(route: TabRoute): BrowserToolDeps {
+  const toWebAgent = route.mode === TAB_MODE_WEB_AGENT;
+  return {
+    enabledNote: toWebAgent
+      ? "This tab now serves you: call tools/list again to see its page tools, namespaced by the tab's label."
+      : "Page tools for this tab are namespaced by its label; call mcp_page_bridge_list_clients to see it.",
+    enableTab: async (tabId) => {
+      // Writing into `tabModes` before it is loaded would be overwritten by the
+      // boot read landing afterwards.
+      await booted;
+      // Set before enabling, so the page's very first `open` is already routed
+      // to the right consumer and no socket is dialled only to be torn down.
+      if (!(await writeTabRoute(tabId, route))) return false;
+
+      const state = await ensureEnabledTab(tabId);
+      if (!state) {
+        // Restricted page: don't leave a tab marked enabled that can never connect.
+        await setEnabled(tabId, false);
+        void updateActionIcon(tabId, false);
+        if (tabModes.delete(tabId)) await persistTabModes();
+        return false;
+      }
+      void syncTabGroups();
+      if (toWebAgent) void notifyWebAgentTabs(route.origin, "tools_changed");
+      return true;
+    },
+    isTabEnabled: (tabId) => isEnabled(tabId),
+    trackAgentTab: async (tabId) => {
+      const set = await getAgentTabs();
+      set.add(tabId);
+      await saveAgentTabs(set);
+    },
+    listAgentTabs: async () => [...(await getAgentTabs())],
+    forgetAgentTabs: async (tabIds) => {
+      const set = await getAgentTabs();
+      for (const tabId of tabIds) set.delete(tabId);
+      await saveAgentTabs(set);
+    },
+  };
+}
+
+const browserToolDeps = browserToolDepsFor(daemonRoute());
 
 // Optional, opt-in "browser" provider (controls all tabs, not just one page).
 // It is not tab-scoped, so it always talks to the default profile's daemon.
@@ -224,7 +271,84 @@ const browserProvider = new BrowserProvider(() => wsUrl(defaultBridgeProfile()),
 // served, and everything else is answered with silence. See web-agent.ts.
 
 let webAgentOrigins: string[] = [];
-let webAgentMcp: LoopbackMcpClient | undefined;
+/** One browser-toolset client per connected origin; see `webAgentClient`. */
+const webAgentMcp = new Map<string, LoopbackMcpClient>();
+
+/**
+ * Where each enabled tab's page tools go. Absent means the daemon.
+ *
+ * Session-scoped, like `enabledTabs`: a tab id is only meaningful for as long
+ * as the browser session that issued it, and persisting the choice across a
+ * restart would attach it to whatever unrelated tab inherits the number.
+ */
+const tabModes = new Map<number, TabRoute>();
+
+/**
+ * Replaces the map with what storage holds.
+ *
+ * The `clear()` is only safe because every writer awaits `booted`, and this
+ * runs inside it: nothing can have written a route that this would discard. If
+ * a writer ever skips that await, it will lose its write here.
+ */
+async function loadTabModes(): Promise<void> {
+  const v = await chrome.storage.session.get(TAB_MODE_KEY);
+  tabModes.clear();
+  for (const [tabId, route] of parseTabModes(v[TAB_MODE_KEY])) tabModes.set(tabId, route);
+}
+
+async function persistTabModes(): Promise<void> {
+  await chrome.storage.session.set({ [TAB_MODE_KEY]: serializeTabModes(tabModes) });
+}
+
+/**
+ * Synchronous read of the in-memory map.
+ *
+ * Only correct once `booted` has settled: before that the map is empty and this
+ * answers `daemon` for every tab, which is a plausible-looking wrong answer
+ * rather than an obvious one. Every path that can wait does — see the awaits in
+ * `handleUp` and the message listener — and the two that cannot are marked.
+ */
+function tabRoute(tabId: number): TabRoute {
+  return tabModes.get(tabId) ?? daemonRoute();
+}
+
+function tabMode(tabId: number): TabMode {
+  return tabRoute(tabId).mode;
+}
+
+/**
+ * Records a tab's route, or clears it when that route is the default.
+ *
+ * A `webAgent` route whose origin is no longer approved is refused rather than
+ * stored: it would name a consumer that cannot be served, and the tab would sit
+ * enabled with its tools going nowhere.
+ */
+async function writeTabRoute(tabId: number, route: TabRoute): Promise<boolean> {
+  if (route.mode === TAB_MODE_WEB_AGENT && !originApproved(route.origin, webAgentOrigins)) return false;
+  if (route.mode === TAB_MODE_DAEMON) tabModes.delete(tabId);
+  else tabModes.set(tabId, route);
+  await persistTabModes();
+  return true;
+}
+
+/**
+ * Enabled tabs whose page tools this origin may see.
+ *
+ * Scoped to the asking origin, not to "every web-agent tab": two connected
+ * agents sharing one tab would interleave `take_snapshot` and `click` against a
+ * single uid registry, which is the failure the per-tab mode already rules out
+ * between the daemon and an agent. Doing it per origin keeps that guarantee
+ * when there is more than one agent.
+ */
+async function webAgentTabIds(origin: string): Promise<number[]> {
+  const normalized = normalizeOrigin(origin);
+  if (!normalized) return [];
+  const enabled = await getEnabledSet();
+  return [...enabled].filter((tabId) => {
+    const route = tabRoute(tabId);
+    return route.mode === TAB_MODE_WEB_AGENT && route.origin === normalized;
+  });
+}
 
 /**
  * The web agent's view of the browser toolset.
@@ -234,17 +358,145 @@ let webAgentMcp: LoopbackMcpClient | undefined;
  * transport instead of a WebSocket, so both consumers share one registry and
  * one set of semantics rather than drifting apart.
  */
-function webAgentClient(): LoopbackMcpClient {
-  if (!webAgentMcp) {
+function webAgentClient(origin: string): LoopbackMcpClient {
+  let client = webAgentMcp.get(origin);
+  if (!client) {
     const server = new EmbeddedMcpServer({
       name: "browser",
       version: MCP_PAGE_BRIDGE_VERSION,
       title: "Browser control",
     });
-    registerBrowserTools(server, browserToolDeps);
-    webAgentMcp = new LoopbackMcpClient(server);
+    // One server per origin, because `enable_tab` has to bind the tab to *this*
+    // caller. A shared instance would give whichever agent asked last the tabs
+    // the others enabled.
+    registerBrowserTools(server, browserToolDepsFor(webAgentRoute(origin)));
+    client = new LoopbackMcpClient(server);
+    webAgentMcp.set(origin, client);
   }
-  return webAgentMcp;
+  return client;
+}
+
+// ---- aggregating page tools for the web agent ---------------------------------
+//
+// The daemon does this job for a coding agent: several providers, one catalog,
+// names namespaced per provider so two tabs offering `click` stay distinct.
+// With no daemon the service worker has to do the same thing, so it uses the
+// same `namespaceName` helper and the same `label__tool` shape — an agent that
+// has seen the daemon's catalog reads this one without relearning anything.
+
+/** Every page provider on the tabs this origin is being served. */
+async function webAgentPageClients(origin: string): Promise<PageProviderClient[]> {
+  const tabIds = await webAgentTabIds(origin);
+  const clients: PageProviderClient[] = [];
+  for (const tabId of tabIds) {
+    const state = tabs.get(tabId);
+    if (!state) continue;
+    clients.push(...state.pageClients.values());
+  }
+  return clients;
+}
+
+/**
+ * Gives every provider a label unique across the current set.
+ *
+ * Derived from the page title (falling back to the host, then the tab id) so
+ * the agent sees `github__click` rather than `p_1a2b__click`. Assigned fresh on
+ * each listing: the daemon can reserve a label for a reconnecting provider
+ * because it outlives the connection, but here the worker may have been
+ * recycled since, and a label invented from stale state would disagree with
+ * what the agent was last told.
+ */
+function assignLabels(clients: PageProviderClient[]): void {
+  const used = new Set<string>();
+  for (const client of clients) {
+    let base = sanitizeLabel(client.meta.title ?? "");
+    if (!base) {
+      try {
+        base = sanitizeLabel(new URL(client.meta.url ?? "").hostname);
+      } catch {
+        base = "";
+      }
+    }
+    if (!base) base = `tab-${client.providerId}`;
+
+    let label = base;
+    for (let i = 2; used.has(label); i += 1) label = `${base}-${i}`;
+    used.add(label);
+    client.label = label;
+  }
+}
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * Browser tools plus the page tools of every web-agent tab, as one list.
+ *
+ * A page that fails to answer is skipped rather than fatal: one wedged tab must
+ * not cost the agent the browser toolset it would need to close that very tab.
+ */
+async function webAgentToolList(origin: string): Promise<{ tools: unknown[] }> {
+  const tools: unknown[] = [];
+
+  const browser = await webAgentClient(origin).listTools();
+  if (isRecordValue(browser) && Array.isArray(browser.tools)) tools.push(...browser.tools);
+
+  const clients = await webAgentPageClients(origin);
+  assignLabels(clients);
+  const listings = await Promise.all(
+    clients.map(async (client) => {
+      try {
+        return { client, result: await client.listTools() };
+      } catch {
+        return undefined;
+      }
+    }),
+  );
+
+  for (const listing of listings) {
+    if (!listing) continue;
+    const { client, result } = listing;
+    if (!isRecordValue(result) || !Array.isArray(result.tools)) continue;
+    for (const tool of result.tools) {
+      if (!isRecordValue(tool) || typeof tool.name !== "string") continue;
+      tools.push({ ...tool, name: namespaceName(client.label, tool.name) });
+    }
+  }
+
+  return { tools };
+}
+
+/**
+ * Routes one call to whichever provider owns the name.
+ *
+ * The namespaced name is matched against the labels assigned by the listing
+ * that produced it, so routing cannot drift from the catalog: an unknown
+ * prefix is reported as an unknown tool rather than silently tried on the
+ * browser server.
+ */
+async function webAgentCallTool(origin: string, name: string, args: Record<string, unknown>): Promise<unknown> {
+  const clients = await webAgentPageClients(origin);
+  assignLabels(clients);
+
+  for (const client of clients) {
+    const prefix = `${client.label}${NAMESPACE_SEP}`;
+    if (!name.startsWith(prefix)) continue;
+    return client.callTool(name.slice(prefix.length), args);
+  }
+
+  // Clamping means a long `label__tool` is not literally prefixed any more, so
+  // fall back to matching the exact advertised name before giving up.
+  for (const client of clients) {
+    const listed = await client.listTools().catch(() => undefined);
+    if (!isRecordValue(listed) || !Array.isArray(listed.tools)) continue;
+    for (const tool of listed.tools) {
+      if (!isRecordValue(tool) || typeof tool.name !== "string") continue;
+      if (namespaceName(client.label, tool.name) === name) return client.callTool(tool.name, args);
+    }
+  }
+
+  return webAgentClient(origin).callTool(name, args);
 }
 
 /**
@@ -278,6 +530,14 @@ async function handleWebAgentRequest(
   req: { method?: string; params?: unknown },
   origin: string,
 ): Promise<WebAgentBackendReply> {
+  // The approved origins live in storage, and this worker is usually cold when
+  // the request arrives: MV3 evicts it aggressively, and the wake-up dispatches
+  // pending messages as soon as the script has been evaluated — before the boot
+  // read has resolved. Checking `webAgentOrigins` at that moment reads the empty
+  // initial value and answers silence, which is indistinguishable from "not
+  // connected" and leaves a connected agent unable to see the extension at all.
+  await booted;
+
   // Not connected here: say nothing at all. A refusal would still confirm the
   // extension is installed, which is what an unconnected origin must not learn.
   if (!originApproved(origin, webAgentOrigins)) return { silent: true };
@@ -285,16 +545,21 @@ async function handleWebAgentRequest(
   try {
     switch (req.method) {
       case WEB_AGENT_METHOD_DESCRIBE:
-        return { result: webAgentDescriptor({ enabledTabs: (await getEnabledSet()).size }) };
+        return {
+          result: webAgentDescriptor({
+            enabledTabs: (await getEnabledSet()).size,
+            webAgentTabs: (await webAgentTabIds(origin)).length,
+          }),
+        };
       case WEB_AGENT_METHOD_LIST_TOOLS:
-        return { result: await webAgentClient().listTools() };
+        return { result: await webAgentToolList(origin) };
       case WEB_AGENT_METHOD_CALL_TOOL: {
         const params = (req.params ?? {}) as { name?: unknown; arguments?: unknown };
         if (typeof params.name !== "string" || !params.name) {
           return { error: "tools/call needs a tool name" };
         }
         const args = (params.arguments ?? {}) as Record<string, unknown>;
-        return { result: await webAgentClient().callTool(params.name, args) };
+        return { result: await webAgentCallTool(origin, params.name, args) };
       }
       default:
         return { error: `unknown method: ${String(req.method)}` };
@@ -329,12 +594,96 @@ async function setWebAgentOrigin(origin: string, connected: boolean): Promise<vo
     ? addOrigin(webAgentOrigins, normalized)
     : removeOrigin(webAgentOrigins, normalized);
   await chrome.storage.local.set({ [WEB_AGENT_ORIGINS_KEY]: webAgentOrigins });
+
+  if (!connected) {
+    // Tabs pointed here now serve nobody. Leaving them in that state is the
+    // worst of both: no daemon socket and no agent to answer, so they would sit
+    // enabled with their tools going nowhere and no sign of why. Hand them back
+    // to the daemon, which is what "not serving a web agent" has always meant.
+    for (const [tabId, route] of [...tabModes]) {
+      if (route.mode !== TAB_MODE_WEB_AGENT || route.origin !== normalized) continue;
+      await setTabRoute(tabId, daemonRoute());
+    }
+    // Its browser-toolset client can go too; a later reconnect builds a fresh
+    // one rather than inheriting a handshake from the old approval.
+    webAgentMcp.delete(normalized);
+  }
+
   // `goodbye` first tells the page to stop offering the tools; the agent also
   // re-checks on its next call, so a missed event cannot leave access behind.
   void notifyWebAgentTabs(normalized, connected ? "announce" : "goodbye");
 }
 
-void (async () => {
+/**
+ * Tell connected web agents that the catalog moved under them.
+ *
+ * Enabling a tab, re-pointing it or closing it changes which page tools exist,
+ * and an agent that listed them before the change is holding a stale catalog.
+ * Narrowed to the affected origins where the caller knows them: a change to one
+ * agent's tabs is not news to another, and telling everyone would have each of
+ * them re-list on every unrelated event.
+ */
+async function announceToolsChanged(origins: Iterable<string> = webAgentOrigins): Promise<void> {
+  const seen = new Set<string>();
+  for (const origin of origins) {
+    const normalized = normalizeOrigin(origin);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    await notifyWebAgentTabs(normalized, "tools_changed");
+  }
+}
+
+/**
+ * Re-point an *already enabled* tab at a different consumer.
+ *
+ * The ordinary way a tab gets its route is with the enable itself, which needs
+ * none of this: nothing is connected yet, so recording the choice is the whole
+ * job. This is the rarer case of changing one's mind about a live tab, and it
+ * has to tear the old path down rather than merely stop using it — a tab left
+ * in `daemon` mode keeps a socket open and keeps reconnecting to a port the
+ * person has just said they are not using. Re-activating the page afterwards
+ * makes it re-announce its providers, which is what attaches them to the new
+ * consumer without asking the page to know a route exists.
+ */
+async function setTabRoute(tabId: number, route: TabRoute): Promise<{ ok: boolean; error?: string }> {
+  // The comparison below reads the loaded map; on an empty one it would report
+  // "already there" and skip the teardown a real switch needs.
+  await booted;
+  const previous = tabRoute(tabId);
+  if (previous.mode === route.mode && previous.origin === route.origin) return { ok: true };
+
+  if (!(await writeTabRoute(tabId, route))) {
+    return { ok: false, error: "That site is no longer connected. Connect it again from this popup first." };
+  }
+
+  const state = tabs.get(tabId);
+  if (state) {
+    closeAllSockets(state);
+    closeAllPageClients(state, "this tab switched to another consumer");
+    // `deactivate` retires the page's transports; `activate` has it register
+    // and announce again, now routed by the new choice.
+    if (await isEnabled(tabId)) {
+      sendControl(state, "deactivate");
+      sendControl(state, "activate", { coreTools, designTools, automationTools, cdpTools, trustedInput });
+    }
+  }
+  void syncTabGroups();
+  // Both ends of the move: the origin that lost the tab and the one that got it.
+  void announceToolsChanged([previous.origin, route.origin].filter(Boolean));
+  return { ok: true };
+}
+
+/**
+ * Resolves once the settings above have been read back from storage.
+ *
+ * Every module-level setting starts at a default that is also a *plausible*
+ * value — `webAgentOrigins` is empty, `coreTools` is on — so code running
+ * before this settles cannot tell "not configured" from "not yet loaded". A
+ * service worker is woken *by* an event, so that window is the common case
+ * rather than a startup edge; anything whose answer depends on persisted state
+ * awaits this first.
+ */
+const booted = (async () => {
   const v = await chrome.storage.local.get([
     "bridgeProfiles", "defaultProfileId", "host", "port", "token", "secure",
     "browserControl", "coreTools", "designTools", "automationTools", "cdpTools", "trustedInput", "tabGroups",
@@ -360,6 +709,7 @@ void (async () => {
     const tabId = Number(key);
     if (Number.isInteger(tabId) && typeof value === "string") tabBridgeOverrides.set(tabId, value);
   }
+  await loadTabModes();
   browserControl = !!v.browserControl;
   coreTools = v.coreTools !== false;
   designTools = !!v.designTools;
@@ -369,7 +719,11 @@ void (async () => {
   trustedInput = !!v.trustedInput && (await hasDebuggerPermission());
   if (cdpTools || trustedInput) ensureCdpListeners();
   if (browserControl) browserProvider.start();
-})();
+})().catch(() => {
+  // Settled either way: awaiting `booted` must never be what hangs a caller.
+  // A failed read leaves the defaults in place, which is the same state the
+  // worker would have had anyway, and the next wake-up tries again.
+});
 
 // ---- enabled-tab persistence (survives SW restarts within a session) ---------
 
@@ -1484,6 +1838,116 @@ function safePost(state: TabState, msg: ChannelMessage): void {
   }
 }
 
+// ---- page providers without a daemon -----------------------------------------
+//
+// In `webAgent` mode a tab has no socket, so the service worker becomes the MCP
+// client of the page's own server: it runs `initialize` over the existing Port
+// and keeps the pending requests itself. The page is untouched — it still talks
+// its normal `TunnelTransport`, and cannot tell which consumer is on the other
+// end. That is the point: one page implementation, two consumers.
+
+/** How long a page tool may run before the caller is told it did not answer. */
+const PAGE_CALL_TIMEOUT_MS = 30000;
+/** Shorter: the handshake is local and a slow one means the page is not there. */
+const PAGE_INIT_TIMEOUT_MS = 5000;
+
+class PageProviderClient {
+  /** Label the web agent sees this provider's tools namespaced under. */
+  label = "";
+  private readonly pending = new Map<
+    number,
+    { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }
+  >();
+  private nextId = 1;
+  private starting?: Promise<void>;
+  private closed = false;
+
+  constructor(
+    private readonly state: TabState,
+    readonly providerId: string,
+    readonly meta: { url?: string; title?: string },
+  ) {}
+
+  /** Idempotent and safe to race, exactly like LoopbackMcpClient.start. */
+  start(): Promise<void> {
+    if (!this.starting) {
+      this.starting = (async () => {
+        await this.request(
+          "initialize",
+          {
+            protocolVersion: "2025-06-18",
+            capabilities: {},
+            clientInfo: { name: "web-agent", version: MCP_PAGE_BRIDGE_VERSION },
+          },
+          PAGE_INIT_TIMEOUT_MS,
+        );
+        this.notify("notifications/initialized");
+      })().catch((error) => {
+        // A failed handshake must not poison the client for good: the page may
+        // simply have been mid-navigation.
+        this.starting = undefined;
+        throw error;
+      });
+    }
+    return this.starting;
+  }
+
+  async listTools(): Promise<unknown> {
+    await this.start();
+    return this.request("tools/list", {}, PAGE_INIT_TIMEOUT_MS);
+  }
+
+  async callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
+    await this.start();
+    return this.request("tools/call", { name, arguments: args ?? {} }, PAGE_CALL_TIMEOUT_MS);
+  }
+
+  /** A JSON-RPC message came up from the page for this provider. */
+  deliver(payload: unknown): void {
+    const reply = payload as { id?: unknown; result?: unknown; error?: { message?: string } };
+    if (typeof reply?.id !== "number") return; // a notification, or not ours
+    const entry = this.pending.get(reply.id);
+    if (!entry) return;
+    this.pending.delete(reply.id);
+    clearTimeout(entry.timer);
+    if (reply.error) entry.reject(new Error(reply.error.message || "the page reported an error"));
+    else entry.resolve(reply.result);
+  }
+
+  /**
+   * The page or the tab went away.
+   *
+   * Pending calls are rejected rather than left hanging: a web agent's turn is
+   * waiting on them, and "the tab closed" is an answer it can act on.
+   */
+  close(reason: string): void {
+    this.closed = true;
+    for (const [, entry] of [...this.pending]) {
+      clearTimeout(entry.timer);
+      entry.reject(new Error(reason));
+    }
+    this.pending.clear();
+    this.starting = undefined;
+  }
+
+  private request(method: string, params: unknown, timeoutMs: number): Promise<unknown> {
+    if (this.closed) return Promise.reject(new Error("the tab is no longer serving this web agent"));
+    const id = this.nextId++;
+    return new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`the page did not answer ${method} within ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.pending.set(id, { resolve, reject, timer });
+      downRpc(this.state, this.providerId, { jsonrpc: "2.0", id, method, params });
+    });
+  }
+
+  private notify(method: string): void {
+    downRpc(this.state, this.providerId, { jsonrpc: "2.0", method });
+  }
+}
+
 // ---- WebSocket management (with auto-reconnect) -----------------------------
 //
 // The page-side TunnelTransport stays "open" across socket bounces, so we must
@@ -1885,22 +2349,49 @@ chrome.runtime.onConnect.addListener((port) => {
 
   // Replace any stale state for this tab.
   const existing = tabs.get(tabId);
-  if (existing) closeAllSockets(existing);
+  if (existing) {
+    closeAllSockets(existing);
+    closeAllPageClients(existing, "the page reloaded");
+  }
 
-  const state: TabState = { tabId, port, sockets: new Map() };
+  const state: TabState = { tabId, port, sockets: new Map(), pageClients: new Map() };
   tabs.set(tabId, state);
 
   port.onMessage.addListener((msg: ChannelMessage) => {
     void handleUp(state, msg);
   });
   port.onDisconnect.addListener(() => {
+    // Teardown first and synchronously: it must not be deferred behind an
+    // await, and it is correct regardless of what the mode turns out to be.
     closeAllSockets(state);
+    closeAllPageClients(state, "the tab went away");
     if (tabs.get(tabId) === state) tabs.delete(tabId);
+    // A web agent's catalog just shrank by this tab's tools. Only the
+    // notification needs the loaded map, so only it waits.
+    void booted.then(() => {
+      const route = tabRoute(tabId);
+      if (route.mode === TAB_MODE_WEB_AGENT) void announceToolsChanged([route.origin]);
+    });
   });
 });
 
+function closeAllPageClients(state: TabState, reason: string): void {
+  for (const client of state.pageClients.values()) client.close(reason);
+  state.pageClients.clear();
+}
+
 async function handleUp(state: TabState, msg: ChannelMessage): Promise<void> {
   if (!msg || msg.__mcpPageBridge !== true || msg.dir !== "up") return;
+
+  // Nothing below may decide anything before the persisted state is back.
+  //
+  // A page connects its Port and announces its providers the instant a
+  // recycled worker wakes, which is *earlier* than the boot read resolves — so
+  // this is the common ordering, not a startup edge. Reading `tabMode` in that
+  // window answers `daemon` for a tab the person set to the web agent, and the
+  // tab dials a socket that then looks like the setting reverting on its own.
+  // The messages are queued on the Port, so waiting costs nothing but order.
+  await booted;
 
   if (msg.kind === "control") {
     const action = (msg.payload as ControlPayload | undefined)?.action;
@@ -1912,13 +2403,31 @@ async function handleUp(state: TabState, msg: ChannelMessage): Promise<void> {
     return;
   }
 
+  // A provider announcing itself. The page asks for the same thing either way
+  // — "connect me to whoever is consuming this tab" — and the mode decides who
+  // that is. In `webAgent` mode no socket is dialled at all, which is the point:
+  // a tab serving the in-browser agent must not be reaching for a local port.
   if (msg.kind === "open") {
     if (!(await isEnabled(state.tabId))) return;
-    openSocket(state, msg.providerId, (msg.payload as { url?: string; title?: string }) ?? {});
+    const meta = (msg.payload as { url?: string; title?: string }) ?? {};
+    if (tabMode(state.tabId) === TAB_MODE_WEB_AGENT) {
+      openPageClient(state, msg.providerId, meta);
+      return;
+    }
+    openSocket(state, msg.providerId, meta);
     return;
   }
 
   if (msg.kind === "rpc") {
+    // A live page client owns this provider's replies: it is the MCP client
+    // that issued the request, so the answer is its to settle. Checked before
+    // the socket path rather than by mode, because a mode switch leaves the
+    // in-flight calls of the previous consumer to be drained.
+    const client = state.pageClients.get(msg.providerId);
+    if (client) {
+      client.deliver(msg.payload);
+      return;
+    }
     sendToSocket(state, msg.providerId, msg.payload);
     return;
   }
@@ -1933,8 +2442,24 @@ async function handleUp(state: TabState, msg: ChannelMessage): Promise<void> {
   }
 
   if (msg.kind === "close") {
+    const client = state.pageClients.get(msg.providerId);
+    if (client) {
+      client.close("the page closed this provider");
+      state.pageClients.delete(msg.providerId);
+      void announceToolsChanged([tabRoute(state.tabId).origin]);
+      return;
+    }
     closeSocket(state, msg.providerId);
   }
+}
+
+/** Register a page provider as one this worker will drive itself. */
+function openPageClient(state: TabState, providerId: string, meta: { url?: string; title?: string }): void {
+  const existing = state.pageClients.get(providerId);
+  if (existing) existing.close("replaced by a new provider registration");
+  state.pageClients.set(providerId, new PageProviderClient(state, providerId, meta));
+  // The agent may be mid-conversation with its catalog already listed.
+  void announceToolsChanged([tabRoute(state.tabId).origin]);
 }
 
 async function handleExt(state: TabState, req: ExtCallPayload): Promise<void> {
@@ -2089,6 +2614,12 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
     return false;
   }
   void (async () => {
+    // Same reason as in `handleUp`: the popup opening is itself a wake-up
+    // event, so a status read can easily arrive before the boot read lands and
+    // would report a tab's mode as `daemon` purely because nothing was loaded
+    // yet — with the dropdown then writing that misreading back.
+    await booted;
+
     if (req?.type === "getStatus") {
       const tabId = req.tabId as number;
       const state = tabs.get(tabId);
@@ -2098,14 +2629,26 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
         ? await readPageDesignState(tabId)
         : { selection: { items: [], markersVisible: true }, cssPatches: [] };
       const cdpPermission = await hasDebuggerPermission();
-      const providers = state
-        ? [...state.sockets.entries()].map(([id, e]) => ({
-            id,
-            url: e.meta.url,
-            title: e.meta.title,
-            open: e.ws?.readyState === WebSocket.OPEN,
-          }))
-        : [];
+      const route = tabRoute(tabId);
+      const mode = route.mode;
+      // In webAgent mode there is no socket to report, but the providers are
+      // just as real — the popup's list is about what the page is offering, not
+      // about sockets, so both modes fill it from wherever the providers live.
+      const providers = !state
+        ? []
+        : mode === TAB_MODE_WEB_AGENT
+          ? [...state.pageClients.values()].map((client) => ({
+              id: client.providerId,
+              url: client.meta.url,
+              title: client.meta.title,
+              open: true,
+            }))
+          : [...state.sockets.entries()].map(([id, e]) => ({
+              id,
+              url: e.meta.url,
+              title: e.meta.title,
+              open: e.ws?.readyState === WebSocket.OPEN,
+            }));
       // Enabled-tab counts per profile so the popup can show the groups.
       const enabledSet = await getEnabledSet();
       const tabCounts = new Map<string, number>();
@@ -2122,6 +2665,22 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
         connected: !!state,
         webAgentOrigin: origin,
         webAgentConnected: originApproved(origin, webAgentOrigins),
+        tabMode: mode,
+        /** For a webAgent tab, which connected site it serves. */
+        tabWebAgentOrigin: route.origin,
+        /**
+         * The sites the person has connected, newest first, with how many tabs
+         * each is already being served. This is the web-agent half of the
+         * `profiles` list below: both modes pick a destination, and the popup
+         * shows one list or the other.
+         */
+        webAgents: webAgentOrigins.map((connectedOrigin) => ({
+          origin: connectedOrigin,
+          tabs: [...enabledSet].filter((id) => {
+            const r = tabRoute(id);
+            return r.mode === TAB_MODE_WEB_AGENT && r.origin === connectedOrigin;
+          }).length,
+        })),
         providers,
         host: effective.host,
         port: effective.port,
@@ -2166,15 +2725,45 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
       return;
     }
 
+    if (req?.type === "setTabMode") {
+      const route = parseTabRoute({ mode: req.mode, origin: req.origin });
+      if (!route) {
+        sendResponse({
+          ok: false,
+          error: isTabMode(req.mode)
+            ? "Choose which connected site this tab should serve."
+            : "unknown mode",
+        });
+        return;
+      }
+      sendResponse(await setTabRoute(req.tabId as number, route));
+      return;
+    }
+
     if (req?.type === "setEnabled") {
       const tabId = req.tabId as number;
       if (req.enabled) {
+        // The consumer is chosen with the enable, not after it. Recording it
+        // first means the page's very first `open` is routed correctly, so no
+        // socket is dialled to a daemon only to be torn down a moment later —
+        // which is also the window in which the choice used to appear to
+        // revert on its own.
+        const route = parseTabRoute({ mode: req.mode, origin: req.origin }) ?? daemonRoute();
+        if (!(await writeTabRoute(tabId, route))) {
+          sendResponse({
+            ok: false,
+            error: "That site is no longer connected. Connect it again from this popup first.",
+          });
+          return;
+        }
+
         const state = await ensureEnabledTab(tabId);
         if (!state) {
           // Restricted page (chrome://, Web Store, etc.): don't leave it enabled
           // or keep the icon green — it can never connect.
           await setEnabled(tabId, false);
           void updateActionIcon(tabId, false);
+          if (tabModes.delete(tabId)) await persistTabModes();
           sendResponse({
             ok: false,
             error: "This page does not allow extensions (e.g. chrome://, the Web Store, or PDF viewer).",
@@ -2182,6 +2771,7 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
           return;
         }
         void syncTabGroups();
+        if (route.mode === TAB_MODE_WEB_AGENT) void announceToolsChanged([route.origin]);
         sendResponse({ ok: true });
         return;
       }
@@ -2192,9 +2782,14 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
       if (state) {
         sendControl(state, "deactivate");
         closeAllSockets(state);
+        closeAllPageClients(state, "this tab was disabled");
       }
       await detachCdp(tabId);
       void ungroupManagedTab(tabId);
+      // The route is a property of an enabled tab; a disabled one starts fresh.
+      const dropped = tabRoute(tabId);
+      if (tabModes.delete(tabId)) await persistTabModes();
+      void announceToolsChanged([dropped.origin].filter(Boolean));
       sendResponse({ ok: true });
       return;
     }
@@ -2411,6 +3006,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   const state = tabs.get(tabId);
   if (state) {
     closeAllSockets(state);
+    closeAllPageClients(state, "the tab was closed");
     tabs.delete(tabId);
   }
   void setEnabled(tabId, false);
@@ -2418,6 +3014,16 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   frameIdsByTab.delete(tabId);
   void getAgentTabs().then((set) => (set.delete(tabId) ? saveAgentTabs(set) : undefined));
   if (tabBridgeOverrides.delete(tabId)) void persistTabOverrides();
+  // A tab id is reused by the browser, so a mode left behind would silently
+  // apply to whatever tab inherits the number. Deleting against an unloaded map
+  // would find nothing and then have the boot read restore the stale entry, so
+  // this is one of the places the wait is load-bearing rather than tidy.
+  void booted.then(() => {
+    const dropped = tabRoute(tabId);
+    if (!tabModes.delete(tabId)) return;
+    void persistTabModes();
+    void announceToolsChanged([dropped.origin].filter(Boolean));
+  });
 });
 
 // MV3 service workers are recycled after ~30s idle. An open WebSocket only
@@ -2432,14 +3038,24 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   void chrome.runtime.getPlatformInfo().catch(() => {
     // ignore
   });
-  for (const state of tabs.values()) {
-    for (const [providerId, entry] of state.sockets) {
-      if (entry.wantOpen && !entry.ws) {
-        if (entry.timer) clearTimeout(entry.timer);
-        entry.timer = undefined;
-        connectSocket(state, providerId);
+  void (async () => {
+    // This alarm is the usual thing that wakes a recycled worker, so it runs
+    // with an empty `tabModes` more often than anything else does — and what it
+    // does with that is dial sockets. Reconnecting a web-agent tab to a daemon
+    // is exactly the "it went back on its own" failure, so it waits.
+    await booted;
+
+    for (const state of tabs.values()) {
+      // A tab serving the web agent has no business holding a socket open.
+      if (tabMode(state.tabId) === TAB_MODE_WEB_AGENT) continue;
+      for (const [providerId, entry] of state.sockets) {
+        if (entry.wantOpen && !entry.ws) {
+          if (entry.timer) clearTimeout(entry.timer);
+          entry.timer = undefined;
+          connectSocket(state, providerId);
+        }
       }
     }
-  }
-  if (browserControl && !browserProvider.active) browserProvider.start();
+    if (browserControl && !browserProvider.active) browserProvider.start();
+  })();
 });
