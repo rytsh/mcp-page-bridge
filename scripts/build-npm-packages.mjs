@@ -4,15 +4,12 @@
 // on these via optionalDependencies; npm installs only the one matching the
 // host os/cpu.
 //
-// It also injects the matching optionalDependencies into
-// packages/server/package.json. They are intentionally NOT committed: the
-// platform packages only exist on npm once a release publishes them, so a
-// committed reference would break `pnpm install --frozen-lockfile` in CI
-// (chicken-and-egg). The release workflow runs this script right before
-// publishing the wrapper, so the published package.json always carries them.
+// It also creates a publish-ready wrapper package with the matching
+// optionalDependencies. The workspace package.json is intentionally left
+// unchanged so later pnpm commands can keep using the frozen lockfile.
 //
 // Usage: node scripts/build-npm-packages.mjs   (after `goreleaser release/build`)
-// Output: npm-dist/mcp-page-bridge-<os>-<arch>/ + mutated packages/server/package.json
+// Output: npm-dist/mcp-page-bridge-<os>-<arch>/ + npm-dist/mcp-page-bridge/
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -92,12 +89,17 @@ for (const platform of PLATFORMS) {
   console.log(`packaged ${platform.pkg}@${version}`);
 }
 
-// Inject optionalDependencies into the wrapper package for publishing (see
-// header comment for why these are not committed).
+// Build the wrapper outside the workspace so adding its release-only
+// dependencies does not invalidate pnpm-lock.yaml.
 const wrapperPath = join(root, "packages/server/package.json");
 const wrapper = JSON.parse(readFileSync(wrapperPath, "utf8"));
 wrapper.optionalDependencies = Object.fromEntries(PLATFORMS.map((p) => [p.pkg, version]));
-writeFileSync(wrapperPath, JSON.stringify(wrapper, null, 2) + "\n");
-console.log(`injected optionalDependencies@${version} into packages/server/package.json`);
+const wrapperDir = join(outRoot, "mcp-page-bridge");
+mkdirSync(join(wrapperDir, "bin"), { recursive: true });
+writeFileSync(join(wrapperDir, "package.json"), JSON.stringify(wrapper, null, 2) + "\n");
+const launcherPath = join(wrapperDir, "bin", "mcp-page-bridge.js");
+copyFileSync(join(root, "packages/server/bin/mcp-page-bridge.js"), launcherPath);
+chmodSync(launcherPath, 0o755);
+console.log(`packaged mcp-page-bridge@${version}`);
 
 console.log(`done → ${outRoot}`);
