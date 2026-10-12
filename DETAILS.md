@@ -973,8 +973,9 @@ pnpm build:npm-packages        # dist/ → npm-dist/ per-platform npm packages
 ```
 
 The status dashboard is a Svelte app in `packages/dashboard`, built to a single
-HTML file and embedded into the binary via `go:embed`. After changing it, run
-`pnpm --filter mcp-page-bridge-dashboard build` and commit the regenerated
+HTML file and embedded into the binary via `go:embed`. It also inlines
+`packages/protocol`, so after changing either package run `pnpm build:dashboard`
+(builds protocol first, then the dashboard) and commit the regenerated
 `internal/server/assets/dashboard.html`.
 
 ## Status

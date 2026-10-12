@@ -67,7 +67,7 @@ jobs:
       - name: Verify dashboard embed is in sync
         run: |
           git diff --exit-code internal/server/assets/dashboard.html || {
-            echo "::error::dashboard embed is stale; run 'pnpm --filter mcp-page-bridge-dashboard build' and commit"; exit 1; }
+            echo "::error::dashboard embed is stale; run 'pnpm build:dashboard' and commit"; exit 1; }
 
       - name: Go test
         run: go test ./...
