@@ -1,7 +1,7 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { WebSocketClientTransport } from "@modelcontextprotocol/sdk/client/websocket.js";
-import { startGoBridge, type GoBridge } from "./go-bridge.test-helper.js";
+import { buildBinary, startGoBridge, type GoBridge } from "./go-bridge.test-helper.js";
 
 /**
  * The bridge merges every provider in a partition into ONE tools/list,
@@ -93,6 +93,10 @@ async function waitFor<T>(
     await new Promise((r) => setTimeout(r, 25));
   }
 }
+
+beforeAll(() => {
+  buildBinary();
+}, 300_000);
 
 let bridge: GoBridge | undefined;
 const cleanups: Array<() => void | Promise<void>> = [];

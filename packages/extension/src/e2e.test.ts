@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { WebSocketClientTransport } from "@modelcontextprotocol/sdk/client/websocket.js";
 import { EmbeddedMcpServer, type MinimalTransport } from "./embedded-server.js";
-import { startGoBridge, type GoBridge } from "./go-bridge.test-helper.js";
+import { buildBinary, startGoBridge, type GoBridge } from "./go-bridge.test-helper.js";
 
 /**
  * Full integration against the REAL (Go) bridge: the EmbeddedMcpServer (what
@@ -30,6 +30,10 @@ function textOf(result: unknown): string {
   const content = (result as { content?: Array<{ type: string; text?: string }> }).content ?? [];
   return content.map((c) => (c.type === "text" ? c.text ?? "" : "")).join("");
 }
+
+beforeAll(() => {
+  buildBinary();
+}, 300_000);
 
 let bridge: GoBridge | undefined;
 const cleanups: Array<() => void | Promise<void>> = [];

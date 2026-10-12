@@ -14,8 +14,12 @@ const repoRoot = resolve(fileURLToPath(new URL(".", import.meta.url)), "../../..
 
 let builtBinary: string | undefined;
 
-/** Compile cmd/mcp-page-bridge once per test run (Go's build cache makes this fast). */
-function buildBinary(): string {
+/**
+ * Compile cmd/mcp-page-bridge once per test run. A cold Go build cache (e.g. CI
+ * after go.sum changes) can take well over vitest's default test timeout, so
+ * call this from a `beforeAll` with a generous timeout.
+ */
+export function buildBinary(): string {
   if (builtBinary) return builtBinary;
   const dir = mkdtempSync(join(tmpdir(), "mcp-page-bridge-e2e-"));
   const binary = join(dir, process.platform === "win32" ? "mcp-page-bridge.exe" : "mcp-page-bridge");
