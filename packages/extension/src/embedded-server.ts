@@ -27,7 +27,7 @@ export interface ToolResult {
 }
 
 /** What a tool handler may return. Anything non-ToolResult is coerced to text. */
-export type ToolHandlerReturn = ToolResult | string | number | boolean | null | undefined | object;
+export type ToolHandlerReturn = ToolResult | string | number | boolean | null | undefined | object | typeof DEFERRED_REPLY;
 
 /**
  * MCP tool behavior hints. Mirrors WebMCP's `ToolAnnotations`, which is a subset
@@ -61,7 +61,23 @@ export interface ToolCallOptions {
    * when the transport goes away.
    */
   signal: AbortSignal;
+  /** JSON-RPC id of this tools/call, for a handler that answers via DEFERRED_REPLY. */
+  requestId?: string | number;
+  /** The transport the request arrived on. */
+  transport?: MinimalTransport;
 }
+
+/**
+ * Returned by a handler whose answer will be written by someone else.
+ *
+ * A navigation tool cannot answer from the page it is navigating away from:
+ * the document, and this server with it, is gone before the new page loads.
+ * Such a handler hands its `requestId` to the extension, which writes the
+ * response itself, and returns this so no second reply is sent from here.
+ * It is a private object rather than a registered symbol, so page scripts
+ * cannot obtain it.
+ */
+export const DEFERRED_REPLY: unique symbol = Symbol("mcp-page-bridge.deferredReply");
 
 export type ToolHandler = (
   args: Record<string, unknown>,
@@ -103,7 +119,7 @@ class RpcError extends Error {
   }
 }
 
-function coerceResult(value: ToolHandlerReturn): ToolResult {
+function coerceResult(value: Exclude<ToolHandlerReturn, typeof DEFERRED_REPLY>): ToolResult {
   if (value && typeof value === "object" && Array.isArray((value as ToolResult).content)) {
     return value as ToolResult;
   }
@@ -214,6 +230,7 @@ export class EmbeddedMcpServer {
     const isNotification = message.id === undefined || message.id === null;
     try {
       const result = await this.dispatch(message.method, message.params, message.id);
+      if (result === DEFERRED_REPLY) return;
       if (!isNotification) this.post({ id: message.id, result });
     } catch (error) {
       if (isNotification) return;
@@ -268,7 +285,10 @@ export class EmbeddedMcpServer {
         try {
           const out = await entry.handler((params?.arguments ?? {}) as Record<string, unknown>, {
             signal: controller.signal,
+            requestId: requestId ?? undefined,
+            transport: this.transport,
           });
+          if (out === DEFERRED_REPLY) return DEFERRED_REPLY;
           return coerceResult(out);
         } catch (error) {
           // Tool execution errors are returned as a tool result, not a protocol error.

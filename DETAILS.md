@@ -492,8 +492,8 @@ the same provider (so any page is reachable even without registering WebMCP tool
 `eval` (run JS in the page), `dom_query`, `get_html`, `get_page_text`,
 `get_page_info`, `take_snapshot`, `find`, `click`, `drag`, `type_text`,
 `press_key`, `clear_value`, `set_value`, `scroll`, `wait_for`, `console_logs`
-(captured from `document_start`), `screenshot`, `zoom`, `navigate`, `reload`,
-`list_downloads`, `wait_for_download`.
+(captured from `document_start`), `screenshot`, `zoom`, `navigate`, `go_back`,
+`go_forward`, `reload`, `list_downloads`, `wait_for_download`.
 
 **Snapshot → act → observe.** `take_snapshot` returns a compact text tree of the
 page's interactive and structural elements, each with a stable `uid`:
@@ -521,6 +521,17 @@ uid is routed back to that frame automatically, so embedded checkout widgets,
 editors and ad frames are reachable — the top document keeps bare uids (`e12`).
 Pass `allFrames:false` to snapshot only the top document. Uids go stale on
 navigation and DOM changes; re-snapshot then.
+
+**Shadow DOM.** Web components are walked as rendered: a host's shadow tree
+replaces its light children and slots show their assigned content, so controls
+built with Lit, Stencil, Shoelace and the like appear in `take_snapshot`, `find`,
+`get_page_text` and every locator. Closed shadow roots are reachable too: the
+extension records them as they are attached at `document_start` (top document
+only; sub-frames see open roots). A selector for an element inside a shadow root
+uses `>>>` to cross each boundary — `#card >>> button.buy` — and every
+`selector` argument accepts that form; a plain selector also searches inside
+shadow roots after the light DOM. `apply_css` on such an element adds its patch
+inside that shadow root, since document styles cannot reach it.
 
 **Finding things cheaply.** `take_snapshot` is the complete view; `find` is the
 cheap one. Describe the control in plain words — `"add to cart button"`,
@@ -623,6 +634,23 @@ containers, virtualized lists, maps and carousels — they never see
 `window.scrollTo`. Because a synthetic wheel event does not scroll by itself, the
 engine applies the scroll to the nearest scrollable ancestor afterwards, unless
 the page called `preventDefault()` (which is exactly what wheel-driven UIs do).
+
+**Navigation.** `navigate`, `go_back`, `go_forward` and `reload` wait for the
+page to load (`timeoutMs`, default 15s) and then report where the tab ended up —
+after redirects — plus a snapshot of the new page (`observe`, as for actions).
+They also say when nothing happened (an empty history), when the site could not
+be reached (the browser's error page, returned with `isError`), when the page is
+one the extension may not touch, and when it is still loading at the deadline.
+`navigate` accepts a bare host (`example.com` gets `https://`) and refuses
+`javascript:` URLs.
+
+These are page tools whose page disappears mid-call, so the service worker
+answers them: it keeps the calling page's connection open past its teardown,
+waits for the load, sends the result, and only then lets the new page's tools
+register — under the same name prefix when the site is unchanged. Pages that
+come back from the back/forward cache rejoin too. A call made in the short gap
+while a page re-registers waits for it (up to 2s) instead of failing as an
+unknown tool.
 
 **Waiting.** `wait_for` waits for a selector to appear, for it to disappear
 (`gone:true` — spinners, overlays), or simply for a fixed `durationMs` when the

@@ -116,6 +116,28 @@
       button.full {
         width: 100%;
       }
+      /* Connection actions. Content-sized buttons in a 292px row wrapped their
+         labels onto two lines at different points, so the three came out at
+         three heights and widths. The primary action gets the full row; the
+         secondary ones share the row below equally, and one alone fills it. */
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin: 8px 0;
+      }
+      .actions button {
+        flex: 1 1 0;
+        min-width: 0;
+        min-height: 32px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .actions button.primary {
+        flex-basis: 100%;
+        font-weight: 600;
+      }
       .picker-actions {
         display: grid;
         grid-template-columns: 1fr 1fr;
@@ -301,7 +323,7 @@
     </div>
 
     <p id="tabModeHint" class="muted"></p>
-    <div class="row">
+    <div class="actions">
       <button id="toggle" class="primary" disabled>Connect this tab</button>
       <button id="disconnect" style="display: none">Disconnect</button>
       <button id="openDashboard" style="display: none">Dashboard ↗</button>

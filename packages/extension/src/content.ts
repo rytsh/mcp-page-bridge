@@ -205,6 +205,8 @@ if (!guard[CONTENT_GUARD_KEY]) {
     });
 
     port.onDisconnect.addListener(() => {
+      // A port we dropped on purpose (bfcache freeze, below) is not a fault.
+      if (port !== opened) return;
       port = undefined;
       // Reading it clears it; an invalidated context reports itself here.
       void guarded(() => chrome.runtime.lastError);
@@ -233,6 +235,25 @@ if (!guard[CONTENT_GUARD_KEY]) {
       // SW disconnected; onDisconnect handles teardown + reconnect. An
       // invalidated context lands here too, and `contextAlive` stops the retry.
     }
+  });
+
+  // Back/forward cache. Chrome cuts extension ports when it freezes a page into
+  // the cache, and a restored page gets no fresh content script — so without
+  // this a page reached through go_back keeps its document but has lost its
+  // tools for good. Leave cleanly when frozen; rejoin when shown again.
+  window.addEventListener("pagehide", (event: PageTransitionEvent) => {
+    if (!event.persisted || !port) return;
+    const leaving = port;
+    port = undefined;
+    deactivatePage();
+    try {
+      leaving.disconnect();
+    } catch {
+      // already gone
+    }
+  });
+  window.addEventListener("pageshow", (event: PageTransitionEvent) => {
+    if (event.persisted && !port && contextAlive()) connect();
   });
 
   connect();

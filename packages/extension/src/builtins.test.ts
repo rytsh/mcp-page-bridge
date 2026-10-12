@@ -41,6 +41,7 @@ async function setup(
           savedAs: download ? filename ?? "mcp-page-bridge.png" : undefined,
         };
       }
+      if (action === "navigation") return { text: `Navigated to ${(args as { url?: string }).url ?? "(history)"}` };
       if (action === "cdp") return { ok: true, action: (args as { action?: string } | undefined)?.action };
       return { ok: true };
     },
@@ -109,6 +110,8 @@ describe("built-in tools", () => {
       "clear_design_baseline",
       "screenshot",
       "navigate",
+      "go_back",
+      "go_forward",
       "reload",
       "take_snapshot",
       "find",
@@ -195,6 +198,8 @@ describe("built-in tools", () => {
         "get_page_text",
         "list_downloads",
         "navigate",
+        "go_back",
+        "go_forward",
         "press_key",
         "reload",
         "screenshot",
@@ -394,10 +399,16 @@ describe("built-in tools", () => {
     expect(textOf(res)).toContain("careful");
   });
 
-  it("navigate delegates to the SW via extCall", async () => {
+  it("navigation tools delegate to the SW and report its answer", async () => {
     const { client, calls } = await setup();
-    await client.callTool({ name: "navigate", arguments: { url: "https://x.test" } });
-    expect(calls).toContainEqual(["navigate", { url: "https://x.test" }]);
+    const res = await client.callTool({ name: "navigate", arguments: { url: "https://x.test", observe: "none" } });
+    expect(calls).toContainEqual(["navigation", { kind: "navigate", url: "https://x.test", timeoutMs: undefined, observe: "none" }]);
+    expect(textOf(res)).toContain("Navigated to https://x.test");
+
+    await client.callTool({ name: "go_back", arguments: {} });
+    await client.callTool({ name: "reload", arguments: { bypassCache: true } });
+    expect(calls).toContainEqual(["navigation", { kind: "back", timeoutMs: undefined, observe: "snapshot" }]);
+    expect(calls).toContainEqual(["navigation", { kind: "reload", bypassCache: true, timeoutMs: undefined, observe: "snapshot" }]);
   });
 
   it("screenshot returns an image content block", async () => {

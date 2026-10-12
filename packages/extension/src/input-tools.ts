@@ -25,6 +25,7 @@ import {
   clickPoint,
   clickElement,
   clearElementValue,
+  deepActiveElement,
   dispatchMouseLike,
   dragPointer,
   findElements,
@@ -43,6 +44,7 @@ import {
   parseMouseButton,
   parseTypeSegments,
   pressKeys,
+  queryDeep,
   renderPageSnapshot,
   resolveUid,
   sleep,
@@ -85,7 +87,7 @@ async function resolveTarget(
 }
 
 function activeElement(): Element {
-  return (document.activeElement as Element | null) ?? document.body;
+  return deepActiveElement();
 }
 
 /**
@@ -172,7 +174,7 @@ export function registerInputTools(server: EmbeddedMcpServer, opts: InputToolOpt
       let root: Element | undefined;
       if (typeof args.rootUid === "string" && args.rootUid) root = resolveUid(args.rootUid);
       else if (typeof args.rootSelector === "string" && args.rootSelector) {
-        const found = document.querySelector(args.rootSelector);
+        const found = queryDeep(args.rootSelector);
         if (!found) throw new Error(`No element matches rootSelector: ${args.rootSelector}`);
         root = found;
       }

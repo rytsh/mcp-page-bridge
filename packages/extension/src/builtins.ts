@@ -4,17 +4,28 @@
  * in the MAIN world. Extension-only tools (screenshot, navigate, reload) are
  * delegated to the service worker via `extCall`.
  */
-import type { ContentBlock, EmbeddedMcpServer, ToolResult } from "./embedded-server.js";
+import { DEFERRED_REPLY, type ContentBlock, type EmbeddedMcpServer, type ToolResult } from "./embedded-server.js";
+import type { NavigationKind } from "./navigation.js";
+import { TunnelTransport } from "./tunnel.js";
 import { registerAutomationTools } from "./automation-tools.js";
 import { registerCdpTools } from "./cdp-tools.js";
 import { registerInputTools } from "./input-tools.js";
 import { observeMode, observeProperty, withObservation } from "./observe.js";
 import {
+  accessibleName,
+  allElements,
   clampToolText,
+  composedParent,
+  el,
+  escapeSelectorPart,
   extractPageText,
   hideUidOverlay,
+  isVisibleElement,
   numberArg,
   parseModifiers,
+  queryDeep,
+  querySelectorAllDeep,
+  selectorFor,
   showUidOverlay,
   viewportPointFor,
   wheelAt,
@@ -120,12 +131,6 @@ function cspEvalHint(error: Error): string | undefined {
   ].join(" ");
 }
 
-function el(selector: string): Element {
-  const found = document.querySelector(selector);
-  if (!found) throw new Error(`No element matches selector: ${selector}`);
-  return found;
-}
-
 interface ElementSnapshot {
   selectionId?: string;
   index?: number;
@@ -220,48 +225,8 @@ const selectedElements: SelectedElementEntry[] = [];
 const selectedMarkers = new Map<string, SelectedMarker>();
 let cssPatchSeq = 0;
 const cssPatches = new Map<string, CssPatch>();
+const cssPatchElements = new Map<string, HTMLStyleElement>();
 let latestBaseline: DesignBaseline | undefined;
-
-function escapeSelectorPart(value: string): string {
-  const css = (globalThis as { CSS?: { escape?: (v: string) => string } }).CSS;
-  if (css?.escape) return css.escape(value);
-  return value.replace(/[^a-zA-Z0-9_-]/g, (ch) => `\\${ch}`);
-}
-
-function queryCount(selector: string): number {
-  try {
-    return document.querySelectorAll(selector).length;
-  } catch {
-    return 0;
-  }
-}
-
-function selectorFor(element: Element): string {
-  if (element.id) return `#${escapeSelectorPart(element.id)}`;
-
-  const parts: string[] = [];
-  for (let node: Element | null = element; node && node !== document.documentElement; node = node.parentElement) {
-    const tag = node.tagName.toLowerCase();
-    const classes = [...node.classList].filter(Boolean).slice(0, 3);
-    let part = tag;
-    if (classes.length) {
-      const classSelector = `${tag}.${classes.map(escapeSelectorPart).join(".")}`;
-      if (queryCount(classSelector) <= 5) part = classSelector;
-    }
-
-    const parent = node.parentElement;
-    if (parent) {
-      const siblings = [...parent.children].filter((child) => child.tagName === node.tagName);
-      if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(node) + 1})`;
-    }
-
-    parts.unshift(part);
-    const candidate = parts.join(" > ");
-    if (queryCount(candidate) === 1) return candidate;
-  }
-
-  return parts.join(" > ") || element.tagName.toLowerCase();
-}
 
 function snapshotElement(element: Element): ElementSnapshot {
   const rect = element.getBoundingClientRect();
@@ -336,7 +301,7 @@ function decorateSnapshot(entry: SelectedElementEntry, snapshot: ElementSnapshot
 function syncSelectedEntry(entry: SelectedElementEntry): ElementSnapshot {
   if (entry.element?.isConnected) entry.snapshot = snapshotElement(entry.element);
   else {
-    const found = document.querySelector(entry.snapshot.selector);
+    const found = queryDeep(entry.snapshot.selector);
     if (found) {
       entry.element = found;
       entry.snapshot = snapshotElement(found);
@@ -390,7 +355,7 @@ function positionSelectedMarker(entry: SelectedElementEntry): void {
 function showMarkerForEntry(entry: SelectedElementEntry): ElementSnapshot | undefined {
   const element = entry.element?.isConnected
     ? entry.element
-    : document.querySelector(entry.snapshot.selector) ?? undefined;
+    : queryDeep(entry.snapshot.selector);
   if (!element) return undefined;
 
   entry.element = element;
@@ -554,8 +519,22 @@ function styleHost(): HTMLElement {
   return document.head ?? document.body ?? document.documentElement;
 }
 
+/**
+ * Document styles cannot reach into a shadow root, so a patch for an element
+ * inside one (`host >>> inner`) is rendered with the innermost part as its
+ * selector and appended to that shadow root instead.
+ */
+function cssPatchScope(selector: string | undefined): { selector: string | undefined; host: ParentNode } {
+  if (!selector?.includes(">>>")) return { selector, host: styleHost() };
+  const target = el(selector);
+  const root = target.getRootNode();
+  if (!(root instanceof ShadowRoot)) return { selector: selector.split(">>>").pop()!.trim(), host: styleHost() };
+  return { selector: selector.split(">>>").pop()!.trim(), host: root };
+}
+
 function addCssPatch(selector: string | undefined, css: string, reason: string | undefined): CssPatch {
-  const renderedCss = renderCss(selector, css);
+  const scope = cssPatchScope(selector);
+  const renderedCss = renderCss(scope.selector, css);
   if (!selector && !renderedCss.includes("{")) {
     throw new Error("Provide a selector, pick an element from the popup, or pass complete CSS rules.");
   }
@@ -572,12 +551,15 @@ function addCssPatch(selector: string | undefined, css: string, reason: string |
   const style = document.createElement("style");
   style.setAttribute(CSS_PATCH_ATTR, id);
   style.textContent = `/* mcp-page-bridge ${id}${reason ? `: ${reason}` : ""} */\n${renderedCss}`;
-  styleHost().append(style);
+  scope.host.append(style);
+  cssPatchElements.set(id, style);
   cssPatches.set(id, patch);
   return patch;
 }
 
 export function removeCssPatch(id: string): boolean {
+  cssPatchElements.get(id)?.remove();
+  cssPatchElements.delete(id);
   document.querySelector(`style[${CSS_PATCH_ATTR}="${escapeSelectorPart(id)}"]`)?.remove();
   return cssPatches.delete(id);
 }
@@ -638,45 +620,6 @@ function highlightElement(element: Element, durationMs: number): void {
   }, Math.max(250, durationMs));
 }
 
-function elementText(element: Element): string {
-  return (element.textContent ?? "").trim().replace(/\s+/g, " ");
-}
-
-function labelTextForInput(element: Element): string {
-  if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement)) {
-    return "";
-  }
-  const labels = "labels" in element ? [...(element.labels ?? [])].map(elementText).join(" ") : "";
-  return labels.trim();
-}
-
-function accessibleName(element: Element): string {
-  const ariaLabel = element.getAttribute("aria-label")?.trim();
-  if (ariaLabel) return ariaLabel;
-  const labelledBy = element.getAttribute("aria-labelledby")?.trim();
-  if (labelledBy) {
-    const text = labelledBy
-      .split(/\s+/)
-      .map((id) => document.getElementById(id)?.textContent?.trim() ?? "")
-      .filter(Boolean)
-      .join(" ");
-    if (text) return text;
-  }
-  if (element instanceof HTMLImageElement) return element.alt.trim();
-  if (element instanceof HTMLInputElement) {
-    const label = labelTextForInput(element);
-    if (label) return label;
-    if (["button", "submit", "reset"].includes(element.type)) return element.value.trim();
-    return element.placeholder.trim();
-  }
-  return elementText(element);
-}
-
-function isVisibleElement(element: Element): boolean {
-  const style = getComputedStyle(element);
-  return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity || 1) > 0 && element.getClientRects().length > 0;
-}
-
 function parseRgb(value: string): { r: number; g: number; b: number; a: number } | undefined {
   const match = value.match(/rgba?\(([^)]+)\)/);
   if (!match) return undefined;
@@ -690,7 +633,7 @@ function parseRgb(value: string): { r: number; g: number; b: number; a: number }
 }
 
 function effectiveBackground(element: Element): string {
-  for (let node: Element | null = element; node; node = node.parentElement) {
+  for (let node: Element | null = element; node; node = composedParent(node)) {
     const bg = parseRgb(getComputedStyle(node).backgroundColor);
     if (bg && bg.a > 0) return `rgb(${bg.r}, ${bg.g}, ${bg.b})`;
   }
@@ -729,7 +672,8 @@ function accessibilityAudit(selector: unknown, maxElements: unknown): Record<str
     issues.push({ impact, selector: selectorFor(element), message, detail });
   };
 
-  const all = [root, ...[...root.querySelectorAll("*")].slice(0, max - 1)];
+  const everything = allElements(root);
+  const all = everything.slice(0, max);
   const seenIds = new Map<string, Element>();
   for (const element of all) {
     if (element.id) {
@@ -773,7 +717,7 @@ function accessibilityAudit(selector: unknown, maxElements: unknown): Record<str
 
   return {
     checked: all.length,
-    truncated: root.querySelectorAll("*").length + 1 > max,
+    truncated: everything.length > max,
     counts: issues.reduce<Record<string, number>>((acc, issue) => {
       acc[issue.impact] = (acc[issue.impact] ?? 0) + 1;
       return acc;
@@ -868,7 +812,7 @@ export function registerBuiltins(
     },
     (args) => {
       const limit = Number(args.limit ?? 20);
-      const nodes = [...document.querySelectorAll(String(args.selector))].slice(0, limit);
+      const nodes = querySelectorAllDeep(String(args.selector)).slice(0, limit);
       return json(
         nodes.map((e) => ({
           tag: e.tagName.toLowerCase(),
@@ -1014,7 +958,7 @@ export function registerBuiltins(
       const timeout = numberArg(args.timeoutMs, 5000, 0, 120000);
       const start = Date.now();
       for (;;) {
-        const present = !!document.querySelector(selector);
+        const present = !!queryDeep(selector);
         if (present !== gone) return text(gone ? `${selector} is gone` : `found ${selector}`);
         if (Date.now() - start > timeout) {
           return {
@@ -1656,33 +1600,59 @@ export function registerBuiltins(
     },
   );
 
-  server.registerTool(
-    {
-      name: "navigate",
-      description: "Navigate the tab to a URL.",
-      inputSchema: {
-        type: "object",
-        properties: { url: { type: "string" } },
-        required: ["url"],
+  // Navigation tools hand their reply to the service worker. A cross-document
+  // navigation destroys this page — and this server with it — before the new
+  // page has loaded, so the worker waits for the load and answers the agent
+  // itself, on this provider's connection (see DEFERRED_REPLY).
+  const navigationTool = (
+    name: string,
+    description: string,
+    kind: NavigationKind,
+    properties: Record<string, unknown> = {},
+    required: string[] = [],
+  ): void => {
+    server.registerTool(
+      {
+        name,
+        description,
+        inputSchema: {
+          type: "object",
+          properties: {
+            ...properties,
+            timeoutMs: { type: "number", description: "how long to wait for the page to load (default 15000, max 25000)" },
+            observe: observeProperty("snapshot"),
+          },
+          required,
+        },
       },
-    },
-    async (args) => {
-      await opts.extCall("navigate", { url: String(args.url) });
-      return text(`navigating to ${args.url}`);
-    },
-  );
+      async (args, call) => {
+        const request: Record<string, unknown> = { kind, timeoutMs: args.timeoutMs, observe: observeMode(args) };
+        if (kind === "navigate") request.url = String(args.url ?? "");
+        if (kind === "reload") request.bypassCache = args.bypassCache === true;
+        const transport = call?.transport;
+        if (transport instanceof TunnelTransport && call?.requestId !== undefined) {
+          request.deferred = { providerId: transport.providerId, requestId: call.requestId };
+        }
+        const res = (await opts.extCall("navigation", request)) as { deferred?: boolean; text?: string; isError?: boolean } | undefined;
+        if (res?.deferred) return DEFERRED_REPLY;
+        return { content: [{ type: "text", text: clampToolText(res?.text ?? `${kind} requested`) }], ...(res?.isError ? { isError: true } : {}) };
+      },
+    );
+  };
 
-  server.registerTool(
-    {
-      name: "reload",
-      description: "Reload the tab.",
-      inputSchema: { type: "object", properties: {} },
-    },
-    async () => {
-      await opts.extCall("reload");
-      return text("reloading");
-    },
+  navigationTool(
+    "navigate",
+    "Navigate this tab to a URL and wait for the new page to load. Reports where the tab ended up (after redirects), " +
+      "whether the site could be reached, and appends a snapshot of the new page.",
+    "navigate",
+    { url: { type: "string", description: "absolute URL; a bare host like example.com gets https://" } },
+    ["url"],
   );
+  navigationTool("go_back", "Go back one page in this tab's history and wait for it to load.", "back");
+  navigationTool("go_forward", "Go forward one page in this tab's history and wait for it to load.", "forward");
+  navigationTool("reload", "Reload this tab and wait for it to load.", "reload", {
+    bypassCache: { type: "boolean", description: "ignore the browser cache (hard reload)" },
+  });
 
   // ---- downloads ----
   // A page action that produces a file (export CSV, download report) used to be

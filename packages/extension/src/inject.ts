@@ -52,6 +52,7 @@ import {
   type ExtCall,
 } from "./builtins.js";
 import { bindModelContext, type ModelContextBinding } from "./webmcp.js";
+import { installShadowRootTracking } from "./dom-core.js";
 import { ToolMirror } from "./tool-mirror.js";
 
 interface SdkLikeServer {
@@ -83,6 +84,10 @@ let embeddedGeneration = 0;
 // Install (or adopt) `document.modelContext` before any page script can run, so
 // a page never has to feature-detect or wait for us.
 const modelContext: ModelContextBinding = bindModelContext(document, window);
+
+// Track closed shadow roots before page scripts attach any, so snapshots and
+// locators can reach controls inside them.
+installShadowRootTracking();
 
 // Capture console output from the very start so console_logs has history.
 // Reuse the buffer across (re-)injections so we don't double-hook console.

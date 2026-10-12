@@ -495,6 +495,27 @@ func TestProviderDisconnectRemovesTools(t *testing.T) {
 	})
 }
 
+// A page that navigates drops its provider and registers a fresh one under the
+// same label. A call landing in that gap waits for it instead of failing.
+func TestToolCallWaitsForReregisteringProvider(t *testing.T) {
+	tb := startBridge(t, bridge.Options{}, server.Options{})
+	first := dialProvider(t, tb, fakeProviderOpts{name: "demo", query: "?tabId=1&providerId=a", tools: echoTool("click")})
+	agent := dialAgent(t, tb, "")
+	waitFor(t, "tool appears", func() bool { return contains(listToolNames(t, agent), "demo__click") })
+
+	_ = first.Close()
+	waitFor(t, "tool gone", func() bool { return !contains(listToolNames(t, agent), "demo__click") })
+
+	go func() {
+		time.Sleep(400 * time.Millisecond)
+		dialProvider(t, tb, fakeProviderOpts{name: "demo", query: "?tabId=1&providerId=b", tools: echoTool("click")})
+	}()
+	result := call(t, agent, "tools/call", map[string]any{"name": "demo__click", "arguments": map[string]any{}})
+	if !strings.Contains(string(result), "ok:click") {
+		t.Fatalf("call during re-registration did not reach the new provider: %s", result)
+	}
+}
+
 func TestLabelCollisionDisambiguation(t *testing.T) {
 	tb := startBridge(t, bridge.Options{}, server.Options{})
 	dialProvider(t, tb, fakeProviderOpts{name: "demo", query: "?tabId=1", tools: echoTool("a")})

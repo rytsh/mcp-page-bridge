@@ -25,6 +25,14 @@ import { registerBrowserTools, type BrowserToolDeps } from "./browser-tools.js";
 import { EmbeddedMcpServer } from "./embedded-server.js";
 import { extensionApi, hasDebuggerPermission } from "./extension-api.js";
 import {
+  describeNavigation,
+  navigationTimeout,
+  normalizeNavigationUrl,
+  startNavigation,
+  waitForNavigation,
+  type NavigationTabsApi,
+} from "./navigation.js";
+import {
   LoopbackMcpClient,
   TAB_MODE_DAEMON,
   TAB_MODE_KEY,
@@ -71,6 +79,11 @@ interface SocketEntry {
   wantOpen: boolean;
   attempts: number;
   timer?: ReturnType<typeof setTimeout>;
+  /**
+   * A navigation tool's reply is still owed on this socket. It must outlive
+   * the page that issued the call, so teardown parks it instead of closing it.
+   */
+  held?: boolean;
 }
 
 const MAX_OUTBUF = 200;
@@ -79,6 +92,8 @@ interface TabState {
   tabId: number;
   port: chrome.runtime.Port;
   sockets: Map<string, SocketEntry>;
+  /** The Port disconnected: the document this state belonged to is gone. */
+  gone?: boolean;
   /**
    * Providers this tab announced while serving the web agent.
    *
@@ -1960,6 +1975,22 @@ class PageProviderClient {
   }
 
   /**
+   * Take over settling one in-flight call.
+   *
+   * A navigation tool's page is destroyed before its answer exists, so the
+   * navigation settles the call itself. Removing it from `pending` keeps the
+   * page's teardown from rejecting it with "the tab went away".
+   */
+  adopt(requestId: unknown): ((result: unknown) => void) | undefined {
+    if (typeof requestId !== "number") return undefined;
+    const entry = this.pending.get(requestId);
+    if (!entry) return undefined;
+    this.pending.delete(requestId);
+    clearTimeout(entry.timer);
+    return entry.resolve;
+  }
+
+  /**
    * The page or the tab went away.
    *
    * Pending calls are rejected rather than left hanging: a web agent's turn is
@@ -2015,6 +2046,10 @@ function openSocket(state: TabState, providerId: string, meta: { url?: string; t
 function connectSocket(state: TabState, providerId: string): void {
   const entry = state.sockets.get(providerId);
   if (!entry || !entry.wantOpen || entry.ws) return;
+  // A navigation is still answering on the previous page's socket. Dialling
+  // now would register this page beside it under a suffixed label (`site-2`);
+  // the hold's release connects whatever was queued here.
+  if (navigationHolds.has(state.tabId)) return;
 
   void (async () => {
     let url: string;
@@ -2058,6 +2093,19 @@ function connectSocket(state: TabState, providerId: string): void {
       // belong to the page's MCP server; settle them here.
       if (isBridgeRpcResponse(payload)) {
         settleBridgeRpc(payload);
+        return;
+      }
+      // The page behind a held socket is navigating away and cannot answer.
+      // Say so now rather than let the agent wait out the bridge's deadline.
+      if (entry.held && !state.sockets.has(providerId)) {
+        const request = payload as { id?: unknown; method?: unknown };
+        if (request && request.id !== undefined && request.id !== null && typeof request.method === "string") {
+          ws.send(JSON.stringify({
+            jsonrpc: "2.0",
+            id: request.id,
+            error: { code: -32000, message: "This page is navigating away; call the tools of the page it loads instead." },
+          }));
+        }
         return;
       }
       downRpc(state, providerId, payload);
@@ -2148,6 +2196,9 @@ function closeSocket(state: TabState, providerId: string): void {
   if (!entry) return;
   entry.wantOpen = false;
   if (entry.timer) clearTimeout(entry.timer);
+  state.sockets.delete(providerId);
+  // A navigation reply is still owed on it; the navigation closes it once sent.
+  if (entry.held) return;
   if (entry.ws) {
     try {
       entry.ws.close();
@@ -2155,7 +2206,6 @@ function closeSocket(state: TabState, providerId: string): void {
       // ignore
     }
   }
-  state.sockets.delete(providerId);
   downClose(state, providerId);
 }
 
@@ -2395,6 +2445,7 @@ chrome.runtime.onConnect.addListener((port) => {
   // Replace any stale state for this tab.
   const existing = tabs.get(tabId);
   if (existing) {
+    existing.gone = true;
     closeAllSockets(existing);
     closeAllPageClients(existing, "the page reloaded");
   }
@@ -2406,6 +2457,7 @@ chrome.runtime.onConnect.addListener((port) => {
     void handleUp(state, msg);
   });
   port.onDisconnect.addListener(() => {
+    state.gone = true;
     // Teardown first and synchronously: it must not be deferred behind an
     // await, and it is correct regardless of what the mode turns out to be.
     closeAllSockets(state);
@@ -2513,10 +2565,204 @@ async function handleExt(state: TabState, req: ExtCallPayload): Promise<void> {
     safePost(state, msg);
   };
   try {
-    reply({ id: req.id, result: await runExt(state.tabId, req.action, req.args ?? {}) });
+    const result = req.action === "navigation"
+      ? await runNavigationCall(state, req.args ?? {})
+      : await runExt(state.tabId, req.action, req.args ?? {});
+    reply({ id: req.id, result });
   } catch (error) {
     reply({ id: req.id, error: error instanceof Error ? error.message : String(error) });
   }
+}
+
+// ---- navigation that answers from the far side --------------------------------
+//
+// `navigate` / `go_back` / `go_forward` / `reload` are page tools, but their
+// page is destroyed before the answer exists. So the page hands over the
+// JSON-RPC id of the call and the worker answers it: it keeps that provider's
+// connection to the consumer open past the page's teardown, waits for the new
+// page to load, and writes the tool result itself. Until then the new page's
+// own connection is queued, so it takes over the same label instead of
+// registering beside the old one as `site-2`.
+
+/** Tabs with a navigation reply still owed (value: how many). */
+const navigationHolds = new Map<number, number>();
+
+type NavigationReply = (result: { content: Array<Record<string, unknown>>; isError?: boolean }) => void;
+
+interface DeferredNavigation {
+  reply: NavigationReply;
+  /** Called once the reply is out, whatever happened. */
+  release(): void;
+}
+
+/** Claim the issuing provider's connection, or undefined when it cannot be held. */
+function holdNavigationReply(state: TabState, deferred: unknown): DeferredNavigation | undefined {
+  if (!deferred || typeof deferred !== "object") return undefined;
+  const { providerId, requestId } = deferred as { providerId?: unknown; requestId?: unknown };
+  if (typeof providerId !== "string" || requestId === undefined || requestId === null) return undefined;
+
+  const client = state.pageClients.get(providerId);
+  if (client) {
+    const resolve = client.adopt(requestId);
+    if (!resolve) return undefined;
+    return { reply: (result) => resolve(result), release: () => undefined };
+  }
+
+  const entry = state.sockets.get(providerId);
+  const ws = entry?.ws;
+  if (!entry || !ws || ws.readyState !== WebSocket.OPEN) return undefined;
+  entry.held = true;
+  const tabId = state.tabId;
+  navigationHolds.set(tabId, (navigationHolds.get(tabId) ?? 0) + 1);
+
+  return {
+    reply: (result) => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ jsonrpc: "2.0", id: requestId, result }));
+    },
+    release: () => {
+      entry.held = false;
+      const stillLive = state.sockets.get(providerId) === entry;
+      const finish = (): void => {
+        const left = (navigationHolds.get(tabId) ?? 1) - 1;
+        if (left > 0) {
+          navigationHolds.set(tabId, left);
+          return;
+        }
+        navigationHolds.delete(tabId);
+        // The page that loaded meanwhile announced its providers into a queue.
+        const current = tabs.get(tabId);
+        if (current) for (const id of current.sockets.keys()) connectSocket(current, id);
+      };
+      if (stillLive) {
+        finish(); // same-document navigation: the page and its socket carry on
+        return;
+      }
+      // Let the bridge drop the old provider before the new one registers, so
+      // the label is free to be reused.
+      let done = false;
+      const settle = (): void => {
+        if (done) return;
+        done = true;
+        setTimeout(finish, 50);
+      };
+      ws.addEventListener("close", settle, { once: true });
+      setTimeout(settle, 1000);
+      try {
+        ws.close();
+      } catch {
+        settle();
+      }
+    },
+  };
+}
+
+/** What sits in the tab now: a scriptable page, the browser's error page, or a page extensions may not touch. */
+async function probeTabPage(tabId: number): Promise<{ errorPage?: boolean; restricted?: boolean }> {
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, func: () => true });
+    return {};
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return /error page/i.test(message) ? { errorPage: true } : { restricted: true };
+  }
+}
+
+async function performNavigation(state: TabState, args: Record<string, unknown>): Promise<{ content: Array<Record<string, unknown>>; isError?: boolean }> {
+  const tabId = state.tabId;
+  const kind = (["navigate", "back", "forward", "reload"] as const).find((k) => k === args.kind);
+  if (!kind) throw new Error(`unknown navigation kind: ${String(args.kind)}`);
+  const timeoutMs = navigationTimeout(args.timeoutMs);
+  const fromUrl = (await chrome.tabs.get(tabId)).url ?? "";
+  const requestedUrl = kind === "navigate" ? normalizeNavigationUrl(args.url) : undefined;
+
+  try {
+    await startNavigation(chrome.tabs as unknown as NavigationTabsApi, tabId, { kind, url: requestedUrl, bypassCache: args.bypassCache === true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const historyStep = kind === "back" || kind === "forward";
+    // Chrome's tabs.goBack/goForward skip history entries created without a
+    // user gesture — which is every entry an agent creates — and then report
+    // there is nowhere to go. The page's own history has no such filter, and
+    // its Navigation API says up front whether a step is possible.
+    const scripted = historyStep && /history/i.test(message)
+      ? await chrome.scripting
+          .executeScript({
+            target: { tabId },
+            func: (delta: number) => {
+              const nav = (globalThis as { navigation?: { canGoBack: boolean; canGoForward: boolean } }).navigation;
+              if (nav && !(delta < 0 ? nav.canGoBack : nav.canGoForward)) return false;
+              history.go(delta);
+              return true;
+            },
+            args: [kind === "back" ? -1 : 1],
+          })
+          .then((results) => results[0]?.result === true, () => false)
+      : false;
+    if (!scripted) {
+      if (historyStep && /history/i.test(message)) {
+        const tab = await chrome.tabs.get(tabId);
+        const text = describeNavigation({ kind, fromUrl, url: tab.url ?? fromUrl, title: tab.title ?? "", navigated: false, timedOut: false, elapsedMs: 0, newDocument: false });
+        return { content: [{ type: "text", text }] };
+      }
+      return { content: [{ type: "text", text: `${kind} failed: ${message}` }], isError: true };
+    }
+  }
+
+  const waited = await waitForNavigation(chrome.tabs as unknown as NavigationTabsApi, tabId, {
+    fromUrl,
+    timeoutMs,
+    unloaded: () => state.gone === true || tabs.get(tabId) !== state,
+  });
+  const newDocument = state.gone === true || tabs.get(tabId) !== state;
+  const page = waited.navigated && !waited.timedOut ? await probeTabPage(tabId) : {};
+  const report = { ...waited, kind, fromUrl, requestedUrl, newDocument, ...page };
+  const content: Array<Record<string, unknown>> = [{ type: "text", text: describeNavigation(report) }];
+
+  const observe = String(args.observe ?? "snapshot");
+  const scriptable = waited.navigated && !page.errorPage && !page.restricted;
+  if (scriptable && (observe === "snapshot" || observe === "both")) {
+    try {
+      const snap = (await runFrameSnapshot(tabId, { maxNodes: 120 })) as { text?: string };
+      if (snap?.text) content.push({ type: "text", text: `Page after the navigation (fresh uids):\n${snap.text}` });
+    } catch (error) {
+      content.push({ type: "text", text: `snapshot after the navigation failed: ${error instanceof Error ? error.message : String(error)}` });
+    }
+  }
+  if (waited.navigated && (observe === "screenshot" || observe === "both")) {
+    try {
+      const shot = (await runExt(tabId, "screenshot", {})) as { dataUrl?: string };
+      const dataUrl = shot?.dataUrl ?? "";
+      const data = dataUrl.includes(",") ? dataUrl.slice(dataUrl.indexOf(",") + 1) : dataUrl;
+      if (data) content.push({ type: "image", data, mimeType: "image/png" });
+    } catch (error) {
+      content.push({ type: "text", text: `screenshot after the navigation failed: ${error instanceof Error ? error.message : String(error)}` });
+    }
+  }
+  return { content, ...(page.errorPage ? { isError: true } : {}) };
+}
+
+/**
+ * Entry point for the page's navigation tools. With a deferred reply the page
+ * is answered `{deferred: true}` straight away and the navigation runs on;
+ * otherwise (a transport the worker cannot hold) it runs inline, which is
+ * still right for a same-document change.
+ */
+async function runNavigationCall(state: TabState, args: Record<string, unknown>): Promise<unknown> {
+  const held = holdNavigationReply(state, args.deferred);
+  if (!held) {
+    const result = await performNavigation(state, args);
+    return { text: result.content.filter((c) => c.type === "text").map((c) => String(c.text)).join("\n\n"), isError: result.isError };
+  }
+  void (async () => {
+    try {
+      held.reply(await performNavigation(state, args));
+    } catch (error) {
+      held.reply({ content: [{ type: "text", text: `navigation failed: ${error instanceof Error ? error.message : String(error)}` }], isError: true });
+    } finally {
+      held.release();
+    }
+  })();
+  return { deferred: true };
 }
 
 async function runExt(
@@ -2600,12 +2846,6 @@ async function runExt(
       });
       return { markers: results.reduce((sum, r) => sum + (typeof r.result === "number" ? r.result : 0), 0) };
     }
-    case "navigate":
-      await chrome.tabs.update(tabId, { url: String(args.url) });
-      return { ok: true };
-    case "reload":
-      await chrome.tabs.reload(tabId);
-      return { ok: true };
     case "resizeWindow": {
       const tab = await chrome.tabs.get(tabId);
       if (tab.windowId === undefined) throw new Error("tab has no windowId");

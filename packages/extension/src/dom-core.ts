@@ -48,9 +48,164 @@ export function json(value: unknown): ToolResult {
 // ---- tiny helpers -------------------------------------------------------------
 
 export function el(selector: string): Element {
-  const found = document.querySelector(selector);
+  const found = queryDeep(selector);
   if (!found) throw new Error(`No element matches selector: ${selector}`);
   return found;
+}
+
+// ---- shadow DOM ---------------------------------------------------------------
+//
+// Web components (Lit, Stencil, Shoelace, Salesforce, YouTube, ...) render their
+// controls inside shadow roots, which `children`, `querySelector` and
+// `elementFromPoint` all stop at. Every walker and query below goes through
+// these helpers so such controls are visible and actionable like any other.
+
+const CLOSED_ROOTS_KEY = "__mcpPageBridgeClosedShadowRoots";
+
+function closedRoots(): WeakMap<Element, ShadowRoot> | undefined {
+  return (globalThis as unknown as Record<string, WeakMap<Element, ShadowRoot> | undefined>)[CLOSED_ROOTS_KEY];
+}
+
+/**
+ * Record closed shadow roots as they are attached. `element.shadowRoot` is null
+ * for `mode: "closed"`, so without this hook the controls inside them stay
+ * unreachable. Must run at document_start, before page scripts attach roots.
+ */
+export function installShadowRootTracking(): void {
+  const host = globalThis as unknown as Record<string, unknown>;
+  if (host[CLOSED_ROOTS_KEY] || typeof Element === "undefined" || typeof Element.prototype.attachShadow !== "function") return;
+  const roots = new WeakMap<Element, ShadowRoot>();
+  Object.defineProperty(host, CLOSED_ROOTS_KEY, { value: roots, enumerable: false });
+  const original = Element.prototype.attachShadow;
+  Object.defineProperty(Element.prototype, "attachShadow", {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value: function attachShadow(this: Element, init: ShadowRootInit): ShadowRoot {
+      const root = original.call(this, init);
+      if (init?.mode === "closed") roots.set(this, root);
+      return root;
+    },
+  });
+}
+
+/** The element's shadow root, open or (when tracked) closed. */
+export function shadowRootOf(element: Element): ShadowRoot | undefined {
+  return element.shadowRoot ?? closedRoots()?.get(element) ?? undefined;
+}
+
+function isShadowRoot(node: Node | null | undefined): node is ShadowRoot {
+  return typeof ShadowRoot !== "undefined" && node instanceof ShadowRoot;
+}
+
+function isSlot(element: Element): element is HTMLSlotElement {
+  return typeof HTMLSlotElement !== "undefined" && element instanceof HTMLSlotElement;
+}
+
+/**
+ * Element children in the rendered (flattened) tree: a host's shadow content
+ * replaces its light children, and a slot expands to whatever is assigned to it
+ * (or its fallback content when nothing is).
+ */
+export function renderedChildren(element: Element): Element[] {
+  if (isSlot(element)) {
+    const assigned = element.assignedElements({ flatten: true });
+    return assigned.length ? assigned : [...element.children];
+  }
+  const shadow = shadowRootOf(element);
+  return shadow ? [...shadow.children] : [...element.children];
+}
+
+/** Like `renderedChildren`, but including text nodes. */
+export function renderedChildNodes(element: Element): Node[] {
+  if (isSlot(element)) {
+    const assigned = element.assignedNodes({ flatten: true });
+    return assigned.length ? assigned : [...element.childNodes];
+  }
+  const shadow = shadowRootOf(element);
+  return shadow ? [...shadow.childNodes] : [...element.childNodes];
+}
+
+/** Parent in the composed tree: assigned slot, then light parent, then shadow host. */
+export function composedParent(element: Element): Element | null {
+  if (element.assignedSlot) return element.assignedSlot;
+  if (element.parentElement) return element.parentElement;
+  const root = element.getRootNode();
+  return isShadowRoot(root) ? root.host : null;
+}
+
+/** `ancestor.contains(node)` across shadow boundaries. */
+export function composedContains(ancestor: Element, node: Element): boolean {
+  for (let current: Element | null = node; current; current = composedParent(current)) {
+    if (current === ancestor) return true;
+  }
+  return false;
+}
+
+/** The focused element, descending into shadow roots. */
+export function deepActiveElement(): Element {
+  let active = (document.activeElement as Element | null) ?? document.body;
+  for (let depth = 0; depth < 32; depth += 1) {
+    const inner = shadowRootOf(active)?.activeElement;
+    if (!inner || inner === active) break;
+    active = inner;
+  }
+  return active;
+}
+
+/** Innermost element at a point of `scope`, descending into shadow roots. */
+function deepElementFromPoint(scope: Document | ShadowRoot, x: number, y: number): Element | null {
+  let element = scope.elementFromPoint(x, y);
+  for (let depth = 0; element && depth < 32; depth += 1) {
+    const shadow = shadowRootOf(element);
+    const inner = shadow?.elementFromPoint(x, y);
+    if (!inner || inner === element) break;
+    element = inner;
+  }
+  return element;
+}
+
+/** Every shadow root inside `scope`, nested ones included. */
+function shadowRootsUnder(scope: ParentNode): ShadowRoot[] {
+  const out: ShadowRoot[] = [];
+  for (const element of allElements(scope)) {
+    const shadow = shadowRootOf(element);
+    if (shadow) out.push(shadow);
+  }
+  return out;
+}
+
+function matchDeep(scope: ParentNode, selector: string): Element[] {
+  const out = [...scope.querySelectorAll(selector)];
+  for (const shadow of shadowRootsUnder(scope)) out.push(...shadow.querySelectorAll(selector));
+  return out;
+}
+
+/**
+ * `querySelectorAll` that pierces shadow roots. Light-DOM matches come first.
+ * `host >>> inner` scopes `inner` to the shadow roots of `host` matches, which
+ * is the form `selectorFor` produces for elements inside a shadow root.
+ * Combinators other than `>>>` still cannot cross a shadow boundary.
+ */
+export function querySelectorAllDeep(selector: string, root: ParentNode = document): Element[] {
+  const parts = selector.split(">>>").map((part) => part.trim());
+  if (parts.some((part) => !part)) throw new Error(`Invalid selector: ${selector}`);
+  let scopes: ParentNode[] = [root];
+  let matches: Element[] = [];
+  for (const part of parts) {
+    matches = [...new Set(scopes.flatMap((scope) => matchDeep(scope, part)))];
+    scopes = matches.map(shadowRootOf).filter((shadow): shadow is ShadowRoot => !!shadow);
+  }
+  return matches;
+}
+
+/** First match of `querySelectorAllDeep`, with a light-DOM fast path. */
+export function queryDeep(selector: string, root: ParentNode = document): Element | undefined {
+  if (!selector.includes(">>>")) {
+    const light = root.querySelector(selector);
+    if (light) return light;
+  }
+  return querySelectorAllDeep(selector, root)[0];
 }
 
 export function sleep(ms: number): Promise<void> {
@@ -88,15 +243,26 @@ export function selectorLiteral(value: string): string {
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
-function queryCount(selector: string): number {
+function queryCount(selector: string, scope: ParentNode = document): number {
   try {
-    return document.querySelectorAll(selector).length;
+    return scope.querySelectorAll(selector).length;
   } catch {
     return 0;
   }
 }
 
+/**
+ * A selector that finds `element` again. Inside a shadow root it is
+ * `<host selector> >>> <selector within the root>`, which `el` / `queryDeep`
+ * resolve.
+ */
 export function selectorFor(element: Element): string {
+  const root = element.getRootNode();
+  if (isShadowRoot(root)) return `${selectorFor(root.host)} >>> ${scopedSelectorFor(element, root)}`;
+  return scopedSelectorFor(element, document);
+}
+
+function scopedSelectorFor(element: Element, scope: Document | ShadowRoot): string {
   if (element.id) return `#${escapeSelectorPart(element.id)}`;
 
   const parts: string[] = [];
@@ -106,7 +272,7 @@ export function selectorFor(element: Element): string {
     let part = tag;
     if (classes.length) {
       const classSelector = `${tag}.${classes.map(escapeSelectorPart).join(".")}`;
-      if (queryCount(classSelector) <= 5) part = classSelector;
+      if (queryCount(classSelector, scope) <= 5) part = classSelector;
     }
 
     const parent = node.parentElement;
@@ -117,13 +283,27 @@ export function selectorFor(element: Element): string {
 
     parts.unshift(part);
     const candidate = parts.join(" > ");
-    if (queryCount(candidate) === 1) return candidate;
+    if (queryCount(candidate, scope) === 1) return candidate;
   }
 
   return parts.join(" > ") || element.tagName.toLowerCase();
 }
 
+/** Text as rendered: shadow content instead of light children, slots resolved. */
+function composedText(node: Node): string {
+  if (node.nodeType === Node.TEXT_NODE) return node.nodeValue ?? "";
+  if (!(node instanceof Element)) return "";
+  if (node.tagName === "SCRIPT" || node.tagName === "STYLE" || node.tagName === "TEMPLATE") return "";
+  return renderedChildNodes(node).map(composedText).join(" ");
+}
+
 export function elementText(element: Element): string {
+  // textContent is native and fast, and right for plain light DOM. Elements
+  // that are or sit in a component need the composed text: a shadow <button>
+  // whose label is a slotted light-DOM string has an empty textContent.
+  if (shadowRootOf(element) || isSlot(element) || isShadowRoot(element.getRootNode())) {
+    return normalizeText(composedText(element));
+  }
   return normalizeText(element.textContent ?? "");
 }
 
@@ -151,9 +331,10 @@ export function accessibleName(element: Element): string {
   if (ariaLabel) return ariaLabel;
   const labelledBy = element.getAttribute("aria-labelledby")?.trim();
   if (labelledBy) {
+    const scope = element.getRootNode() as Document | ShadowRoot;
     const labelledText = labelledBy
       .split(/\s+/)
-      .map((id) => document.getElementById(id)?.textContent?.trim() ?? "")
+      .map((id) => (scope.getElementById?.(id) ?? document.getElementById(id))?.textContent?.trim() ?? "")
       .filter(Boolean)
       .join(" ");
     if (labelledText) return labelledText;
@@ -171,6 +352,17 @@ export function accessibleName(element: Element): string {
 export function isVisibleElement(element: Element): boolean {
   const style = getComputedStyle(element);
   return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity || 1) > 0 && element.getClientRects().length > 0;
+}
+
+/**
+ * Whether a tree walk should descend into `element`. Slots and
+ * `display: contents` elements have no box of their own (so
+ * `isVisibleElement` is false) while their rendered children still do.
+ */
+function isRenderedContainer(element: Element): boolean {
+  if (isVisibleElement(element)) return true;
+  const style = getComputedStyle(element);
+  return style.display === "contents" && style.visibility !== "hidden" && Number(style.opacity || 1) > 0;
 }
 
 export function isDisabledElement(element: Element): boolean {
@@ -219,10 +411,23 @@ export function elementRole(element: Element): string | undefined {
   return element.getAttribute("role")?.trim() || implicitRole(element);
 }
 
+/**
+ * Every element under `root` in document order, including the contents of
+ * shadow roots (each host is followed by its shadow tree, then its light
+ * children).
+ */
 export function allElements(root: ParentNode = document): Element[] {
   const base = root instanceof Document ? root.documentElement : root;
-  if (base instanceof Element) return [base, ...base.querySelectorAll("*")];
-  return [...root.querySelectorAll("*")];
+  const out: Element[] = [];
+  const visit = (element: Element): void => {
+    out.push(element);
+    const shadow = shadowRootOf(element);
+    if (shadow) for (const child of shadow.children) visit(child);
+    for (const child of element.children) visit(child);
+  };
+  if (base instanceof Element) visit(base);
+  else if (base) for (const child of (base as ParentNode).children) visit(child);
+  return out;
 }
 
 export function inputLabels(element: Element): string[] {
@@ -331,8 +536,8 @@ function snapshotLine(uid: string, element: Element): string {
 /** Collect interesting elements, lifting children of boring wrappers. */
 function buildSnapshotEntries(element: Element, includeHidden: boolean): SnapshotEntry[] {
   const entries: SnapshotEntry[] = [];
-  for (const child of element.children) {
-    if (!includeHidden && !isVisibleElement(child)) continue;
+  for (const child of renderedChildren(element)) {
+    if (!includeHidden && !isRenderedContainer(child)) continue;
     const sub = buildSnapshotEntries(child, includeHidden);
     if (isSnapshotInteractive(child) || isSnapshotStructural(child)) {
       entries.push({ element: child, children: sub });
@@ -539,10 +744,10 @@ export function locatorMatches(args: Record<string, unknown>, rootArg?: ParentNo
 
   const root = rootArg ?? document;
   if (selector) {
-    matches = [...root.querySelectorAll(selector)];
+    matches = querySelectorAllDeep(selector, root);
   } else if (args.testId !== undefined) {
     const id = String(args.testId ?? "");
-    matches = [...root.querySelectorAll(`[data-testid=${selectorLiteral(id)}], [data-test=${selectorLiteral(id)}], [data-cy=${selectorLiteral(id)}]`)];
+    matches = querySelectorAllDeep(`[data-testid=${selectorLiteral(id)}], [data-test=${selectorLiteral(id)}], [data-cy=${selectorLiteral(id)}]`, root);
   } else if (args.role !== undefined) {
     const role = String(args.role ?? "").toLowerCase();
     matches = allElements(root).filter((element) => elementRole(element)?.toLowerCase() === role);
@@ -552,7 +757,7 @@ export function locatorMatches(args: Record<string, unknown>, rootArg?: ParentNo
     matches = allElements(root).filter((element) => element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement).filter((element) => textMatches((element as HTMLInputElement | HTMLTextAreaElement).placeholder, args.placeholder, exact));
   } else if (args.text !== undefined) {
     const visibleMatches = allElements(root).filter((element) => isVisibleElement(element) && textMatches(elementText(element), args.text, exact));
-    matches = visibleMatches.filter((element) => ![...element.children].some((child) => textMatches(elementText(child), args.text, exact)));
+    matches = visibleMatches.filter((element) => !renderedChildren(element).some((child) => textMatches(elementText(child), args.text, exact)));
     if (!matches.length) matches = visibleMatches;
   } else {
     throw new Error("Provide uid (from take_snapshot), selector, text, role, label, testId, or placeholder.");
@@ -693,7 +898,7 @@ export function findElements(query: string, opts: { limit?: number; includeHidde
   const limit = numberArg(opts.limit, 20, 1, 50);
   const includeHidden = opts.includeHidden === true;
 
-  const scored: { element: Element; score: number }[] = [];
+  const scored: { element: Element; score: number; order: number }[] = [];
   for (const element of allElements(opts.root ?? document)) {
     if (element.tagName === "SCRIPT" || element.tagName === "STYLE" || element.tagName === "HEAD") continue;
     const interactive = isSnapshotInteractive(element);
@@ -721,19 +926,20 @@ export function findElements(query: string, opts: { limit?: number; includeHidde
     if (rect.top >= 0 && rect.top < innerHeight) score += 6;
     // Prefer the smallest element carrying the name (the button, not its wrapper).
     if (rect.width * rect.height > innerWidth * innerHeight * 0.5) score -= 12;
-    if (score > 0) scored.push({ element, score });
+    if (score > 0) scored.push({ element, score, order: scored.length });
   }
 
   scored.sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score;
-    // Equal scores: keep document order so results read top-to-bottom.
-    return a.element.compareDocumentPosition(b.element) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+    // Equal scores: keep document order (allElements order, which also spans
+    // shadow trees) so results read top-to-bottom.
+    return a.order - b.order;
   });
 
   // Drop ancestors whose only claim is a descendant's text.
   const kept: { element: Element; score: number }[] = [];
   for (const candidate of scored) {
-    if (kept.some((other) => other.element !== candidate.element && candidate.element.contains(other.element) && other.score >= candidate.score)) continue;
+    if (kept.some((other) => other.element !== candidate.element && composedContains(candidate.element, other.element) && other.score >= candidate.score)) continue;
     kept.push(candidate);
     if (kept.length >= limit) break;
   }
@@ -791,13 +997,13 @@ export function extractPageText(opts: { root?: Element; includeHidden?: boolean;
     if (!(node instanceof Element)) return;
     if (TEXT_SKIP_TAGS.has(node.tagName)) return;
     if (node.getAttribute("aria-hidden") === "true") return;
-    if (!includeHidden && !isVisibleElement(node)) return;
+    if (!includeHidden && !isRenderedContainer(node)) return;
 
     const block = TEXT_BLOCK_TAGS.has(node.tagName);
     const heading = /^H[1-6]$/.test(node.tagName);
     if (block) flush();
     if (heading) line += `${"#".repeat(Number(node.tagName[1]))} `;
-    for (const child of node.childNodes) {
+    for (const child of renderedChildNodes(node)) {
       walk(child);
       if (out.join("\n").length > max) return;
     }
@@ -857,8 +1063,8 @@ function coveringElement(element: Element): Element | undefined {
   if (rect.width <= 0 || rect.height <= 0) return undefined;
   const point = centerPoint(element);
   if (point.x < 0 || point.y < 0 || point.x > innerWidth || point.y > innerHeight) return undefined;
-  const top = document.elementFromPoint(point.x, point.y);
-  if (!top || top === element || element.contains(top)) return undefined;
+  const top = deepElementFromPoint(document, point.x, point.y);
+  if (!top || top === element || composedContains(element, top)) return undefined;
   return top;
 }
 
@@ -1115,7 +1321,7 @@ function dispatchClickSequenceNativeTail(element: Element, point: { x: number; y
  * rather than the `<iframe>` box.
  */
 export function elementAtPoint(x: number, y: number): { element: Element; localX: number; localY: number; framePath: string[] } {
-  let element = document.elementFromPoint(x, y);
+  let element = deepElementFromPoint(document, x, y);
   if (!element) throw new Error(`No element at viewport point (${x}, ${y}).`);
   let localX = x;
   let localY = y;
@@ -1132,7 +1338,7 @@ export function elementAtPoint(x: number, y: number): { element: Element; localX
     const rect = element.getBoundingClientRect();
     localX -= rect.left;
     localY -= rect.top;
-    const next = inner.elementFromPoint(localX, localY);
+    const next = deepElementFromPoint(inner, localX, localY);
     framePath.push(selectorFor(element));
     if (!next) break;
     element = next;
@@ -1154,7 +1360,7 @@ export function clickPoint(x: number, y: number, opts: ClickOptions | number = {
 
 /** Nearest ancestor that can actually scroll in the requested direction. */
 function scrollableAncestor(element: Element | null, deltaX: number, deltaY: number): Element | undefined {
-  for (let node: Element | null = element; node; node = node.parentElement) {
+  for (let node: Element | null = element; node; node = composedParent(node)) {
     const style = getComputedStyle(node);
     const canY = /(auto|scroll|overlay)/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 1;
     const canX = /(auto|scroll|overlay)/.test(style.overflowX) && node.scrollWidth > node.clientWidth + 1;
@@ -1884,7 +2090,7 @@ export async function pressKeys(
   keys: string,
   opts: { delayMs?: number; repeat?: number; holdMs?: number } = {},
 ): Promise<KeyPressResult[]> {
-  const element = target ?? (document.activeElement as Element | null) ?? document.body;
+  const element = target ?? deepActiveElement();
   if (target) focusElement(target);
   const chords = parseKeySequence(keys);
   const repeat = numberArg(opts.repeat, 1, 1, 50);

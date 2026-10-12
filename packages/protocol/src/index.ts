@@ -209,6 +209,8 @@ export const BUILTIN_TOOL_NAMES = [
   "screenshot",
   "zoom",
   "navigate",
+  "go_back",
+  "go_forward",
   "reload",
   "list_downloads",
   "wait_for_download",

@@ -427,11 +427,8 @@ func (b *Bridge) callTool(ctx context.Context, profileKey string, params json.Ra
 		})
 	}
 
-	b.mu.Lock()
-	route, ok := b.toolRoutes[routeKey(profileKey, req.Name)]
-	provider := b.providers[route.providerID]
-	b.mu.Unlock()
-	if !ok || provider == nil {
+	route, provider, ok := b.awaitToolRoute(ctx, profileKey, req.Name)
+	if !ok {
 		return toolError(fmt.Sprintf("Unknown or disconnected tool: %s", req.Name))
 	}
 
@@ -452,6 +449,38 @@ func toolError(text string) (json.RawMessage, *mcpwire.RPCError) {
 		"content": []map[string]any{{"type": "text", "text": text}},
 		"isError": true,
 	})
+}
+
+// reconnectGrace is how long a call to an unknown tool waits for it to appear.
+//
+// A page that navigates (or reloads) drops its provider and registers a new one
+// under the same label a moment later. An agent that calls the next tool
+// straight after `navigate` returned lands in that gap; waiting briefly turns a
+// spurious "unknown tool" into a normal call. A name that never existed costs
+// the agent this delay once, which is why it stays short.
+const reconnectGrace = 2 * time.Second
+
+// awaitToolRoute resolves a namespaced tool, waiting up to reconnectGrace for
+// a provider that is (re)registering.
+func (b *Bridge) awaitToolRoute(ctx context.Context, profileKey, name string) (nameRoute, *Provider, bool) {
+	deadline := time.Now().Add(reconnectGrace)
+	for {
+		b.mu.Lock()
+		route, ok := b.toolRoutes[routeKey(profileKey, name)]
+		provider := b.providers[route.providerID]
+		b.mu.Unlock()
+		if ok && provider != nil {
+			return route, provider, true
+		}
+		if time.Now().After(deadline) {
+			return nameRoute{}, nil, false
+		}
+		select {
+		case <-ctx.Done():
+			return nameRoute{}, nil, false
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }
 
 func (b *Bridge) getPrompt(ctx context.Context, profileKey string, params json.RawMessage) (json.RawMessage, *mcpwire.RPCError) {
