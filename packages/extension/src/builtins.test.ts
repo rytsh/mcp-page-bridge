@@ -80,6 +80,8 @@ describe("built-in tools", () => {
     for (const n of [
       "eval",
       "dom_query",
+      "annotate_page",
+      "clear_annotations",
       "get_page_info",
       "click",
       "set_value",
@@ -186,6 +188,8 @@ describe("built-in tools", () => {
     const names = (await client.listTools()).tools.map((t) => t.name).sort();
     expect(names).toEqual(
       [
+        "annotate_page",
+        "clear_annotations",
         "clear_value",
         "click",
         "console_logs",

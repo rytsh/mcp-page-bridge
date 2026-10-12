@@ -449,11 +449,39 @@ Every enabled tab already exposes a lean set of built-in tools (`take_snapshot`,
   `fullPage:true`, `refs:true` (uid labels drawn on the page) and `maxWidth`, and
   every result states how image pixels map back to the CSS pixels `click{x,y}`
   expects.
+- **Visual guidance on the page.** `annotate_page` highlights, circles or outlines
+  elements and adds plain-text notes with arrows. The click-through overlay
+  follows scroll/layout changes without modifying the page. `clear_annotations`
+  removes it; the person can also press **Escape**. Available with core or
+  automation tools, without enabling Design tools or Trusted input.
 - **Follows the file.** `wait_for_download` returns the on-disk path of the file
   a page just exported, so your agent can read it with its own filesystem tools.
 
 Optional dashboard: open `http://127.0.0.1:8787/` while the bridge is running.
 Use **Shutdown bridge** there when you want to stop the background daemon.
+
+For example, call the page's namespaced `annotate_page` tool with:
+
+```json
+{
+  "annotations": [
+    { "id": "checkout", "selector": "#checkout-button", "style": "circle", "color": "#ef4444", "text": "Click here to check out" },
+    { "selector": "input[name=email]", "style": "highlight", "text": "Enter your email address here" }
+  ]
+}
+```
+
+Use a selector matching exactly one element, or `uid` from `take_snapshot`/`find`
+instead of `selector`. Annotations replace the previous guide by default;
+`replace:false` adds annotations or updates existing ones by `id`. Optional
+`durationMs` expires this batch (default `0`: persistent). Clear individual items
+with `clear_annotations {"ids":["checkout"]}`, or omit `ids` to clear all.
+Up to 50 annotations can be active. Frame uids are not supported in this first
+version. Full-document navigation, disabling the bridge or changing its toolset
+clears them. Same-document SPA navigation keeps annotations on surviving targets;
+removed targets are automatically cleared. Notes must fit the current viewport
+without truncation; shorten the text if the tool reports that it cannot fit.
+If resizing makes a note too large to fit, its annotation is removed.
 
 > **Browser on another device?** Start the bridge with
 > `--host 0.0.0.0 --token <secret>` and set the same Host/IP + token in the

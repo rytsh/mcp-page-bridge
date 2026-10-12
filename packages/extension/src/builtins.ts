@@ -10,6 +10,7 @@ import { TunnelTransport } from "./tunnel.js";
 import { registerAutomationTools } from "./automation-tools.js";
 import { registerCdpTools } from "./cdp-tools.js";
 import { registerInputTools } from "./input-tools.js";
+import { registerAnnotationTools } from "./annotation-tools.js";
 import { observeMode, observeProperty, withObservation } from "./observe.js";
 import {
   accessibleName,
@@ -1026,6 +1027,7 @@ export function registerBuiltins(
   // tools off and only enables the automation toolset.
   if (opts.coreTools !== false || opts.automationTools) {
     registerInputTools(server, { extCall: opts.extCall, trustedInput: opts.trustedInput });
+    registerAnnotationTools(server);
   }
 
   if (opts.automationTools) registerAutomationTools(server, { extCall: opts.extCall });

@@ -33,6 +33,7 @@ import {
   type ExtResultPayload,
 } from "mcp-page-bridge-protocol";
 import { EmbeddedMcpServer } from "./embedded-server.js";
+import { clearAnnotations } from "./annotation-tools.js";
 import { TunnelTransport, allTransports, getTransport } from "./tunnel.js";
 import { teardownAutomationTools } from "./automation-tools.js";
 import {
@@ -182,6 +183,7 @@ function activateAll(): void {
 
 function deactivateAll(): void {
   activated = false;
+  clearAnnotations();
   // Restore any page patches the automation tools installed (fetch/XHR hooks,
   // alert/confirm/prompt overrides) so a disabled tab no longer affects the page.
   teardownAutomationTools();
@@ -216,6 +218,7 @@ const toolMirror = new ToolMirror({
  * set matches, and re-registers the page's WebMCP tools onto the new one.
  */
 function rebuildEmbeddedForToolset(): void {
+  clearAnnotations();
   const server = retireEmbedded();
   if (!server) {
     if (activated) toolMirror.schedule();

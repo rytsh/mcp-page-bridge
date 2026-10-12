@@ -4,7 +4,7 @@
  * bundled into a service worker / content script as well as Node.
  */
 
-export const MCP_PAGE_BRIDGE_VERSION = "0.4.1";
+export const MCP_PAGE_BRIDGE_VERSION = "0.4.2";
 
 /** WebSocket subprotocol negotiated between the browser client and the bridge. */
 export const WS_SUBPROTOCOL = "mcp";
@@ -171,6 +171,8 @@ export const BUILTIN_TOOL_NAMES = [
   "wait_for",
   "get_html",
   "get_page_text",
+  "annotate_page",
+  "clear_annotations",
   // Core input primitives (shared by the core and automation toolsets)
   "take_snapshot",
   "find",
