@@ -40,6 +40,7 @@ async function copyStatic() {
   if (firefox) {
     delete manifest.minimum_chrome_version;
     delete manifest.optional_permissions;
+    manifest.permissions = manifest.permissions.filter((permission) => permission !== "debugger");
     manifest.background = { scripts: ["background.js"] };
     // Firefox's default MV3 CSP upgrades ws:// to wss://, breaking local bridges.
     manifest.content_security_policy = {

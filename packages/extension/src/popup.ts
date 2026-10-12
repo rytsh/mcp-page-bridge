@@ -288,7 +288,7 @@ function render(status: Status): void {
     ? `Advanced CDP tools enabled${status.cdpAttached ? " and attached" : ""}. Chrome shows a debugging banner while attached.`
     : status.cdpDebuggerPermission
       ? "Debugger permission granted. Enable only when you need CDP-level control."
-      : "Requires optional debugger permission. Chrome shows a debugging banner while attached.";
+      : "Debugger permission missing. Reload or reinstall the updated extension and approve Chrome's permissions.";
   if (!debuggerSupported) {
     el<HTMLParagraphElement>("cdpHint").textContent = "Unavailable in Firefox: this browser does not support the debugger API.";
     el<HTMLParagraphElement>("trustedInputHint").textContent = "Unavailable in Firefox: trusted input requires the debugger API. Input uses synthetic DOM events (isTrusted:false).";
@@ -432,7 +432,8 @@ function selectionEditFocused(): boolean {
 async function ensureDebuggerPermission(): Promise<boolean> {
   if (!supportsDebugger()) return false;
   const request: chrome.permissions.Permissions = { permissions: ["debugger"] };
-  if (await chrome.permissions.contains(request)) return true;
+  // Request before any await so Chrome still sees the checkbox's user gesture.
+  // Already-granted permissions resolve without showing another prompt.
   return chrome.permissions.request(request);
 }
 

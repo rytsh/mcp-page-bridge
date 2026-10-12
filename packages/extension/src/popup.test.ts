@@ -6,7 +6,7 @@ afterEach(() => {
   vi.resetModules();
 });
 
-async function popup(enabled = false) {
+async function popup(enabled = false, debuggerGranted = true) {
   vi.useFakeTimers();
   const fields = new Map<string, any>();
   const field = (id: string): any => {
@@ -24,7 +24,11 @@ async function popup(enabled = false) {
     webAgents: [{ tabId: 7, origin: "https://at.example", name: "AT Chat", title: "First chat", tabs: 0 }],
   };
   const sendMessage = vi.fn(async (req) => req.type === "getStatus" ? status : { ok: true });
-  vi.stubGlobal("chrome", { runtime: { sendMessage }, tabs: { query: async () => [{ id: 1 }] } });
+  const requestPermission = vi.fn(async () => debuggerGranted);
+  vi.stubGlobal("chrome", {
+    runtime: { sendMessage }, tabs: { query: async () => [{ id: 1 }] },
+    permissions: { request: requestPermission },
+  });
   await import("./popup.js");
   await vi.waitFor(() => expect(field("tabModeHint").textContent).not.toBe(""));
   const change = async (id: string, value: string) => {
@@ -32,8 +36,27 @@ async function popup(enabled = false) {
     field(id).handlers.get("change")({ target: field(id) });
     await vi.advanceTimersByTimeAsync(0);
   };
-  return { field, status, sendMessage, change };
+  return { field, status, sendMessage, change, requestPermission };
 }
+
+it.each(["trustedInput", "cdpTools"])("requests debugger permission synchronously when enabling %s", async (id) => {
+  const { field, sendMessage, requestPermission } = await popup();
+  field(id).checked = true;
+  field(id).handlers.get("change")({ target: field(id) });
+  // No microtask or permission preflight may precede the request: Chrome needs
+  // the user gesture from the checkbox change to still be active.
+  expect(requestPermission).toHaveBeenCalledWith({ permissions: ["debugger"] });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "setSettings", [id]: true }));
+});
+
+it("keeps trusted input off when debugger permission is denied", async () => {
+  const { field, sendMessage, change } = await popup(false, false);
+  field("trustedInput").checked = true;
+  await change("trustedInput", "");
+  expect(field("trustedInput").checked).toBe(false);
+  expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "setSettings", trustedInput: false }));
+});
 
 it("defaults to Daemon, keeps Agent selected across polls and connects to the selected chat", async () => {
   const { field, sendMessage, change } = await popup();

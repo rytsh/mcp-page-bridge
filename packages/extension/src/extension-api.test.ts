@@ -1,7 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readFile } from "node:fs/promises";
 import { extensionApi, hasDebuggerPermission, supportsDebugger } from "./extension-api.js";
 
 afterEach(() => vi.unstubAllGlobals());
+
+it("declares debugger as an install-time permission because Chrome forbids it as optional", async () => {
+  const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8"));
+  expect(manifest.permissions).toContain("debugger");
+  expect(manifest.optional_permissions ?? []).not.toContain("debugger");
+});
 
 describe("extension API compatibility", () => {
   it("selects Firefox's promise namespace instead of callback-only chrome", async () => {

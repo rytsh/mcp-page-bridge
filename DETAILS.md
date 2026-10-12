@@ -563,7 +563,7 @@ never the user's whole tab list — and each is reported once.
 
 **Screenshots.** `screenshot` captures the visible tab by default;
 `fullPage:true` captures the whole scrollable page through CDP (needs the
-optional debugger permission — enable Trusted input or the CDP toolset — and
+debugger permission (granted when installing the Chrome extension) and
 falls back to the viewport with a note otherwise). `refs:true` labels every
 element from the last snapshot with its uid, in every frame, captures, and
 removes the labels again, so the image and the uid tree line up.
@@ -668,8 +668,9 @@ so `event.isTrusted` is `false` — which some pages (canvas apps, bot-protected
 forms, a few component libraries) ignore. Turn on **Trusted input (real
 key/mouse events)** in the popup and `click`/`type_text`/`press_key` dispatch
 through CDP `Input.dispatchMouseEvent`/`Input.dispatchKeyEvent` in the service
-worker instead. It requests the same optional `debugger` permission the CDP
-toolset uses, but without adding any tools to the catalog.
+worker instead. It uses the same install-time `debugger` permission the CDP
+toolset uses, but without adding any tools to the catalog. Chrome does not allow
+`debugger` as an optional permission; trusted input itself remains off by default.
 
 Because CDP delivers input to the *focused* tab, each trusted action briefly
 activates the target tab (and its window) and restores the previous focus
@@ -735,7 +736,7 @@ truncation note, so one oversized `eval` result or CDP payload can't swallow the
 agent's context.
 
 For browser-protocol-level work, the popup has a separate **Advanced CDP tools**
-switch. It requests Chrome's optional `debugger` permission only when enabled.
+switch. It uses Chrome's install-time `debugger` permission, but stays off until enabled.
 Chrome shows a debugging banner while CDP is attached; turning the switch off or
 calling `cdp_detach` detaches it. CDP tools include `cdp_status`, `cdp_attach`,
 `cdp_detach`, `cdp_send_command`, `cdp_list_events`, `cdp_clear_events`,

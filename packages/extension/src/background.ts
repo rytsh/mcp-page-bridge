@@ -132,11 +132,11 @@ let designTools = false;
 // Opt-in Playwright-like automation helpers. Also gated to keep the default
 // catalog small and the permission surface explicit in the popup.
 let automationTools = false;
-// Optional Chrome DevTools Protocol tools. Requires the optional "debugger"
+// Optional Chrome DevTools Protocol tools. Requires the install-time "debugger"
 // permission and is kept off by default because Chrome shows a debugging banner.
 let cdpTools = false;
 // Optional trusted input: click/type_text/press_key dispatch real Input.* events
-// through CDP instead of synthetic DOM events. Also requires the optional
+// through CDP instead of synthetic DOM events. Also requires the install-time
 // "debugger" permission; the page falls back to synthetic events when it fails.
 let trustedInput = false;
 
@@ -927,7 +927,7 @@ async function enableCdpDomain(tabId: number, domain: string): Promise<void> {
 
 async function ensureCdpAttached(tabId: number, domains: string[] = []): Promise<CdpSession> {
   if (!(await hasDebuggerPermission())) {
-    throw new Error("CDP tools require the optional debugger permission. Enable Advanced CDP tools in the popup.");
+    throw new Error("CDP tools require debugger permission. Reload or reinstall the updated extension.");
   }
   ensureCdpListeners();
   const session = cdpSession(tabId);
@@ -1178,7 +1178,7 @@ async function restoreFocusAfterInput(state: FocusState): Promise<void> {
 /** Attach (if needed), run the CDP work with the tab focused, then clean up. */
 async function withTrustedInputSession<T>(tabId: number, run: () => Promise<T>): Promise<T> {
   if (!(await hasDebuggerPermission())) {
-    throw new Error("Trusted input requires the optional debugger permission. Re-enable it in the popup.");
+    throw new Error("Trusted input requires debugger permission. Reload or reinstall the updated extension.");
   }
   const wasAttached = cdpSessions.get(tabId)?.attached === true;
   await ensureCdpAttached(tabId);
@@ -1203,7 +1203,7 @@ function canUseDebugger(): boolean {
  */
 async function captureFullPage(tabId: number): Promise<string> {
   if (!(await hasDebuggerPermission())) {
-    throw new Error("Full-page capture requires the optional debugger permission.");
+    throw new Error("Full-page capture requires debugger permission.");
   }
   const wasAttached = cdpSessions.get(tabId)?.attached === true;
   await ensureCdpAttached(tabId, ["Page"]);
@@ -2773,7 +2773,7 @@ async function runExt(
   switch (action) {
     case "screenshot": {
       // Full page needs CDP (captureVisibleTab only ever returns the viewport),
-      // so it rides on the same optional debugger permission as trusted input.
+      // so it rides on the same debugger permission as trusted input.
       let dataUrl: string | undefined;
       let fullPage = false;
       let fullPageError: string | undefined;
@@ -2786,7 +2786,7 @@ async function runExt(
             fullPageError = error instanceof Error ? error.message : String(error);
           }
         } else {
-          fullPageError = "fullPage needs the optional debugger permission — enable Trusted input or Advanced CDP tools in the popup.";
+          fullPageError = "fullPage needs debugger permission — reload or reinstall the updated extension.";
         }
       }
       if (!dataUrl) {

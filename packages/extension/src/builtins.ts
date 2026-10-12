@@ -1466,7 +1466,7 @@ export function registerBuiltins(
     {
       name: "screenshot",
       description:
-        "PNG screenshot of the tab. fullPage:true captures the whole scrollable page (needs the optional debugger permission), " +
+        "PNG screenshot of the tab. fullPage:true captures the whole scrollable page (needs debugger permission), " +
         "refs:true labels every element from the last snapshot with its uid so the image and the uid tree line up, " +
         "download:true also saves it to Downloads. " +
         "The result states the image size and the CSS-pixel viewport it maps to, so coordinates you read off the image " +
