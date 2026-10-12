@@ -431,7 +431,7 @@ function selectionEditFocused(): boolean {
 
 async function ensureDebuggerPermission(): Promise<boolean> {
   if (!supportsDebugger()) return false;
-  const request = { permissions: ["debugger"] };
+  const request: chrome.permissions.Permissions = { permissions: ["debugger"] };
   if (await chrome.permissions.contains(request)) return true;
   return chrome.permissions.request(request);
 }

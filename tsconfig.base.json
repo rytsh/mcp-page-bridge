@@ -13,9 +13,8 @@
     "noEmit": true,
     "forceConsistentCasingInFileNames": true,
     "types": [],
-    "baseUrl": ".",
     "paths": {
-      "mcp-page-bridge-protocol": ["packages/protocol/src/index.ts"]
+      "mcp-page-bridge-protocol": ["./packages/protocol/src/index.ts"]
     }
   }
 }

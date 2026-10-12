@@ -863,7 +863,7 @@ async function syncTabGroups(): Promise<void> {
 
     if (!tabGroupsEnabled) {
       const toUngroup = liveTabs.filter((t) => t.groupId !== TAB_GROUP_NONE && managed.has(t.groupId)).map((t) => t.tabId);
-      if (toUngroup.length) await chrome.tabs.ungroup(toUngroup).catch(() => undefined);
+      if (toUngroup.length) await chrome.tabs.ungroup(toUngroup as [number, ...number[]]).catch(() => undefined);
       await saveGroupMap({});
       return;
     }
